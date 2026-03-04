@@ -1,0 +1,6 @@
+{$SATSGATE_HOSTNAME} {
+  encode zstd gzip
+
+  # Reverse-proxy satsgate (FastAPI)
+  reverse_proxy satsgate:8000
+}

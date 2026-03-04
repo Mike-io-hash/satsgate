@@ -1,0 +1,15 @@
+{
+  "name": "satsgate",
+  "version": "1.0.0",
+  "description": "MVP en Python (FastAPI) para probar el flujo **L402 (HTTP 402 + invoice + preimage)**.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@getalby/sdk": "^7.0.0"
+  }
+}

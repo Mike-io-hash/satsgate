@@ -1,0 +1,56 @@
+services:
+  satsgate:
+    build: .
+    restart: unless-stopped
+    environment:
+      # Core
+      SATSGATE_MACAROON_SECRET: ${SATSGATE_MACAROON_SECRET}
+
+      # Wallet (for topups)
+      SATSGATE_WALLET_MODE: ${SATSGATE_WALLET_MODE:-lnaddr}
+      SATSGATE_LIGHTNING_ADDRESS: ${SATSGATE_LIGHTNING_ADDRESS}
+
+      # DB
+      SATSGATE_DB_PATH: /data/satsgate.sqlite3
+
+      # Demo endpoint pricing (optional)
+      SATSGATE_PRICE_SATS: ${SATSGATE_PRICE_SATS:-10}
+      SATSGATE_TOKEN_TTL_SECONDS: ${SATSGATE_TOKEN_TTL_SECONDS:-600}
+
+      # Rate limiting
+      SATSGATE_RL_ENABLED: ${SATSGATE_RL_ENABLED:-1}
+      SATSGATE_RL_WINDOW_SECONDS: ${SATSGATE_RL_WINDOW_SECONDS:-60}
+      SATSGATE_RL_MAX_ANON: ${SATSGATE_RL_MAX_ANON:-60}
+      SATSGATE_RL_MAX_AUTH: ${SATSGATE_RL_MAX_AUTH:-600}
+
+      # Disable dev endpoints in production
+      SATSGATE_DEV_MODE: ${SATSGATE_DEV_MODE:-0}
+    volumes:
+      - satsgate_data:/data
+    networks:
+      - internal
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - satsgate
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SATSGATE_HOSTNAME: ${SATSGATE_HOSTNAME}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - internal
+
+volumes:
+  satsgate_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  internal:

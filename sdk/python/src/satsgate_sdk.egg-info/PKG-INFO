@@ -1,0 +1,49 @@
+Metadata-Version: 2.4
+Name: satsgate-sdk
+Version: 0.1.0
+Summary: Python client SDK for satsgate (L402 paywall + prepaid credits)
+Project-URL: Homepage, https://example.invalid/satsgate
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: httpx>=0.27.0
+
+# satsgate-sdk (Python)
+
+SDK minimal para integrar **satsgate** (L402 paywall + créditos prepago) en tu backend.
+
+## Instalación (local, desde este repo)
+
+```bash
+cd projects/satsgate
+python3 -m venv .venv
+source .venv/bin/activate
+
+pip install -e sdk/python
+```
+
+## Ejemplo de uso
+
+```python
+from satsgate_sdk import SatsgateClient
+
+sg = SatsgateClient(base_url="http://127.0.0.1:8000", api_key="sg_...")
+
+# 1) Registrar payee (1 vez)
+sg.set_payee("burlybakery53@walletofsatoshi.com")
+
+# 2) Generar challenge para tu recurso
+ch = sg.paywall_challenge(resource="demo/test", amount_sats=10, memo="mi servicio")
+
+# Vos respondés a tu usuario final con HTTP 402 + header:
+#   WWW-Authenticate: ch.www_authenticate
+# y opcionalmente JSON con ch.invoice y ch.macaroon.
+
+# 3) Cuando tu usuario final reintenta con Authorization: L402 ...
+# lo verificás así:
+res = sg.paywall_verify(authorization_header="L402 <macaroon>:<preimage>", expected_resource="demo/test")
+print(res)
+```
+
+## Nota sobre cache
+`paywall_verify(..., use_cache=True)` guarda en memoria el `payment_hash` hasta `valid_until`.
+Eso evita llamar al server en cada request repetido de la misma sesión.
