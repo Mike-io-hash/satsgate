@@ -73,6 +73,12 @@ source .venv/bin/activate
 pip install -e sdk/python
 ```
 
+If you want to run the included FastAPI examples locally:
+
+```bash
+pip install fastapi uvicorn[standard]
+```
+
 FastAPI examples:
 
 - Minimal: `sdk/python/examples/fastapi_demo/main.py`

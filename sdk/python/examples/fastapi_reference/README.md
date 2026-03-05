@@ -14,7 +14,12 @@ From the repo root:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+
+# SDK
 pip install -e sdk/python
+
+# only needed to run this FastAPI example
+pip install fastapi uvicorn[standard]
 
 # for the optional NWC payer script
 npm install
