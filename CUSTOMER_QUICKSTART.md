@@ -73,9 +73,10 @@ source .venv/bin/activate
 pip install -e sdk/python
 ```
 
-A full FastAPI example is included at:
+FastAPI examples:
 
-- `sdk/python/examples/fastapi_demo/main.py`
+- Minimal: `sdk/python/examples/fastapi_demo/main.py`
+- Reference integration: `sdk/python/examples/fastapi_reference/`
 
 ## Usage & automation
 
