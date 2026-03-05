@@ -98,7 +98,7 @@ async def rate_limit_mw(request: Request, call_next):
     return await call_next(request)
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health() -> dict:
     return {
         "ok": True,
@@ -111,7 +111,7 @@ def health() -> dict:
     }
 
 
-@app.get("/.well-known/satsgate.json")
+@app.api_route("/.well-known/satsgate.json", methods=["GET", "HEAD"])
 def well_known_satsgate(request: Request) -> dict:
     """Machine-readable manifest for discovery (agents/frameworks).
 

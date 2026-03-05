@@ -49,6 +49,10 @@ def _auth(macaroon: str, preimage_hex: str) -> str:
 
 
 def test_manifest_and_plans(client):
+    # Uptime monitors may use HEAD
+    assert client.head("/health").status_code == 200
+    assert client.head("/.well-known/satsgate.json").status_code == 200
+
     r = client.get("/.well-known/satsgate.json")
     assert r.status_code == 200
     data = r.json()
