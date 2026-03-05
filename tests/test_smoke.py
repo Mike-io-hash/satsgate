@@ -1,11 +1,24 @@
+from __future__ import annotations
+
 import importlib
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
 
-def _fresh_import_app(tmp_path):
+def _fresh_import_app(tmp_path: Path):
+    """Import the FastAPI app with a clean module cache.
+
+    Important: satsgate loads config at import-time, so we set env vars before importing.
+    """
+
+    # Ensure repository root is importable as a module root.
+    repo_root = Path(__file__).resolve().parents[1]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
     # Configure env for a fully-local test run
     os.environ["SATSGATE_WALLET_MODE"] = "mock"
     os.environ["SATSGATE_DEV_MODE"] = "1"
