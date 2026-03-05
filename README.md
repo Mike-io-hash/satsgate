@@ -1,5 +1,7 @@
 # satsgate (MVP)
 
+[![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+
 `satsgate` is a Python (FastAPI) service that provides:
 
 - **L402 paywall primitives** (invoice + macaroon + preimage verification)
