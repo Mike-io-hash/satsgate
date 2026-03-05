@@ -26,6 +26,9 @@ def _fresh_import_app(tmp_path: Path):
     os.environ["SATSGATE_MACAROON_SECRET"] = "test-secret"
     os.environ["SATSGATE_DB_PATH"] = str(tmp_path / "satsgate_test.sqlite3")
 
+    # Enable operator endpoints for tests
+    os.environ["SATSGATE_ADMIN_TOKEN"] = "test-admin-token"
+
     # Ensure a clean import (config is loaded at import time)
     for name in list(sys.modules.keys()):
         if name == "app" or name.startswith("app."):
@@ -62,6 +65,21 @@ def test_manifest_and_plans(client):
     r2 = client.get("/v1/plans")
     assert r2.status_code == 200
     assert r2.json()["ok"] is True
+
+
+def test_admin_overview_requires_token(client):
+    r1 = client.get("/v1/admin/overview")
+    assert r1.status_code == 401
+
+    r2 = client.get("/v1/admin/overview", headers={"X-Admin-Token": "wrong"})
+    assert r2.status_code == 401
+
+    r3 = client.get("/v1/admin/overview", headers={"X-Admin-Token": "test-admin-token"})
+    assert r3.status_code == 200
+    data = r3.json()
+    assert data["ok"] is True
+    assert "overview" in data
+    assert "totals" in data["overview"]
 
 
 def test_topup_flow_creates_api_key_and_credits(client):

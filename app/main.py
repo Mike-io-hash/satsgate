@@ -25,8 +25,11 @@ from .l402 import (
 from .mock_wallet import MockWallet
 from .plans import get_plan, list_plans, recommend_purchase
 from .wallet_lnaddr import LightningAddressWallet
+from .admin import router as admin_router
 
 app = FastAPI(title="satsgate", version="0.2.0")
+
+app.include_router(admin_router)
 
 
 def _get_wallet() -> Any:
