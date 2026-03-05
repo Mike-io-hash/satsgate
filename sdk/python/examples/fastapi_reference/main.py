@@ -81,13 +81,37 @@ def premium(authorization: str | None = Header(default=None)):
     same payment/session.
     """
 
-    # 1) No Authorization => create challenge
+    # 1) Missing Authorization => create challenge
     if not authorization:
-        ch = sg().paywall_challenge(
-            resource=PAYWALL_RESOURCE,
-            amount_sats=PAYWALL_AMOUNT_SATS,
-            memo=PAYWALL_MEMO,
-        )
+        try:
+            ch = sg().paywall_challenge(
+                resource=PAYWALL_RESOURCE,
+                amount_sats=PAYWALL_AMOUNT_SATS,
+                memo=PAYWALL_MEMO,
+            )
+        except SatsgateError as e:
+            # Common onboarding issue: customer has not registered a payee Lightning Address yet.
+            if getattr(e, "data", None) and e.data.get("error") == "client_payee_not_set":
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "ok": False,
+                        "error": "paywall_not_configured",
+                        "hint": "Configure your satsgate payee first: POST /v1/client/payee",
+                        "satsgate": e.data,
+                    },
+                )
+
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "ok": False,
+                    "error": "satsgate_error",
+                    "details": str(e),
+                    "satsgate": getattr(e, "data", None),
+                },
+            )
+
         return JSONResponse(
             status_code=402,
             headers={"WWW-Authenticate": ch.www_authenticate},
@@ -110,7 +134,13 @@ def premium(authorization: str | None = Header(default=None)):
             use_cache=True,
         )
     except SatsgateError as e:
-        return JSONResponse(status_code=401, content={"ok": False, "error": str(e)})
+        status = int(e.status_code) if getattr(e, "status_code", None) else 401
+        if status < 400 or status > 599:
+            status = 401
+        return JSONResponse(
+            status_code=status,
+            content={"ok": False, "error": "verification_failed", "details": str(e), "satsgate": getattr(e, "data", None)},
+        )
 
     # vr.charged_credits is 1 on the first successful verification for a payment_hash.
     # It may be 0 on cache hits.

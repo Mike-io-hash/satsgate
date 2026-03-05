@@ -11,7 +11,12 @@ import httpx
 
 
 class SatsgateError(RuntimeError):
-    pass
+    """Raised when satsgate returns a non-OK response."""
+
+    def __init__(self, message: str, *, status_code: int | None = None, data: dict | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.data = data
 
 
 @dataclass(frozen=True)
@@ -116,9 +121,22 @@ class SatsgateClient:
         return {"X-Api-Key": self.api_key}
 
     def _ok_or_raise(self, r: httpx.Response) -> dict:
-        data = r.json()
+        try:
+            data = r.json()
+        except Exception:
+            raise SatsgateError(
+                f"request failed ({r.status_code}): non-json response",
+                status_code=r.status_code,
+                data=None,
+            )
+
         if r.status_code != 200 or not data.get("ok"):
-            raise SatsgateError(f"request failed ({r.status_code}): {data}")
+            raise SatsgateError(
+                f"request failed ({r.status_code}): {data}",
+                status_code=r.status_code,
+                data=data,
+            )
+
         return data
 
     # --- Billing / account ---

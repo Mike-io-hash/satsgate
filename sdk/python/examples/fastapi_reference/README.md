@@ -36,7 +36,20 @@ export PAYWALL_AMOUNT_SATS=10
 export PAYWALL_MEMO="Premium access"
 ```
 
-Run the customer service:
+## One-time: configure your payee
+
+Before this example can create Lightning invoices, your satsgate customer account must have a payee set.
+
+```bash
+curl -s -X POST https://api.satsgate.org/v1/client/payee \
+  -H 'Content-Type: application/json' \
+  -H 'X-Api-Key: sg_...YOUR_API_KEY...' \
+  -d '{"payee_lightning_address":"yourname@yourdomain.com"}'
+```
+
+If the payee is not set, this example will return HTTP 503 with `paywall_not_configured`.
+
+## Run the customer service
 
 ```bash
 cd sdk/python/examples/fastapi_reference
