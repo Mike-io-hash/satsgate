@@ -87,6 +87,8 @@ def sha256_hex_of_hexbytes(preimage_hex: str) -> str:
 
 
 class SatsgateClient:
+    """Minimal synchronous client for the satsgate API."""
+
     def __init__(
         self,
         *,
@@ -101,32 +103,38 @@ class SatsgateClient:
         # Simple cache: payment_hash -> valid_until
         self._verified: dict[str, int] = {}
 
+    def __enter__(self) -> "SatsgateClient":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+        self.close()
+
     def close(self) -> None:
         self._http.close()
 
     def _headers(self) -> dict[str, str]:
         return {"X-Api-Key": self.api_key}
 
-    def list_plans(self) -> list[dict]:
-        r = self._http.get(f"{self.base_url}/v1/plans")
+    def _ok_or_raise(self, r: httpx.Response) -> dict:
         data = r.json()
         if r.status_code != 200 or not data.get("ok"):
-            raise SatsgateError(f"list_plans failed: {data}")
+            raise SatsgateError(f"request failed ({r.status_code}): {data}")
+        return data
+
+    # --- Billing / account ---
+
+    def list_plans(self) -> list[dict]:
+        r = self._http.get(f"{self.base_url}/v1/plans")
+        data = self._ok_or_raise(r)
         return data["plans"]
 
     def balance(self) -> dict:
         r = self._http.get(f"{self.base_url}/v1/balance", headers=self._headers())
-        data = r.json()
-        if r.status_code != 200 or not data.get("ok"):
-            raise SatsgateError(f"balance failed: {data}")
-        return data
+        return self._ok_or_raise(r)
 
     def get_client(self) -> dict:
         r = self._http.get(f"{self.base_url}/v1/client", headers=self._headers())
-        data = r.json()
-        if r.status_code != 200 or not data.get("ok"):
-            raise SatsgateError(f"get_client failed: {data}")
-        return data
+        return self._ok_or_raise(r)
 
     def set_payee(self, lightning_address: str) -> dict:
         r = self._http.post(
@@ -134,10 +142,55 @@ class SatsgateClient:
             headers={**self._headers(), "Content-Type": "application/json"},
             json={"payee_lightning_address": lightning_address},
         )
-        data = r.json()
-        if r.status_code != 200 or not data.get("ok"):
-            raise SatsgateError(f"set_payee failed: {data}")
-        return data
+        return self._ok_or_raise(r)
+
+    # --- Reporting ---
+
+    def ledger(self, *, limit: int = 50, before_id: int | None = None) -> dict:
+        params: dict[str, Any] = {"limit": int(limit)}
+        if before_id is not None:
+            params["before_id"] = int(before_id)
+
+        r = self._http.get(f"{self.base_url}/v1/ledger", headers=self._headers(), params=params)
+        return self._ok_or_raise(r)
+
+    def usage_summary(self, *, since_hours: int = 24) -> dict:
+        r = self._http.get(
+            f"{self.base_url}/v1/usage/summary",
+            headers=self._headers(),
+            params={"since_hours": int(since_hours)},
+        )
+        return self._ok_or_raise(r)
+
+    def usage_daily(self, *, days: int = 30) -> dict:
+        r = self._http.get(
+            f"{self.base_url}/v1/usage/daily",
+            headers=self._headers(),
+            params={"days": int(days)},
+        )
+        return self._ok_or_raise(r)
+
+    def usage_forecast(
+        self,
+        *,
+        lookback_hours: int = 24,
+        buffer_days: int = 7,
+        max_topups: int = 3,
+        trigger_hours: int = 24,
+    ) -> dict:
+        r = self._http.get(
+            f"{self.base_url}/v1/usage/forecast",
+            headers=self._headers(),
+            params={
+                "lookback_hours": int(lookback_hours),
+                "buffer_days": int(buffer_days),
+                "max_topups": int(max_topups),
+                "trigger_hours": int(trigger_hours),
+            },
+        )
+        return self._ok_or_raise(r)
+
+    # --- Paywall ---
 
     def paywall_challenge(
         self,
@@ -161,9 +214,7 @@ class SatsgateClient:
             headers={**self._headers(), "Content-Type": "application/json"},
             json=body,
         )
-        data = r.json()
-        if r.status_code != 200 or not data.get("ok"):
-            raise SatsgateError(f"paywall_challenge failed: {data}")
+        data = self._ok_or_raise(r)
 
         return Challenge(
             resource=data["resource"],
@@ -219,12 +270,14 @@ class SatsgateClient:
 
         r = self._http.post(
             f"{self.base_url}/v1/paywall/verify",
-            headers={**self._headers(), "Content-Type": "application/json", "Authorization": authorization_header},
+            headers={
+                **self._headers(),
+                "Content-Type": "application/json",
+                "Authorization": authorization_header,
+            },
             json={"expected_resource": expected_resource, "cost_credits": int(cost_credits)},
         )
-        data = r.json()
-        if r.status_code != 200 or not data.get("ok"):
-            raise SatsgateError(f"paywall_verify failed: {data}")
+        data = self._ok_or_raise(r)
 
         vu = int(data.get("valid_until") or 0)
         if vu:

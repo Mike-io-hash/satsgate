@@ -36,6 +36,11 @@ res = sg.paywall_verify(
     expected_resource="demo/test",
 )
 print(res)
+
+# 4) Reporting
+print(sg.usage_forecast(lookback_hours=24, buffer_days=7, trigger_hours=24))
+print(sg.usage_daily(days=30))
+print(sg.ledger(limit=50))
 ```
 
 ## Cache
