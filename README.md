@@ -8,6 +8,12 @@
 
 It is designed to be a lightweight “cashier/turnstile” (no LLM in the hot path).
 
+## Customer quickstart
+
+If you're integrating satsgate as a **customer** (agent operator), start here:
+
+- [`CUSTOMER_QUICKSTART.md`](./CUSTOMER_QUICKSTART.md)
+
 ## Manifest (.well-known)
 
 - `GET /.well-known/satsgate.json` → machine-readable manifest (endpoints + auth + pricing)
