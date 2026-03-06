@@ -30,6 +30,8 @@ See [`STATUS.md`](./STATUS.md).
 ## Support
 
 - Support: [`SUPPORT.md`](./SUPPORT.md)
+- Contributing: [`CONTRIBUTING.md`](./CONTRIBUTING.md)
+- Changelog: [`CHANGELOG.md`](./CHANGELOG.md)
 - Security: [`SECURITY.md`](./SECURITY.md)
 
 ## Manifest (.well-known)
