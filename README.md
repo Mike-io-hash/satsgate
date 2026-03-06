@@ -1,20 +1,36 @@
-# satsgate (MVP)
+# satsgate
 
-[![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+[![CI](https://github.com/Mike-io-hash/satsgate/actions/workflows/ci.yml/badge.svg)](https://github.com/Mike-io-hash/satsgate/actions/workflows/ci.yml)
 
 `satsgate` is a Python (FastAPI) service that provides:
 
 - **L402 paywall primitives** (invoice + macaroon + preimage verification)
-- **Prepaid credits** (plans) for charging *your customers* (agent operators) per successful verification
+- **Prepaid credits** (plans) for charging customers per successful verification
 - **Usage & reporting** (ledger, daily series, forecast + purchase recommendation)
 
 It is designed to be a lightweight “cashier/turnstile” (no LLM in the hot path).
+
+## Beta
+
+This project is currently in **beta**. See [`BETA.md`](./BETA.md).
 
 ## Customer quickstart
 
 If you're integrating satsgate as a **customer** (agent operator), start here:
 
 - [`CUSTOMER_QUICKSTART.md`](./CUSTOMER_QUICKSTART.md)
+
+## Status
+
+- Hosted health: https://api.satsgate.org/health
+- Hosted manifest: https://api.satsgate.org/.well-known/satsgate.json
+
+See [`STATUS.md`](./STATUS.md).
+
+## Support
+
+- Support: [`SUPPORT.md`](./SUPPORT.md)
+- Security: [`SECURITY.md`](./SECURITY.md)
 
 ## Manifest (.well-known)
 
@@ -72,12 +88,13 @@ These are the endpoints your **customers** (agent operators) integrate:
 
 - `sdk/python` (package `satsgate-sdk`)
   - install locally: `pip install -e sdk/python`
-  - FastAPI client example: `sdk/python/examples/fastapi_demo/main.py`
+  - FastAPI examples:
+    - Minimal: `sdk/python/examples/fastapi_demo/main.py`
+    - Reference integration: `sdk/python/examples/fastapi_reference/`
 
-## Quickstart
+## Quickstart (local)
 
 ```bash
-# from the repo root
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -85,21 +102,6 @@ pip install -r requirements.txt
 cp .env.example .env
 
 uvicorn app.main:app --reload --port 8000
-```
-
-Mock mode demo (in another terminal):
-
-```bash
-# 1) Request a ticket (no auth) => 402 + invoice + macaroon
-curl -i http://127.0.0.1:8000/v1/tickets
-
-# 2) DEV: simulate payment and get preimage
-curl -s http://127.0.0.1:8000/dev/mock/pay/<PAYMENT_HASH>
-
-# 3) Retry with Authorization: L402
-curl -s \
-  -H 'Authorization: L402 <MACAROON>:<PREIMAGE_HEX>' \
-  http://127.0.0.1:8000/v1/tickets
 ```
 
 ## Docker (recommended for deployment)
