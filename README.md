@@ -2,13 +2,22 @@
 
 [![CI](https://github.com/Mike-io-hash/satsgate/actions/workflows/ci.yml/badge.svg)](https://github.com/Mike-io-hash/satsgate/actions/workflows/ci.yml)
 
-`satsgate` is a Python (FastAPI) service that provides:
+`satsgate` lets you **charge sats** for AI agents, APIs, and web apps in minutes — without building a payment stack.
+
+Add a Lightning paywall to any endpoint with two calls: `/v1/paywall/challenge` (return 402) and `/v1/paywall/verify`.
+
+It’s a hosted + self-hostable FastAPI service that gives you:
 
 - **L402 paywall primitives** (invoice + macaroon + preimage verification)
-- **Prepaid credits** (plans) for charging customers per successful verification
+- **Prepaid credits** (plans) for predictable costs (**1 credit = 1 successful verification**)
 - **Usage & reporting** (ledger, daily series, forecast + purchase recommendation)
+- **Roadmap (active)**: new wallet backends, integrations, and production hardening
 
-It is designed to be a lightweight “cashier/turnstile” (no LLM in the hot path).
+Your users pay **your** Lightning Address (LNURL-pay). You don’t need to run a node or manage webhooks.
+
+Hosted beta: https://api.satsgate.org (start in [`CUSTOMER_QUICKSTART.md`](./CUSTOMER_QUICKSTART.md)).
+
+No LLM in the hot path: satsgate is a lightweight “cashier/turnstile” that sits in front of your agent.
 
 ## Beta
 
