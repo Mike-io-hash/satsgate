@@ -23,6 +23,9 @@ services:
       SATSGATE_RL_MAX_ANON: ${SATSGATE_RL_MAX_ANON:-60}
       SATSGATE_RL_MAX_AUTH: ${SATSGATE_RL_MAX_AUTH:-600}
 
+      # Operator/admin token (optional)
+      SATSGATE_ADMIN_TOKEN: ${SATSGATE_ADMIN_TOKEN:-}
+
       # Disable dev endpoints in production
       SATSGATE_DEV_MODE: ${SATSGATE_DEV_MODE:-0}
     volumes:
