@@ -1,14 +1,13 @@
 name: "Beta Operator (Hosted)"
 description: "Apply to test the hosted beta (paid trial topup)"
-title: "Beta Operator — <your project / use case>"
-labels: ["beta-operator"]
+title: "Beta Operator: <your project / use case>"
 body:
   - type: markdown
     attributes:
       value: |
         Thanks for trying **satsgate** (hosted beta).
 
-        **Please don’t paste secrets** here (NWC strings, API keys, private keys).
+        **Please don't paste secrets** here (NWC strings, API keys, private keys).
 
         Links:
         - Hosted API: https://api.satsgate.org
@@ -81,7 +80,7 @@ body:
     attributes:
       label: Confirmations
       options:
-        - label: "I’m OK paying the trial topup (~1000 sats) to test the hosted beta."
+        - label: "I'm OK paying the trial topup (~1000 sats) to test the hosted beta."
           required: true
         - label: "I will not paste secrets (NWC strings, API keys, private keys) in this issue."
           required: true
