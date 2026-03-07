@@ -37,7 +37,7 @@ body:
     id: payee
     attributes:
       label: Lightning Address (to receive your users' paywall payments)
-      description: Optional for now. Format: user@domain (LNURL-pay)
+      description: "Optional for now. Format: user@domain (LNURL-pay)"
       placeholder: name@domain.com
     validations:
       required: false
