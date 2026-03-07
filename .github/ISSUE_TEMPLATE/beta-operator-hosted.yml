@@ -1,0 +1,95 @@
+name: "Beta Operator (Hosted)"
+description: "Apply to test the hosted beta (paid trial topup)"
+title: "Beta Operator — <your project / use case>"
+labels: ["beta-operator"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying **satsgate** (hosted beta).
+
+        **Please don’t paste secrets** here (NWC strings, API keys, private keys).
+
+        Links:
+        - Hosted API: https://api.satsgate.org
+        - Quickstart: https://github.com/Mike-io-hash/satsgate/blob/main/CUSTOMER_QUICKSTART.md
+
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: What are you charging for? (agent calls, API endpoint, content gate, etc.)
+      placeholder: |
+        Example: Pay-per-agent-call for /tools/search (1 sat per successful verification)
+    validations:
+      required: true
+
+  - type: textarea
+    id: stack
+    attributes:
+      label: Stack
+      description: Language/framework + where it runs (VPS, serverless, etc.)
+      placeholder: |
+        Example: Python + FastAPI on a VPS (Docker)
+    validations:
+      required: true
+
+  - type: input
+    id: payee
+    attributes:
+      label: Lightning Address (to receive your users' paywall payments)
+      description: Optional for now. Format: user@domain (LNURL-pay)
+      placeholder: name@domain.com
+    validations:
+      required: false
+
+  - type: dropdown
+    id: payer
+    attributes:
+      label: How will you pay the trial topup?
+      description: Trial is ~1000 sats. NWC makes the quickstart fully automated.
+      options:
+        - "NWC-capable wallet (recommended)"
+        - "Manual payment (no NWC)"
+        - "Not sure yet"
+    validations:
+      required: true
+
+  - type: textarea
+    id: volume
+    attributes:
+      label: Expected usage (rough)
+      description: requests/day + sats per request (ballpark)
+      placeholder: |
+        Example: 200 requests/day, 1–5 sats per request
+    validations:
+      required: false
+
+  - type: dropdown
+    id: timeline
+    attributes:
+      label: When do you want to test?
+      options:
+        - "Today"
+        - "This week"
+        - "Next 2 weeks"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: "I’m OK paying the trial topup (~1000 sats) to test the hosted beta."
+          required: true
+        - label: "I will not paste secrets (NWC strings, API keys, private keys) in this issue."
+          required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else?
+      description: Links, constraints, or what would make this a win for you.
+    validations:
+      required: false

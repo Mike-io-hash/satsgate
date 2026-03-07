@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Support
+    url: https://github.com/Mike-io-hash/satsgate/blob/main/SUPPORT.md
+    about: Support channels + response expectations.
+  - name: Security
+    url: https://github.com/Mike-io-hash/satsgate/blob/main/SECURITY.md
+    about: Please report security issues responsibly.
