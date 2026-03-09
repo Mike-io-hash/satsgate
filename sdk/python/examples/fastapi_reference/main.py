@@ -119,8 +119,10 @@ def premium(authorization: str | None = Header(default=None)):
                 "ok": False,
                 "error": "payment_required",
                 "resource": ch.resource,
+                "amount_sats": ch.amount_sats,
                 "invoice": ch.invoice,
                 "macaroon": ch.macaroon,
+                "payment_hash": ch.payment_hash,
                 "hint": "Pay the invoice, then retry with Authorization: L402 <macaroon>:<preimage>",
             },
         )

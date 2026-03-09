@@ -175,13 +175,27 @@ async def main(target_url: str) -> None:
         invoice: str = body1.get("invoice", "")
         macaroon: str = body1.get("macaroon", "")
         payment_hash: str = body1.get("payment_hash", "")
+        amount_sats: int = int(body1.get("amount_sats", 0))
 
         if not invoice or not macaroon:
             print("\n✗ Response missing 'invoice' or 'macaroon' — is the server configured correctly?")
             sys.exit(1)
 
+        # Warn when fields needed by specific backends/features are absent
+        if not payment_hash:
+            if PAYMENT_BACKEND == "mock":
+                print("\n✗ 402 response missing 'payment_hash' — required for PAYMENT_BACKEND=mock.")
+                print("  Hint: update the server's 402 JSON to include 'payment_hash' from the challenge.")
+                sys.exit(1)
+            print("  ⚠ 402 response missing 'payment_hash' (mock backend will not work)")
+
+        if not amount_sats:
+            if MAX_SATS:
+                print("  ⚠ 402 response missing 'amount_sats' — MAX_SATS guard cannot be applied")
+            else:
+                print("  ⚠ 402 response missing 'amount_sats' (invoice amount unknown)")
+
         # Optional guard: refuse to pay more than MAX_SATS
-        amount_sats: int = int(body1.get("amount_sats", 0))
         if MAX_SATS and amount_sats and amount_sats > MAX_SATS:
             print(f"\n✗ Invoice amount {amount_sats} sats exceeds MAX_SATS={MAX_SATS} — aborting")
             sys.exit(1)
