@@ -1,7 +1,7 @@
 [project]
 name = "satsgate-sdk"
 version = "0.1.2"
-description = "Python client SDK for satsgate (L402 paywall + prepaid credits)"
+description = "Python client SDK for satsgate (L402 paywall + prepaid payment verifications (credits))"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -9,7 +9,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://example.invalid/satsgate"
+Homepage = "https://github.com/Mike-io-hash/satsgate"
 
 [build-system]
 requires = ["setuptools>=69", "wheel"]

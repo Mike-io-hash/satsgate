@@ -2,6 +2,12 @@
 
 This is the fastest path to integrate **satsgate** as a *customer* (agent operator).
 
+Notes:
+- **Non-custodial:** your users pay **your** Lightning Address (LNURL-pay). satsgate never holds your funds.
+- **No end-user accounts / no KYC** (via satsgate).
+- Hosted pricing is prepaid **payment verifications** (called `credits` in the API). **They do not expire.**
+- The small minimum top-up is there for **anti-abuse** on the hosted API.
+
 Hosted API:
 
 - `https://api.satsgate.org`
@@ -15,7 +21,7 @@ Hosted API:
   - You will need a `nostr+walletconnect://...` connection string
   - Treat it like a password (do not paste it in chats or commit it)
 
-## 1) Get an API key (buy credits)
+## 1) Get an API key (top up payment verifications)
 
 Clone and install deps:
 
@@ -25,7 +31,7 @@ cd satsgate
 npm install
 ```
 
-Buy the `trial` plan (1000 sats → 200 credits):
+Buy the `trial` plan (1000 sats → 200 payment verifications, no expiry):
 
 ```bash
 SATSGATE_BASE_URL='https://api.satsgate.org' \
@@ -50,7 +56,7 @@ This script:
 - requests a paywall challenge
 - pays the Lightning invoice via NWC
 - verifies the L402 proof
-- spends **1 credit**
+- spends **1 payment verification** (1 credit)
 
 ```bash
 SATSGATE_BASE_URL='https://api.satsgate.org' \
@@ -61,7 +67,7 @@ node client_paywall_credit_demo.mjs demo/test 1
 
 Expected:
 - your payee receives **1 sat**
-- your credit balance decreases by **1**
+- your verification balance decreases by **1**
 
 ## 4) Integrate into your backend (Python)
 

@@ -127,7 +127,7 @@ def well_known_satsgate(request: Request) -> dict:
         "schema": "satsgate.manifest.v1",
         "name": "satsgate",
         "version": app.version,
-        "description": "Lightning L402 paywall + prepaid credits (1 credit = 1 successful verification)",
+        "description": "Lightning L402 paywall + prepaid payment verifications (credits). 1 verification = 1 successful paid unlock.",
         "generated_at": int(time.time()),
         "api": {
             "base_url": base_url,
@@ -159,7 +159,7 @@ def well_known_satsgate(request: Request) -> dict:
         },
         "pricing": {
             "currency": "sats",
-            "credit_definition": "1 credit = 1 successful /v1/paywall/verify",
+            "credit_definition": "1 credit (payment verification) = 1 successful /v1/paywall/verify (charged once per payment_hash). Credits do not expire.",
             "plans": list_plans(),
         },
         "links": {
@@ -201,7 +201,7 @@ def v1_ledger(
     limit: int = 50,
     before_id: int | None = None,
 ):
-    """Return this client's credit ledger entries."""
+    """Return this client's verification ledger entries (credits)."""
 
     client = _get_client_from_api_key(x_api_key)
     if not client:
@@ -463,10 +463,10 @@ def v1_topup(
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
 ):
-    """Buy prepaid credits by plan.
+    """Buy prepaid payment verifications (credits) by plan.
 
     - If there is NO Authorization => 402 + invoice + macaroon
-    - If a valid L402 Authorization is provided => credits are added and balance is returned (+ API key if new)
+    - If a valid L402 Authorization is provided => verifications (credits) are added and balance is returned (+ API key if new)
 
     Note: payment is verified *only* via the preimage (L402). We do not depend on wallet webhooks.
     """
@@ -718,11 +718,11 @@ def v1_paywall_verify(
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
 ):
-    """Verify an L402 Authorization and spend credits (once per payment_hash).
+    """Verify an L402 Authorization and spend payment verifications (credits) (once per payment_hash).
 
     This is the core of the "plans + prepay" model:
-    - the customer buys credits
-    - each verified payment consumes credits (exactly once per payment_hash)
+    - the customer tops up payment verifications (credits)
+    - each verified payment consumes 1 verification (credit) (exactly once per payment_hash)
     """
 
     client = _get_client_from_api_key(x_api_key)
@@ -771,7 +771,7 @@ def v1_paywall_verify(
             content={
                 "ok": False,
                 "error": str(e),
-                "hint": "Top up credits: GET /v1/plans then /v1/topup/{plan_id}",
+                "hint": "Top up payment verifications (credits): GET /v1/plans then /v1/topup/{plan_id}",
             },
         )
 

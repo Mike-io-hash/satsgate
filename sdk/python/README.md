@@ -1,6 +1,6 @@
 # satsgate-sdk (Python)
 
-Minimal Python SDK to integrate **satsgate** (L402 paywall + prepaid credits) into your backend.
+Minimal Python SDK to integrate **satsgate** (L402 paywall + prepaid payment verifications (credits)) into your backend.
 
 ## Install (editable, from this repo)
 

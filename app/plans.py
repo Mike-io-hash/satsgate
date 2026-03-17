@@ -18,49 +18,49 @@ class Plan:
 
 # Recommended plans (tweak as needed):
 # - Agents typically want: cheap trial + bigger packs to avoid paying invoices too often.
-# - 1 credit = 1 successful verification.
+# - 1 credit (payment verification) = 1 successful /v1/paywall/verify (paid unlock). Credits do not expire.
 PLANS: dict[str, Plan] = {
     "trial": Plan(
         id="trial",
         title="Trial",
         price_sats=1_000,
         credits=200,
-        note="Low-friction entry for integration. ~5 sats per verification.",
+        note="Low-friction entry for integration. ~5 sats per payment verification.",
     ),
     "starter": Plan(
         id="starter",
         title="Starter",
         price_sats=10_000,
         credits=2_500,
-        note="Light production usage. ~4 sats per verification.",
+        note="Light production usage. ~4 sats per payment verification.",
     ),
     "growth": Plan(
         id="growth",
         title="Growth",
         price_sats=100_000,
         credits=30_000,
-        note="Medium volume. ~3.33 sats per verification.",
+        note="Medium volume. ~3.33 sats per payment verification.",
     ),
     "scale": Plan(
         id="scale",
         title="Scale",
         price_sats=500_000,
         credits=200_000,
-        note="High volume. ~2.5 sats per verification.",
+        note="High volume. ~2.5 sats per payment verification.",
     ),
     "hyper": Plan(
         id="hyper",
         title="Hyper",
         price_sats=1_000_000,
         credits=500_000,
-        note="Very high volume. ~2 sats per verification.",
+        note="Very high volume. ~2 sats per payment verification.",
     ),
     "mega": Plan(
         id="mega",
         title="Mega",
         price_sats=10_000_000,
         credits=10_000_000,
-        note="Extreme volume. 1 sat per verification.",
+        note="Extreme volume. 1 sat per payment verification.",
     ),
 }
 
