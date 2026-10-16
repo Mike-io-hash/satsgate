@@ -59,6 +59,10 @@ Configured via env vars:
 - `SATSGATE_WALLET_MODE=lnaddr`
   - generates **real** invoices via your **Lightning Address** (LNURL-pay)
   - requires: `SATSGATE_LIGHTNING_ADDRESS=user@domain`
+  - checks the BOLT11 amount, network, `description_hash` (LUD-06), expiry, and payment hash before issuing a challenge
+  - if the provider advertises LUD-21 `verify`, settlement is confirmed there too. Providers that omit it (Wallet of Satoshi) stay preimage-only
+
+`GET /health` returns `{"ok": true, "version": "0.3.0"}` and nothing else.
 
 ## Prepaid payment verifications (credits)
 
@@ -86,9 +90,11 @@ Reporting:
 These are the endpoints your **customers** (agent operators) integrate:
 
 - `POST /v1/paywall/challenge` with `X-Api-Key: ...` → returns `invoice + macaroon` for a resource
-- `POST /v1/paywall/verify` with `X-Api-Key: ...` + `Authorization: L402 ...`
-  - verifies the preimage
-  - charges **1 payment verification** (**1 credit**) (only once per `payment_hash`)
+- `POST /v1/paywall/verify` with `X-Api-Key: ...` + `Authorization: L402 ...` and **`expected_resource` (required)**
+  - verifies the preimage and that the token was issued to **this** API key, for **this** resource, amount, payee, and invoice
+  - charges payment verifications (credits) once per `payment_hash` (`cost_credits`, default 1, is the merchant's own debit)
+
+Tokens are version 2 (`token_version` on the challenge). A token minted for one client never verifies for another. v1 tokens are rejected. See the 0.3.0 notes in [`CHANGELOG.md`](./CHANGELOG.md).
 
 ## Scripts
 
@@ -112,10 +118,17 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env
+# .env.example is production-shaped and will refuse to boot until you set a
+# real secret. For local mock mode:
+export SATSGATE_ENV=development
+export SATSGATE_DEV_MODE=1
+export SATSGATE_WALLET_MODE=mock
+export SATSGATE_MACAROON_SECRET=local-dev-only
 
 uvicorn app.main:app --reload --port 8000
 ```
+
+`/dev/mock/pay/{payment_hash}` is available only in that local configuration.
 
 ## Docker (recommended for deployment)
 
@@ -130,10 +143,13 @@ cp .env.example .env
 2) Edit `.env` and set at least:
 
 - `SATSGATE_HOSTNAME=api.yourdomain.com`
-- `SATSGATE_MACAROON_SECRET=...` (use a long random value)
+- `SATSGATE_ENV=production`
+- `SATSGATE_MACAROON_SECRET=$(openssl rand -hex 32)`
 - `SATSGATE_WALLET_MODE=lnaddr`
 - `SATSGATE_LIGHTNING_ADDRESS=user@domain`
 - `SATSGATE_DEV_MODE=0`
+
+The stack pins Caddy at `172.28.0.2` and only trusts forwarded headers from that address. Do not set `SATSGATE_TRUSTED_PROXIES=*` or uvicorn `--forwarded-allow-ips *`.
 
 3) Start:
 

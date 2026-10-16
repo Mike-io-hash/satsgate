@@ -12,6 +12,7 @@ class Invoice:
     payment_hash: str  # hex
     amount_sats: int
     expires_at: int  # unix seconds
+    verify_url: str | None = None
 
 
 class MockWallet:
@@ -30,7 +31,16 @@ class MockWallet:
         self._preimages: dict[str, str] = {}  # payment_hash -> preimage_hex
         self._expires: dict[str, int] = {}  # payment_hash -> expires_at
 
-    def create_invoice(self, *, amount_sats: int, memo: str = "", expiry_seconds: int = 600) -> Invoice:
+    def create_invoice(
+        self,
+        *,
+        amount_sats: int,
+        memo: str = "",
+        expiry_seconds: int = 600,
+        min_expiry_seconds: int | None = None,
+    ) -> Invoice:
+        if min_expiry_seconds is not None:
+            expiry_seconds = int(min_expiry_seconds)
         preimage = secrets.token_bytes(32)
         preimage_hex = preimage.hex()
         payment_hash = hashlib.sha256(preimage).hexdigest()

@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from urllib.parse import quote
 
-import httpx
+from . import invoices, ssrf
 
 try:
-    import bolt11
-except Exception as e:  # noqa: BLE001
+    import bolt11  # noqa: F401
+except Exception as exc:  # noqa: BLE001
     raise RuntimeError(
         "Missing dependency 'bolt11'. Install requirements.txt (pip install -r requirements.txt)."
-    ) from e
+    ) from exc
+
+
+class LnurlError(Exception):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -18,57 +26,99 @@ class Invoice:
     invoice: str  # BOLT11
     payment_hash: str  # hex
     amount_sats: int
-    expires_at: int | None  # unix seconds (if derivable)
+    expires_at: int | None  # unix seconds
+    verify_url: str | None = None  # LUD-21, when the provider advertises it
 
 
 class LightningAddressWallet:
     """Generate invoices using a Lightning Address (LNURL-pay).
 
-    No API keys required: it uses the provider's public LNURL-pay endpoints.
-
-    Important:
-    - This is for *receiving* payments.
-    - The payer gets the preimage when the invoice is settled.
+    No API keys: this uses the provider's public LNURL-pay endpoints.
+    Outbound fetches go through the SSRF guard. The BOLT11 invoice is checked
+    before it is returned. LUD-21 `verify` is stored when present and is not
+    required (Wallet of Satoshi does not advertise it).
     """
 
-    def __init__(self, lightning_address: str, *, cache_ttl_seconds: int = 300) -> None:
+    def __init__(
+        self,
+        lightning_address: str,
+        *,
+        cache_ttl_seconds: int = 300,
+        fetch_json: Callable | None = None,
+        resolver: Callable | None = None,
+        network: str = "mainnet",
+    ) -> None:
         if "@" not in lightning_address:
             raise ValueError("Invalid Lightning Address (expected user@domain)")
+        user, domain = lightning_address.split("@", 1)
+        if not user or not domain or "/" in user or "/" in domain or "\\" in domain:
+            raise ValueError("Invalid Lightning Address (expected user@domain)")
         self.lightning_address = lightning_address
-        self.user, self.domain = lightning_address.split("@", 1)
+        self.user = user
+        self.domain = domain
         self._cache_ttl_seconds = int(cache_ttl_seconds)
+        self._fetch_json = fetch_json
+        self._resolver = resolver
+        self._network = network
         self._cached_payreq: dict | None = None
         self._cached_payreq_until: float = 0.0
+
+    def _get_json(self, url: str, params: dict | None = None) -> dict:
+        # Guard even when a test double performs the fetch, so a private callback
+        # is rejected before any request is made.
+        ssrf.guard_url(url, resolver=self._resolver)
+        if self._fetch_json is not None:
+            data = self._fetch_json(url, params)
+            if not isinstance(data, dict):
+                raise LnurlError("lnurl_invalid_response")
+            return data
+        return ssrf.safe_get_json(url, params=params, resolver=self._resolver)
 
     def _get_payreq(self) -> dict:
         now = time.time()
         if self._cached_payreq is not None and now < self._cached_payreq_until:
             return self._cached_payreq
 
-        url = f"https://{self.domain}/.well-known/lnurlp/{self.user}"
-        r = httpx.get(url, timeout=10)
-        r.raise_for_status()
-        data = r.json()
+        url = f"https://{self.domain}/.well-known/lnurlp/{quote(self.user, safe='')}"
+        data = self._get_json(url)
 
+        if data.get("status") == "ERROR":
+            raise LnurlError("lnurl_provider_error")
         if data.get("tag") != "payRequest":
-            raise RuntimeError("LNURL-pay: unexpected response (tag != payRequest)")
-        if "callback" not in data:
-            raise RuntimeError("LNURL-pay: missing callback")
+            raise LnurlError("lnurl_unexpected_response")
+        callback = data.get("callback")
+        if not isinstance(callback, str) or not callback:
+            raise LnurlError("lnurl_missing_callback")
+        metadata = data.get("metadata")
+        if not isinstance(metadata, str) or not metadata:
+            raise LnurlError("lnurl_missing_metadata")
+        # Reject a private or non-https callback before it is cached.
+        ssrf.guard_url(callback, resolver=self._resolver)
 
         self._cached_payreq = data
         self._cached_payreq_until = now + self._cache_ttl_seconds
         return data
 
-    def create_invoice(self, *, amount_sats: int, memo: str = "") -> Invoice:
+    def create_invoice(
+        self,
+        *,
+        amount_sats: int,
+        memo: str = "",
+        min_expiry_seconds: int = 60,
+        expiry_seconds: int | None = None,
+    ) -> Invoice:
+        del expiry_seconds  # LNURL providers choose the BOLT11 expiry; we only enforce a minimum.
         payreq = self._get_payreq()
         callback = payreq["callback"]
+        metadata = payreq["metadata"]
 
         amount_msat = int(amount_sats) * 1000
-        min_sendable = int(payreq.get("minSendable", 0))
-        max_sendable = int(payreq.get("maxSendable", 0))
+        min_sendable = int(payreq.get("minSendable", 0) or 0)
+        max_sendable = int(payreq.get("maxSendable", 0) or 0)
         if amount_msat < min_sendable or amount_msat > max_sendable:
             raise ValueError(
-                f"Amount out of range for this Lightning Address: {amount_msat} msat (min={min_sendable}, max={max_sendable})"
+                f"Amount out of range for this Lightning Address: {amount_msat} msat "
+                f"(min={min_sendable}, max={max_sendable})"
             )
 
         params: dict[str, str | int] = {"amount": amount_msat}
@@ -76,42 +126,63 @@ class LightningAddressWallet:
         if memo and comment_allowed > 0:
             params["comment"] = memo[:comment_allowed]
 
-        r = httpx.get(callback, params=params, timeout=10)
-        r.raise_for_status()
-        data = r.json()
+        data = self._get_json(callback, params=params)
+        if data.get("status") == "ERROR":
+            raise LnurlError("lnurl_provider_error")
 
         pr = data.get("pr")
         if not isinstance(pr, str) or not pr:
-            raise RuntimeError("LNURL-pay: missing 'pr' (invoice)")
+            raise LnurlError("lnurl_missing_invoice")
 
-        # Decode BOLT11 to extract payment_hash (needed for L402)
-        inv = bolt11.decode(pr)
-        payment_hash = getattr(inv, "payment_hash", None)
-        if not isinstance(payment_hash, str) or len(payment_hash) != 64:
-            # Some decoders return dict
-            if isinstance(inv, dict) and isinstance(inv.get("payment_hash"), str):
-                payment_hash = inv["payment_hash"]
-            else:
-                raise RuntimeError("Could not extract payment_hash from BOLT11")
+        validated = invoices.validate_bolt11(
+            pr,
+            amount_sats=int(amount_sats),
+            metadata=metadata,
+            network=self._network,
+            min_expiry_seconds=int(min_expiry_seconds),
+        )
 
-        expires_at: int | None = None
-        try:
-            # bolt11 lib uses `date` (unix seconds) instead of `timestamp`
-            if hasattr(inv, "date"):
-                ts = int(getattr(inv, "date"))
-            elif hasattr(inv, "timestamp"):
-                ts = int(getattr(inv, "timestamp"))
-            else:
-                ts = int(inv.get("date") or inv.get("timestamp"))
-
-            exp = int(getattr(inv, "expiry")) if hasattr(inv, "expiry") else int(inv.get("expiry"))
-            expires_at = ts + exp
-        except Exception:
-            expires_at = None
+        verify_url = data.get("verify")
+        if verify_url is not None:
+            if not isinstance(verify_url, str) or not verify_url:
+                raise LnurlError("lnurl_invalid_verify_url")
+            ssrf.guard_url(verify_url, resolver=self._resolver)
+            invoices.assert_verify_url_consistent(verify_url, validated.payment_hash)
 
         return Invoice(
-            invoice=pr,
-            payment_hash=payment_hash,
-            amount_sats=int(amount_sats),
-            expires_at=expires_at,
+            invoice=validated.invoice,
+            payment_hash=validated.payment_hash,
+            amount_sats=validated.amount_sats,
+            expires_at=validated.expires_at,
+            verify_url=verify_url if isinstance(verify_url, str) else None,
         )
+
+    def is_settled(self, *, verify_url: str, payment_hash: str, preimage_hex: str) -> bool:
+        """LUD-21 settlement probe. Raises if the provider does not confirm payment."""
+        confirm_lud21(
+            verify_url=verify_url,
+            payment_hash=payment_hash,
+            preimage_hex=preimage_hex,
+            fetch_json=self._fetch_json,
+            resolver=self._resolver,
+        )
+        return True
+
+
+def confirm_lud21(
+    *,
+    verify_url: str,
+    payment_hash: str,
+    preimage_hex: str,
+    fetch_json: Callable | None = None,
+    resolver: Callable | None = None,
+) -> None:
+    """Optional LUD-21 check. No-op is the caller's job when the provider omitted `verify`."""
+    ssrf.guard_url(verify_url, resolver=resolver)
+    if fetch_json is not None:
+        data = fetch_json(verify_url, None)
+        if not isinstance(data, dict):
+            raise LnurlError("lnurl_invalid_response")
+    else:
+        data = ssrf.safe_get_json(verify_url, resolver=resolver)
+    invoices.assert_lud21_settled(data, payment_hash=payment_hash, preimage_hex=preimage_hex)

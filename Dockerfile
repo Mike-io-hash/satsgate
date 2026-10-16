@@ -12,5 +12,7 @@ COPY app ./app
 
 EXPOSE 8000
 
-# Use proxy headers so request.base_url uses https when behind a reverse proxy (Caddy)
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+# Trust forwarded headers only from the configured proxy (Compose pins Caddy).
+# Do not use "*" — any client could spoof X-Forwarded-For.
+ENV SATSGATE_FORWARDED_ALLOW_IPS=172.28.0.2
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips \"${SATSGATE_FORWARDED_ALLOW_IPS}\""]

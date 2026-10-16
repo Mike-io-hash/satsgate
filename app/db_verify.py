@@ -1,9 +1,17 @@
 from __future__ import annotations
 
-import sqlite3
 import time
 
 from .db import _connect
+
+
+def has_verification(db_path: str, *, client_id: int, payment_hash: str) -> bool:
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM verifications WHERE client_id = ? AND payment_hash = ?",
+            (int(client_id), payment_hash),
+        ).fetchone()
+        return row is not None
 
 
 def verify_once_and_spend(

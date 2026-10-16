@@ -40,6 +40,8 @@ class VerifyResult:
     charged_credits: int
     new_balance: int
     valid_until: int
+    amount_sats: int | None = None
+    payee_lightning_address: str | None = None
 
 
 def _b64decode_url_nopad(s: str) -> bytes:
@@ -249,18 +251,28 @@ class SatsgateClient:
         self,
         *,
         authorization_header: str,
-        expected_resource: str | None = None,
+        expected_resource: str,
         cost_credits: int = 1,
         use_cache: bool = True,
     ) -> VerifyResult:
         """Verify payment and spend credits.
 
+        `expected_resource` is required: a token issued for another resource is rejected.
+        Tokens are v2 and are bound to the satsgate client that minted them.
         `use_cache=True` avoids calling the server repeatedly for the same payment_hash
         (until `valid_until`).
         """
 
+        if not expected_resource or not str(expected_resource).strip():
+            raise SatsgateError("expected_resource is required")
+
         macaroon_b64, preimage_hex = parse_l402_authorization(authorization_header)
         payload = decode_macaroon_payload(macaroon_b64)
+
+        if payload.get("v") != 2:
+            raise SatsgateError("unsupported token version")
+        if payload.get("res") != expected_resource:
+            raise SatsgateError("resource mismatch")
 
         payment_hash = str(payload.get("ph"))
         valid_until = int(payload.get("exp") or 0)
@@ -309,4 +321,6 @@ class SatsgateClient:
             charged_credits=int(data["charged_credits"]),
             new_balance=int(data["new_balance"]),
             valid_until=vu,
+            amount_sats=int(data["amount_sats"]) if data.get("amount_sats") is not None else None,
+            payee_lightning_address=data.get("payee_lightning_address"),
         )

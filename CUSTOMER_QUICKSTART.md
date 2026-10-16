@@ -55,7 +55,7 @@ curl -s -X POST https://api.satsgate.org/v1/client/payee \
 This script:
 - requests a paywall challenge
 - pays the Lightning invoice via NWC
-- verifies the L402 proof
+- verifies the L402 proof (`expected_resource` is required and must match the challenge)
 - spends **1 payment verification** (1 credit)
 
 ```bash

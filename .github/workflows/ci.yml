@@ -21,5 +21,14 @@ jobs:
           python -m pip install -U pip
           pip install -r requirements.txt -r requirements-dev.txt
 
+      - name: Ruff
+        run: ruff check app tests
+
+      - name: Bandit
+        run: bandit -r app -ll
+
+      - name: pip-audit
+        run: pip-audit -r requirements.txt
+
       - name: Run tests
         run: pytest -q

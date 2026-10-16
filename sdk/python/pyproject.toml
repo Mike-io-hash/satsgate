@@ -1,6 +1,6 @@
 [project]
 name = "satsgate-sdk"
-version = "0.1.2"
+version = "0.2.0"
 description = "Python client SDK for satsgate (L402 paywall + prepaid payment verifications (credits))"
 readme = "README.md"
 requires-python = ">=3.10"
