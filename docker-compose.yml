@@ -3,8 +3,15 @@ services:
     build: .
     restart: unless-stopped
     environment:
-      # Core
+      # Core. production refuses a weak secret, dev mode, and the mock wallet.
+      SATSGATE_ENV: ${SATSGATE_ENV:-production}
       SATSGATE_MACAROON_SECRET: ${SATSGATE_MACAROON_SECRET}
+      SATSGATE_MACAROON_KEY_ID: ${SATSGATE_MACAROON_KEY_ID:-1}
+      SATSGATE_MACAROON_PREVIOUS_KEYS: ${SATSGATE_MACAROON_PREVIOUS_KEYS:-}
+      SATSGATE_LN_NETWORK: ${SATSGATE_LN_NETWORK:-mainnet}
+      # Caddy is pinned to 172.28.0.2 on the internal network.
+      SATSGATE_TRUSTED_PROXIES: ${SATSGATE_TRUSTED_PROXIES:-172.28.0.2}
+      SATSGATE_FORWARDED_ALLOW_IPS: ${SATSGATE_FORWARDED_ALLOW_IPS:-172.28.0.2}
 
       # Wallet (for topups)
       SATSGATE_WALLET_MODE: ${SATSGATE_WALLET_MODE:-lnaddr}
@@ -22,6 +29,9 @@ services:
       SATSGATE_RL_WINDOW_SECONDS: ${SATSGATE_RL_WINDOW_SECONDS:-60}
       SATSGATE_RL_MAX_ANON: ${SATSGATE_RL_MAX_ANON:-60}
       SATSGATE_RL_MAX_AUTH: ${SATSGATE_RL_MAX_AUTH:-600}
+      SATSGATE_RL_MAX_CHALLENGE: ${SATSGATE_RL_MAX_CHALLENGE:-30}
+      SATSGATE_RL_MAX_TOPUP: ${SATSGATE_RL_MAX_TOPUP:-10}
+      SATSGATE_RL_MAX_KEYS: ${SATSGATE_RL_MAX_KEYS:-10000}
 
       # Operator/admin token (optional)
       SATSGATE_ADMIN_TOKEN: ${SATSGATE_ADMIN_TOKEN:-}
@@ -48,7 +58,8 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     networks:
-      - internal
+      internal:
+        ipv4_address: 172.28.0.2
 
 volumes:
   satsgate_data:
@@ -57,3 +68,6 @@ volumes:
 
 networks:
   internal:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

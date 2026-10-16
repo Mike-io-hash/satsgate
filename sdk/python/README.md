@@ -30,7 +30,8 @@ ch = sg.paywall_challenge(resource="demo/test", amount_sats=10, memo="my service
 # and optionally JSON containing ch.invoice and ch.macaroon.
 
 # 3) When your end user retries with Authorization: L402 ...
-# you verify it like this:
+# expected_resource is required. The token is v2 and only verifies for the
+# client that created the challenge.
 res = sg.paywall_verify(
     authorization_header="L402 <macaroon>:<preimage>",
     expected_resource="demo/test",

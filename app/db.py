@@ -84,11 +84,40 @@ def init_db(db_path: str) -> None:
             """
         )
 
+        topup_cols = [r["name"] for r in conn.execute("PRAGMA table_info(topups)").fetchall()]
+        if "verify_url" not in topup_cols:
+            conn.execute("ALTER TABLE topups ADD COLUMN verify_url TEXT")
+        if "requester_ip" not in topup_cols:
+            conn.execute("ALTER TABLE topups ADD COLUMN requester_ip TEXT")
+        if "expires_at" not in topup_cols:
+            conn.execute("ALTER TABLE topups ADD COLUMN expires_at INTEGER")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS paywall_challenges (
+              payment_hash TEXT PRIMARY KEY,
+              client_id INTEGER NOT NULL,
+              invoice TEXT NOT NULL,
+              amount_sats INTEGER NOT NULL,
+              payee TEXT,
+              resource TEXT NOT NULL,
+              verify_url TEXT,
+              created_at INTEGER NOT NULL,
+              expires_at INTEGER NOT NULL,
+              FOREIGN KEY(client_id) REFERENCES clients(id)
+            );
+            """
+        )
+
         # Indexes (improve dashboard/reporting performance)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_client_id ON ledger(client_id, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_client_created ON ledger(client_id, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_topups_client_created ON topups(client_id, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_topups_pending_ip ON topups(requester_ip, status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_verifications_client_created ON verifications(client_id, created_at)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_challenges_client_expires ON paywall_challenges(client_id, expires_at)"
+        )
 
 
 def hash_api_key(api_key: str) -> str:
@@ -145,16 +174,58 @@ def add_topup(
     sats: int,
     credits: int,
     client_id: int | None,
+    requester_ip: str | None = None,
+    verify_url: str | None = None,
+    expires_at: int | None = None,
+    max_pending_per_ip: int = 20,
 ) -> None:
+    """Insert a pending top-up. Expired pending rows are removed first.
+
+    Raises ValueError('too_many_pending_topups') when this IP already has too
+    many unpaid top-ups. That caps anonymous invoice spam.
+    """
     now = int(time.time())
     with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             """
-            INSERT INTO topups(payment_hash, invoice, sats, credits, status, client_id, created_at)
-            VALUES(?, ?, ?, ?, 'pending', ?, ?)
+            DELETE FROM topups
+            WHERE status = 'pending'
+              AND (
+                (expires_at IS NOT NULL AND expires_at < ?)
+                OR (expires_at IS NULL AND created_at < ?)
+              )
             """,
-            (payment_hash, invoice, int(sats), int(credits), client_id, now),
+            (now, now - 86_400),
         )
+        if requester_ip:
+            pending = conn.execute(
+                "SELECT COUNT(*) FROM topups WHERE status = 'pending' AND requester_ip = ?",
+                (requester_ip,),
+            ).fetchone()
+            if pending and int(pending[0]) >= int(max_pending_per_ip):
+                conn.execute("ROLLBACK")
+                raise ValueError("too_many_pending_topups")
+        conn.execute(
+            """
+            INSERT INTO topups(
+              payment_hash, invoice, sats, credits, status, client_id, created_at, verify_url, requester_ip, expires_at
+            )
+            VALUES(?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+            """,
+            (
+                payment_hash,
+                invoice,
+                int(sats),
+                int(credits),
+                client_id,
+                now,
+                verify_url,
+                requester_ip,
+                expires_at,
+            ),
+        )
+        conn.execute("COMMIT")
 
 
 def get_topup(db_path: str, payment_hash: str) -> sqlite3.Row | None:
@@ -262,3 +333,58 @@ def get_balance(db_path: str, *, client_id: int) -> int:
     with _connect(db_path) as conn:
         row = conn.execute("SELECT credits FROM clients WHERE id = ?", (int(client_id),)).fetchone()
         return int(row[0]) if row else 0
+
+
+def add_paywall_challenge(
+    db_path: str,
+    *,
+    payment_hash: str,
+    client_id: int,
+    invoice: str,
+    amount_sats: int,
+    payee: str | None,
+    resource: str,
+    verify_url: str | None,
+    expires_at: int,
+    max_open_per_client: int = 100,
+) -> None:
+    """Remember a challenge so verify can bind the token to the invoice we issued."""
+    now = int(time.time())
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM paywall_challenges WHERE expires_at < ?", (now,))
+        open_rows = conn.execute(
+            "SELECT COUNT(*) FROM paywall_challenges WHERE client_id = ? AND expires_at >= ?",
+            (int(client_id), now),
+        ).fetchone()
+        if open_rows and int(open_rows[0]) >= int(max_open_per_client):
+            conn.execute("ROLLBACK")
+            raise ValueError("too_many_open_challenges")
+        conn.execute(
+            """
+            INSERT INTO paywall_challenges(
+              payment_hash, client_id, invoice, amount_sats, payee, resource, verify_url, created_at, expires_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payment_hash,
+                int(client_id),
+                invoice,
+                int(amount_sats),
+                payee,
+                resource,
+                verify_url,
+                now,
+                int(expires_at),
+            ),
+        )
+        conn.execute("COMMIT")
+
+
+def get_paywall_challenge(db_path: str, payment_hash: str) -> sqlite3.Row | None:
+    with _connect(db_path) as conn:
+        return conn.execute(
+            "SELECT * FROM paywall_challenges WHERE payment_hash = ?",
+            (payment_hash,),
+        ).fetchone()

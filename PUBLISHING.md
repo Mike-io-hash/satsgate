@@ -9,15 +9,19 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env
-uvicorn app.main:app --reload --port 8000
+# .env.example will not boot as-is (production defaults, empty secret).
+# Local mock:
+#   SATSGATE_ENV=development SATSGATE_DEV_MODE=1 SATSGATE_WALLET_MODE=mock \
+#   SATSGATE_MACAROON_SECRET=local-dev-only uvicorn app.main:app --reload --port 8000
 ```
 
 ## Docker (recommended for servers)
 
 ```bash
 cp .env.example .env
-# edit .env and set SATSGATE_HOSTNAME, SATSGATE_MACAROON_SECRET, SATSGATE_LIGHTNING_ADDRESS, SATSGATE_DEV_MODE=0
+# edit .env and set SATSGATE_HOSTNAME, SATSGATE_ENV=production,
+# SATSGATE_MACAROON_SECRET=$(openssl rand -hex 32), SATSGATE_LIGHTNING_ADDRESS,
+# SATSGATE_DEV_MODE=0, SATSGATE_WALLET_MODE=lnaddr
 
 docker compose up -d --build
 ```

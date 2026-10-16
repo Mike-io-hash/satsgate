@@ -1,6 +1,9 @@
 """Test client (mock mode).
 
 This script runs the full L402 flow against your local server:
+Requires SATSGATE_ENV=development (or test/local/dev) and SATSGATE_DEV_MODE=1.
+/v1/tickets is not served otherwise.
+
 1) Request /v1/tickets without auth -> gets 402 + invoice + macaroon + payment_hash
 2) Simulate payment (mock mode only) -> gets preimage
 3) Retry with Authorization: L402 <macaroon>:<preimage>

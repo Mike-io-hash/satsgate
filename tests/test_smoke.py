@@ -20,10 +20,14 @@ def _fresh_import_app(tmp_path: Path):
         sys.path.insert(0, str(repo_root))
 
     # Configure env for a fully-local test run
+    os.environ["SATSGATE_ENV"] = "development"
     os.environ["SATSGATE_WALLET_MODE"] = "mock"
     os.environ["SATSGATE_DEV_MODE"] = "1"
     os.environ["SATSGATE_RL_ENABLED"] = "0"
     os.environ["SATSGATE_MACAROON_SECRET"] = "test-secret"
+    os.environ["SATSGATE_TRUSTED_PROXIES"] = ""
+    os.environ["SATSGATE_MACAROON_PREVIOUS_KEYS"] = ""
+    os.environ["SATSGATE_LN_NETWORK"] = "mainnet"
     os.environ["SATSGATE_DB_PATH"] = str(tmp_path / "satsgate_test.sqlite3")
 
     # Enable operator endpoints for tests

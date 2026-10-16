@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from math import ceil
 from typing import Any
@@ -13,21 +14,38 @@ from . import config
 from . import db
 from . import db_clients
 from . import db_reports
-from .rate_limit import RateLimiter
 from . import db_verify
+from . import ssrf
+from . import wallet_lnaddr
+from .admin import router as admin_router
+from .client_ip import resolve_client_ip
+from .invoices import InvoiceValidationError
 from .l402 import (
     L402Error,
+    PURPOSE_PAYWALL,
+    PURPOSE_TICKET,
+    PURPOSE_TOPUP,
+    TOKEN_VERSION,
+    invoice_binding,
     make_macaroon,
     parse_and_verify_macaroon,
     parse_authorization_header,
+    payee_binding,
     verify_preimage_matches_payment_hash,
 )
 from .mock_wallet import MockWallet
 from .plans import get_plan, list_plans, recommend_purchase
-from .wallet_lnaddr import LightningAddressWallet
-from .admin import router as admin_router
+from .rate_limit import RateLimiter
+from .wallet_lnaddr import LightningAddressWallet, LnurlError
 
-app = FastAPI(title="satsgate", version="0.2.0")
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    yield
+    ssrf.close()
+
+
+app = FastAPI(title="satsgate", version=config.APP_VERSION, lifespan=_lifespan)
 
 app.include_router(admin_router)
 
@@ -38,7 +56,7 @@ def _get_wallet() -> Any:
     if config.WALLET_MODE == "lnaddr":
         if not config.LIGHTNING_ADDRESS:
             raise RuntimeError("SATSGATE_LIGHTNING_ADDRESS is required when SATSGATE_WALLET_MODE=lnaddr")
-        return LightningAddressWallet(config.LIGHTNING_ADDRESS)
+        return LightningAddressWallet(config.LIGHTNING_ADDRESS, network=config.LN_NETWORK)
     raise RuntimeError(f"Invalid SATSGATE_WALLET_MODE: {config.WALLET_MODE}")
 
 
@@ -52,25 +70,60 @@ try:
 except Exception as e:  # noqa: BLE001
     raise RuntimeError(f"Failed to initialize DB at {config.DB_PATH}: {e}") from e
 
-# Rate limiters
-RL_ANON = RateLimiter(window_seconds=config.RL_WINDOW_SECONDS, max_requests=config.RL_MAX_ANON)
-RL_AUTH = RateLimiter(window_seconds=config.RL_WINDOW_SECONDS, max_requests=config.RL_MAX_AUTH)
+# Rate limiters. Auth buckets are only for keys that exist. Unknown keys share the IP bucket.
+RL_ANON = RateLimiter(
+    window_seconds=config.RL_WINDOW_SECONDS,
+    max_requests=config.RL_MAX_ANON,
+    max_keys=config.RL_MAX_KEYS,
+)
+RL_AUTH = RateLimiter(
+    window_seconds=config.RL_WINDOW_SECONDS,
+    max_requests=config.RL_MAX_AUTH,
+    max_keys=config.RL_MAX_KEYS,
+)
+RL_CHALLENGE = RateLimiter(
+    window_seconds=config.RL_WINDOW_SECONDS,
+    max_requests=config.RL_MAX_CHALLENGE,
+    max_keys=config.RL_MAX_KEYS,
+)
+RL_TOPUP = RateLimiter(
+    window_seconds=config.RL_WINDOW_SECONDS,
+    max_requests=config.RL_MAX_TOPUP,
+    max_keys=config.RL_MAX_KEYS,
+)
 
 
 def _get_client_from_api_key(x_api_key: str | None) -> db.Client | None:
-    if not x_api_key:
+    if not x_api_key or len(x_api_key) > 512:
         return None
     return db.get_client_by_api_key(config.DB_PATH, x_api_key)
 
 
-def _rate_limit_key(request: Request, x_api_key: str | None) -> tuple[str, bool]:
-    """Returns (key, is_auth)."""
-    if x_api_key:
-        # store only the hash (not the raw api key) to reduce accidental leaks in memory/logs
-        return "k:" + db.hash_api_key(x_api_key), True
+def _peer_ip(request: Request) -> str:
+    return resolve_client_ip(
+        peer=request.client.host if request.client else None,
+        forwarded_for=request.headers.get("x-forwarded-for"),
+        trusted_proxies=config.TRUSTED_PROXIES,
+    )
 
-    ip = request.client.host if request.client else "unknown"
-    return "ip:" + ip, False
+
+def _rate_limited(retry_after: int) -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        headers={"Retry-After": str(retry_after)},
+        content={
+            "ok": False,
+            "error": "rate_limited",
+            "retry_after_seconds": retry_after,
+        },
+    )
+
+
+def _reject_if_limited(limiter: RateLimiter, key: str) -> JSONResponse | None:
+    allowed, retry_after = limiter.allow(key)
+    if allowed:
+        return None
+    return _rate_limited(retry_after)
 
 
 @app.middleware("http")
@@ -82,36 +135,54 @@ async def rate_limit_mw(request: Request, call_next):
     if not request.url.path.startswith("/v1"):
         return await call_next(request)
 
-    x_api_key = request.headers.get("x-api-key")
-    key, is_auth = _rate_limit_key(request, x_api_key)
+    ip = _peer_ip(request)
+    raw_key = request.headers.get("x-api-key")
+    client = _get_client_from_api_key(raw_key)
+    if client is not None and raw_key is not None:
+        # Hash only. A random key must not open its own auth bucket.
+        blocked = _reject_if_limited(RL_AUTH, "k:" + db.hash_api_key(raw_key))
+    else:
+        blocked = _reject_if_limited(RL_ANON, "ip:" + ip)
+    if blocked:
+        return blocked
 
-    limiter = RL_AUTH if is_auth else RL_ANON
-    allowed, retry_after = limiter.allow(key)
-    if not allowed:
-        return JSONResponse(
-            status_code=429,
-            headers={"Retry-After": str(retry_after)},
-            content={
-                "ok": False,
-                "error": "rate_limited",
-                "retry_after_seconds": retry_after,
-            },
-        )
+    path = request.url.path
+    if client is not None and path == "/v1/paywall/challenge" and request.method == "POST":
+        blocked = _reject_if_limited(RL_CHALLENGE, "c:" + str(client.id))
+        if blocked:
+            return blocked
+
+    if path.startswith("/v1/topup/") and request.method == "GET" and not request.headers.get("authorization"):
+        topup_key = ("c:" + str(client.id)) if client is not None else ("ip:" + ip)
+        blocked = _reject_if_limited(RL_TOPUP, topup_key)
+        if blocked:
+            return blocked
 
     return await call_next(request)
 
 
+def _upstream_error(exc: Exception) -> JSONResponse:
+    """Stable errors for LNURL/BOLT11 failures. Do not echo upstream URLs or bodies."""
+    if isinstance(exc, ssrf.SSRFError):
+        code = "payee_destination_rejected" if exc.code == "destination_rejected" else "payee_fetch_failed"
+        if exc.code == "redirects_not_allowed":
+            code = "payee_destination_rejected"
+        return JSONResponse(status_code=502, content={"ok": False, "error": code})
+    if isinstance(exc, InvoiceValidationError):
+        return JSONResponse(
+            status_code=502,
+            content={"ok": False, "error": "invoice_rejected", "reason": exc.code},
+        )
+    if isinstance(exc, LnurlError):
+        return JSONResponse(status_code=502, content={"ok": False, "error": exc.code})
+    if isinstance(exc, ValueError):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "amount_out_of_range"})
+    return JSONResponse(status_code=502, content={"ok": False, "error": "payee_fetch_failed"})
+
+
 @app.api_route("/health", methods=["GET", "HEAD"])
 def health() -> dict:
-    return {
-        "ok": True,
-        "wallet_mode": config.WALLET_MODE,
-        "receive_lightning_address": config.LIGHTNING_ADDRESS if config.WALLET_MODE == "lnaddr" else None,
-        "price_sats_demo": config.PRICE_SATS,
-        "token_ttl_seconds": config.TOKEN_TTL_SECONDS,
-        "db_path": config.DB_PATH,
-        "time": int(time.time()),
-    }
+    return {"ok": True, "version": config.APP_VERSION}
 
 
 @app.api_route("/.well-known/satsgate.json", methods=["GET", "HEAD"])
@@ -127,6 +198,7 @@ def well_known_satsgate(request: Request) -> dict:
         "schema": "satsgate.manifest.v1",
         "name": "satsgate",
         "version": app.version,
+        "token_version": TOKEN_VERSION,
         "description": "Lightning L402 paywall + prepaid payment verifications (credits). 1 verification = 1 successful paid unlock.",
         "generated_at": int(time.time()),
         "api": {
@@ -140,7 +212,7 @@ def well_known_satsgate(request: Request) -> dict:
                     "type": "header",
                     "name": "Authorization",
                     "scheme": "L402",
-                    "required_for": ["/v1/paywall/verify", "/v1/topup/{plan_id}", "/v1/tickets"],
+                    "required_for": ["/v1/paywall/verify", "/v1/topup/{plan_id}"],
                 },
             ],
             "endpoints": {
@@ -440,6 +512,10 @@ def v1_spend(
     x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
     cost: int = 1,
 ):
+    # Demo-only. Burning credits from a public route is not part of the paywall API.
+    if not config.dev_endpoints_enabled():
+        return JSONResponse(status_code=404, content={"ok": False, "error": "not_found"})
+
     client = _get_client_from_api_key(x_api_key)
     if not client:
         return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_api_key"})
@@ -460,6 +536,7 @@ def v1_spend(
 @app.get("/v1/topup/{plan_id}")
 def v1_topup(
     plan_id: str,
+    request: Request,
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
 ):
@@ -485,9 +562,11 @@ def v1_topup(
         try:
             macaroon_b64, preimage_hex = parse_authorization_header(authorization)
             payload = parse_and_verify_macaroon(
-                secret=config.MACAROON_SECRET,
+                keys=config.MACAROON_KEYS,
                 macaroon_b64=macaroon_b64,
+                purpose=PURPOSE_TOPUP,
                 resource=resource,
+                client_id=client.id if client else None,
             )
             payment_hash = payload["ph"]
             verify_preimage_matches_payment_hash(preimage_hex=preimage_hex, payment_hash=payment_hash)
@@ -496,12 +575,36 @@ def v1_topup(
             if not topup:
                 return JSONResponse(status_code=404, content={"ok": False, "error": "topup_not_found"})
 
-            # If the topup is already linked to a client, respect it.
+            if invoice_binding(topup["invoice"]) != payload["inv_h"]:
+                raise L402Error("invoice mismatch")
+            if int(payload["amt"]) != int(topup["sats"]):
+                raise L402Error("amount mismatch")
+            if payee_binding(config.LIGHTNING_ADDRESS or None) != payload["payee_h"]:
+                raise L402Error("payee mismatch")
+
             topup_client_id = topup["client_id"]
+            token_cid = payload.get("cid")
+            if token_cid is not None and topup_client_id is not None and int(token_cid) != int(topup_client_id):
+                raise L402Error("client mismatch")
+
+            if topup["status"] != "settled" and topup["verify_url"]:
+                try:
+                    wallet_lnaddr.confirm_lud21(
+                        verify_url=str(topup["verify_url"]),
+                        payment_hash=payment_hash,
+                        preimage_hex=preimage_hex,
+                    )
+                except (ssrf.SSRFError, LnurlError) as exc:
+                    return _upstream_error(exc)
+                except InvoiceValidationError as exc:
+                    status = 401 if exc.code in {"lud21_not_settled", "lud21_mismatch"} else 502
+                    return JSONResponse(status_code=status, content={"ok": False, "error": exc.code})
 
             api_key_out: str | None = None
             if topup_client_id is not None:
                 client_id = int(topup_client_id)
+            elif token_cid is not None:
+                client_id = int(token_cid)
             elif client is not None:
                 client_id = client.id
             else:
@@ -530,7 +633,14 @@ def v1_topup(
 
     # CREAR CHALLENGE (402)
     memo = f"satsgate topup {plan.id}"
-    inv = WALLET.create_invoice(amount_sats=plan.price_sats, memo=memo)
+    try:
+        inv = WALLET.create_invoice(
+            amount_sats=plan.price_sats,
+            memo=memo,
+            min_expiry_seconds=config.TOKEN_TTL_SECONDS,
+        )
+    except (ssrf.SSRFError, InvoiceValidationError, LnurlError, ValueError) as exc:
+        return _upstream_error(exc)
 
     # Persist pending topup
     try:
@@ -541,15 +651,32 @@ def v1_topup(
             sats=plan.price_sats,
             credits=plan.credits,
             client_id=client.id if client else None,
+            requester_ip=_peer_ip(request),
+            verify_url=getattr(inv, "verify_url", None),
+            expires_at=getattr(inv, "expires_at", None),
+            max_pending_per_ip=config.MAX_PENDING_TOPUPS_PER_IP,
         )
-    except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=500, content={"ok": False, "error": f"db_error: {e}"})
+    except ValueError as exc:
+        if str(exc) == "too_many_pending_topups":
+            return JSONResponse(
+                status_code=429,
+                content={"ok": False, "error": "too_many_pending_topups"},
+            )
+        return JSONResponse(status_code=500, content={"ok": False, "error": "db_error"})
+    except Exception:  # noqa: BLE001
+        return JSONResponse(status_code=500, content={"ok": False, "error": "db_error"})
 
     macaroon = make_macaroon(
         secret=config.MACAROON_SECRET,
+        kid=config.MACAROON_KEY_ID,
+        purpose=PURPOSE_TOPUP,
         payment_hash=inv.payment_hash,
         resource=resource,
+        amount_sats=plan.price_sats,
+        invoice=inv.invoice,
         ttl_seconds=config.TOKEN_TTL_SECONDS,
+        client_id=client.id if client else None,
+        payee=config.LIGHTNING_ADDRESS or None,
     )
 
     www_auth = f'L402 macaroon="{macaroon}", invoice="{inv.invoice}"'
@@ -584,10 +711,11 @@ class PaywallChallengeIn(BaseModel):
 
 
 class PaywallVerifyIn(BaseModel):
-    expected_resource: str | None = Field(
-        default=None,
-        description="If provided, requires that the token was issued for this resource.",
+    expected_resource: str = Field(
+        ...,
+        min_length=1,
         max_length=200,
+        description="Resource this token must have been issued for. Required.",
     )
     cost_credits: int = Field(default=1, ge=1, le=10_000)
 
@@ -617,7 +745,9 @@ def _looks_like_lightning_address(addr: str) -> bool:
 def _get_payee_wallet(lightning_address: str) -> LightningAddressWallet:
     w = PAYEE_WALLETS.get(lightning_address)
     if w is None:
-        w = LightningAddressWallet(lightning_address)
+        if len(PAYEE_WALLETS) >= 1024:
+            PAYEE_WALLETS.pop(next(iter(PAYEE_WALLETS)))
+        w = LightningAddressWallet(lightning_address, network=config.LN_NETWORK)
         PAYEE_WALLETS[lightning_address] = w
     return w
 
@@ -683,19 +813,57 @@ def v1_paywall_challenge(
             )
 
     # Generate invoice
-    if config.WALLET_MODE == "mock":
-        inv = WALLET.create_invoice(amount_sats=int(body.amount_sats), memo=memo, expiry_seconds=ttl)
-    else:
-        if not payee or not _looks_like_lightning_address(payee):
-            return JSONResponse(status_code=400, content={"ok": False, "error": "payee_invalid_lightning_address"})
-        inv = _get_payee_wallet(payee).create_invoice(amount_sats=int(body.amount_sats), memo=memo)
+    try:
+        if config.WALLET_MODE == "mock":
+            inv = WALLET.create_invoice(
+                amount_sats=int(body.amount_sats),
+                memo=memo,
+                expiry_seconds=ttl,
+                min_expiry_seconds=ttl,
+            )
+        else:
+            if not payee or not _looks_like_lightning_address(payee):
+                return JSONResponse(status_code=400, content={"ok": False, "error": "payee_invalid_lightning_address"})
+            inv = _get_payee_wallet(payee).create_invoice(
+                amount_sats=int(body.amount_sats),
+                memo=memo,
+                min_expiry_seconds=ttl,
+            )
+    except (ssrf.SSRFError, InvoiceValidationError, LnurlError, ValueError) as exc:
+        return _upstream_error(exc)
 
     macaroon = make_macaroon(
         secret=config.MACAROON_SECRET,
+        kid=config.MACAROON_KEY_ID,
+        purpose=PURPOSE_PAYWALL,
         payment_hash=inv.payment_hash,
         resource=body.resource,
+        amount_sats=int(body.amount_sats),
+        invoice=inv.invoice,
         ttl_seconds=ttl,
+        client_id=client.id,
+        payee=payee,
     )
+
+    try:
+        db.add_paywall_challenge(
+            config.DB_PATH,
+            payment_hash=inv.payment_hash,
+            client_id=client.id,
+            invoice=inv.invoice,
+            amount_sats=int(body.amount_sats),
+            payee=payee,
+            resource=body.resource,
+            verify_url=getattr(inv, "verify_url", None),
+            expires_at=int(time.time()) + ttl,
+            max_open_per_client=config.MAX_OPEN_CHALLENGES_PER_CLIENT,
+        )
+    except ValueError as exc:
+        if str(exc) == "too_many_open_challenges":
+            return JSONResponse(status_code=429, content={"ok": False, "error": "too_many_open_challenges"})
+        return JSONResponse(status_code=500, content={"ok": False, "error": "db_error"})
+    except Exception:  # noqa: BLE001
+        return JSONResponse(status_code=500, content={"ok": False, "error": "db_error"})
 
     www_auth = f'L402 macaroon="{macaroon}", invoice="{inv.invoice}"'
 
@@ -709,6 +877,7 @@ def v1_paywall_challenge(
         "payment_hash": inv.payment_hash,
         "valid_until": int(time.time()) + ttl,
         "www_authenticate": www_auth,
+        "token_version": TOKEN_VERSION,
     }
 
 
@@ -732,29 +901,57 @@ def v1_paywall_verify(
     try:
         macaroon_b64, preimage_hex = parse_authorization_header(authorization)
         payload = parse_and_verify_macaroon(
-            secret=config.MACAROON_SECRET,
+            keys=config.MACAROON_KEYS,
             macaroon_b64=macaroon_b64,
-            resource=None,
+            purpose=PURPOSE_PAYWALL,
+            resource=body.expected_resource,
+            client_id=client.id,
         )
-
-        if body.expected_resource and payload.get("res") != body.expected_resource:
-            raise L402Error("resource mismatch")
 
         payment_hash = payload["ph"]
         verify_preimage_matches_payment_hash(preimage_hex=preimage_hex, payment_hash=payment_hash)
+
+        row = db.get_paywall_challenge(config.DB_PATH, payment_hash)
+        if row is None or int(row["client_id"]) != int(client.id):
+            raise L402Error("client mismatch")
+        if row["resource"] != body.expected_resource or payload.get("res") != body.expected_resource:
+            raise L402Error("resource mismatch")
+        if int(row["amount_sats"]) != int(payload["amt"]):
+            raise L402Error("amount mismatch")
+        if invoice_binding(row["invoice"]) != payload["inv_h"]:
+            raise L402Error("invoice mismatch")
+        if payee_binding(row["payee"]) != payload["payee_h"]:
+            raise L402Error("payee mismatch")
+
+        if not db_verify.has_verification(
+            config.DB_PATH, client_id=client.id, payment_hash=payment_hash
+        ) and row["verify_url"]:
+            try:
+                wallet_lnaddr.confirm_lud21(
+                    verify_url=str(row["verify_url"]),
+                    payment_hash=payment_hash,
+                    preimage_hex=preimage_hex,
+                )
+            except (ssrf.SSRFError, LnurlError):
+                return JSONResponse(status_code=502, content={"ok": False, "error": "lud21_unavailable"})
+            except InvoiceValidationError as exc:
+                status = 401 if exc.code in {"lud21_not_settled", "lud21_mismatch"} else 502
+                return JSONResponse(status_code=status, content={"ok": False, "error": exc.code})
 
         spend = db_verify.verify_once_and_spend(
             config.DB_PATH,
             client_id=client.id,
             payment_hash=payment_hash,
             cost=int(body.cost_credits),
-            resource=str(payload.get("res")),
+            resource=body.expected_resource,
         )
 
         return {
             "ok": True,
             "client_id": client.id,
-            "resource": payload.get("res"),
+            "resource": body.expected_resource,
+            "amount_sats": int(row["amount_sats"]),
+            "payee_lightning_address": row["payee"],
             "payment_hash": payment_hash,
             "charged_credits": spend["charged"],
             "new_balance": spend["new_balance"],
@@ -786,6 +983,9 @@ def get_ticket(authorization: str | None = Header(default=None)):
     In real life, this would be a protected resource (e.g. /api/resource).
     """
 
+    if not config.dev_endpoints_enabled():
+        return JSONResponse(status_code=404, content={"ok": False, "error": "not_found"})
+
     resource = "v1/tickets"
 
     # 1) Si viene credencial, verificamos
@@ -793,8 +993,9 @@ def get_ticket(authorization: str | None = Header(default=None)):
         try:
             macaroon_b64, preimage_hex = parse_authorization_header(authorization)
             payload = parse_and_verify_macaroon(
-                secret=config.MACAROON_SECRET,
+                keys=config.MACAROON_KEYS,
                 macaroon_b64=macaroon_b64,
+                purpose=PURPOSE_TICKET,
                 resource=resource,
             )
             payment_hash = payload["ph"]
@@ -814,13 +1015,26 @@ def get_ticket(authorization: str | None = Header(default=None)):
 
     # 2) Si no viene credencial, generamos challenge
     memo = "satsgate ticket"
-    inv = WALLET.create_invoice(amount_sats=config.PRICE_SATS, memo=memo)
+    try:
+        inv = WALLET.create_invoice(
+            amount_sats=config.PRICE_SATS,
+            memo=memo,
+            min_expiry_seconds=config.TOKEN_TTL_SECONDS,
+        )
+    except (ssrf.SSRFError, InvoiceValidationError, LnurlError, ValueError) as exc:
+        return _upstream_error(exc)
 
     macaroon = make_macaroon(
         secret=config.MACAROON_SECRET,
+        kid=config.MACAROON_KEY_ID,
+        purpose=PURPOSE_TICKET,
         payment_hash=inv.payment_hash,
         resource=resource,
+        amount_sats=config.PRICE_SATS,
+        invoice=inv.invoice,
         ttl_seconds=config.TOKEN_TTL_SECONDS,
+        client_id=None,
+        payee=config.LIGHTNING_ADDRESS or None,
     )
 
     www_auth = f'L402 macaroon="{macaroon}", invoice="{inv.invoice}"'
@@ -843,7 +1057,7 @@ def get_ticket(authorization: str | None = Header(default=None)):
 @app.get("/dev/mock/pay/{payment_hash}")
 def dev_mock_pay(payment_hash: str):
     """DEV ONLY: if the wallet backend is mock, return the preimage for payment_hash."""
-    if not config.DEV_MODE:
+    if not config.dev_endpoints_enabled():
         return JSONResponse(status_code=404, content={"ok": False, "error": "not_found"})
 
     if not hasattr(WALLET, "dev_get_preimage"):
