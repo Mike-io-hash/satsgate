@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-17
+
+### Fixed
+- A paywall macaroon no longer expires at `SATSGATE_TOKEN_TTL_SECONDS` (default 10 minutes) while the payee's Lightning invoice is still payable. Paying an Alby invoice hours later, then `GET /v1/paywall/status/{payment_hash}` or `POST /v1/paywall/verify`, unlocks the challenge. The macaroon `exp` is the invoice expiry plus a grace window (default 1 hour), and never later than 48 hours after the challenge was created. This is the same claim window top-ups got in 0.4.1.
+- A paywall token already issued with that 10-minute `exp` can still unlock while the invoice window is open. Rows written before 0.4.2 stored the token TTL in `expires_at`; the BOLT11 expiry is used when it is later. Signature, client, resource, amount, payee, and invoice bindings are unchanged. A first unlock still requires a preimage or a stored LUD-21 `verify` response that carries a matching preimage. After the window the route returns `invoice expired` and does not spend a credit, including when the macaroon `exp` has not passed and including when the provider would report the invoice settled.
+
+### Added
+- Challenge responses add `invoice_expires_at`, `claim_until`, `cache_until`, `payee_saved`, and `payee_note`. `valid_until` stays and, for a new token, equals `claim_until` (the macaroon expiry). `cache_until` is how long to cache a successful unlock. How long the buyer may use the product is the merchant's decision.
+- Unlock responses add `claim_until`, `invoice_expires_at`, and `cache_until`. `valid_until` stays the macaroon `exp` caveat, which can be earlier than `claim_until` for a token minted before this release.
+- The first challenge that includes `payee_lightning_address` still saves it. The response now says so (`payee_saved: true`, `payee_note`). A later different address returns `payee_mismatch` with the saved address and `POST /v1/client/payee` as the way to change it.
+- `resource mismatch` includes `detail`, the caller's `expected_resource`, and, after the macaroon is verified for this API key, the issued `resource`. Another client's token still returns `client mismatch` without that resource.
+- Pending unlocks name the charge: `charged_credits: 0` until settlement. Verify's HTTP 402 `payment_pending` body also includes `status: pending`. Status stays HTTP 200 `pending`. Both notes describe the other route. Settled responses keep `charged_credits` and state that verify and status share one debit per `payment_hash`.
+- Python SDK `0.3.1` reads the new fields and caches until `cache_until`.
+
+### Changed
+- `ttl_seconds` on `POST /v1/paywall/challenge` is the minimum invoice lifetime. It no longer shortens the macaroon below the invoice claim window.
+- `GET /health` reports `0.4.2`.
+- Optional `SATSGATE_PAYWALL_TOKEN_TTL_CAP_SECONDS` (default `172800`, max `604800`) and `SATSGATE_PAYWALL_CLAIM_GRACE_SECONDS` (default `3600`, max `86400`). The grace cannot exceed the cap. Neither is required. Dev-ticket macaroons still use `SATSGATE_TOKEN_TTL_SECONDS`.
+
+### Security
+- Credits are still not spent without a preimage or a stored LUD-21 `verify` response that carries a matching preimage. The claim cap and the grace window bound how long a macaroon can unlock a payment. A replay after the first debit spends 0.
+
 ## [0.4.1] - 2026-10-17
 
 ### Fixed

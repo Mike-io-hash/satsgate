@@ -128,6 +128,17 @@ def test_one_sat_cross_tenant_token_does_not_verify(client):
     )
     assert rejected.status_code == 401
     assert rejected.json()["error"] == "client mismatch"
+    assert "resource" not in rejected.json()
+
+    # A different expected_resource must not reveal the attacker's challenge resource.
+    hidden = client.post(
+        "/v1/paywall/verify",
+        headers={"X-Api-Key": victim_key, "Authorization": stolen_auth},
+        json={"expected_resource": "api/other", "cost_credits": 1},
+    )
+    assert hidden.status_code == 401
+    assert hidden.json()["error"] == "client mismatch"
+    assert "resource" not in hidden.json()
 
     victim_after = client.get("/v1/balance", headers={"X-Api-Key": victim_key}).json()["credits"]
     assert victim_after == victim_before
@@ -163,7 +174,11 @@ def test_resource_is_required_and_must_match(client):
         json={"expected_resource": "api/other", "cost_credits": 1},
     )
     assert mismatched.status_code == 401
-    assert mismatched.json()["error"] == "resource mismatch"
+    mismatch_body = mismatched.json()
+    assert mismatch_body["error"] == "resource mismatch"
+    assert mismatch_body["resource"] == "api/premium"
+    assert mismatch_body["expected_resource"] == "api/other"
+    assert "exactly match" in mismatch_body["detail"]
 
     after = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
     assert after == before
@@ -195,9 +210,19 @@ def test_bad_preimage_expired_token_and_bad_signature_are_rejected(client):
     assert bad_sig.status_code == 401
     assert bad_sig.json()["error"] == "invalid signature"
 
-    from app import config, l402
+    from app import config, db, l402
 
     client_id = client.get("/v1/client", headers={"X-Api-Key": api_key}).json()["client_id"]
+    # The claim window, not the caveat, limits a first unlock. Close that window.
+    with db._connect(config.DB_PATH) as conn:
+        conn.execute(
+            "UPDATE paywall_challenges SET expires_at = ?, created_at = ? WHERE payment_hash = ?",
+            (
+                int(time.time()) - config.PAYWALL_CLAIM_GRACE_SECONDS - 10,
+                int(time.time()) - config.PAYWALL_TOKEN_TTL_CAP_SECONDS - 10,
+                challenge["payment_hash"],
+            ),
+        )
     expired = l402.make_macaroon(
         secret=config.MACAROON_SECRET,
         kid=config.MACAROON_KEY_ID,
@@ -216,7 +241,7 @@ def test_bad_preimage_expired_token_and_bad_signature_are_rejected(client):
         json={"expected_resource": "api/premium"},
     )
     assert expired_res.status_code == 401
-    assert expired_res.json()["error"] == "token expired"
+    assert expired_res.json()["error"] == "invoice expired"
 
     after = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
     assert after == before
@@ -295,7 +320,7 @@ def test_health_does_not_leak_internals(client):
     body = response.json()
     assert set(body) == {"ok", "version"}
     assert body["ok"] is True
-    assert body["version"] == "0.4.1"
+    assert body["version"] == "0.4.2"
     serialized = json.dumps(body).lower()
     assert "sqlite" not in serialized
     assert "db_path" not in serialized
@@ -1602,65 +1627,438 @@ def test_topup_token_cap_bounds_a_long_invoice(client):
     assert rejected.json()["error"] == "invoice expired"
 
 
-def test_paywall_token_ttl_is_unchanged(client):
-    from app import config, db, l402
+def _with_paywall_invoice_lifetime(seconds: int):
+    """Point mock paywall invoices at a BOLT11-like lifetime. Top-ups stay put."""
+    from app.main import WALLET
+
+    original = WALLET.create_invoice
+
+    def create_invoice(**kwargs):
+        if "paywall" in str(kwargs.get("memo", "")):
+            kwargs = dict(kwargs)
+            kwargs["expiry_seconds"] = int(seconds)
+            kwargs["min_expiry_seconds"] = int(seconds)
+        return original(**kwargs)
+
+    WALLET.create_invoice = create_invoice
+    return WALLET, original
+
+
+def _set_paywall_window(payment_hash: str, *, expires_at: int, created_at: int | None = None) -> None:
+    from app import config, db
+
+    with db._connect(config.DB_PATH) as conn:
+        if created_at is None:
+            conn.execute(
+                "UPDATE paywall_challenges SET expires_at = ? WHERE payment_hash = ?",
+                (int(expires_at), payment_hash),
+            )
+        else:
+            conn.execute(
+                "UPDATE paywall_challenges SET expires_at = ?, created_at = ? WHERE payment_hash = ?",
+                (int(expires_at), int(created_at), payment_hash),
+            )
+
+
+def test_paywall_claim_follows_invoice_expiry(client):
+    """A paywall macaroon lives with the invoice, plus grace, and never past the cap.
+
+    `ttl_seconds` is only the minimum invoice lifetime. A short value must not
+    bring back the 10-minute trap when the invoice itself is still payable.
+    """
+    from app import config, l402
 
     api_key = _buy_client(client)
-    challenge = _challenge(client, api_key, resource="api/premium", amount_sats=3)
-    now = time.time()
-    payload = l402.peek_bindings(challenge["macaroon"])
-    assert abs(payload["exp"] - (now + config.TOKEN_TTL_SECONDS)) <= 3
-    assert abs(challenge["valid_until"] - (now + config.TOKEN_TTL_SECONDS)) <= 3
-    assert payload["exp"] - now < config.TOPUP_CLAIM_GRACE_SECONDS
+    wallet, original = _with_paywall_invoice_lifetime(24 * 60 * 60)
+    try:
+        challenge = _challenge(client, api_key, resource="api/premium", amount_sats=21)
+        custom = client.post(
+            "/v1/paywall/challenge",
+            headers={"X-Api-Key": api_key},
+            json={"resource": "api/short", "amount_sats": 2, "ttl_seconds": 90},
+        )
+    finally:
+        _restore_wallet(wallet, original)
 
-    custom = client.post(
+    assert custom.status_code == 200, custom.text
+    now = time.time()
+    for body in (challenge, custom.json()):
+        minted = l402.peek_bindings(body["macaroon"])
+        assert body["invoice_expires_at"] - now > 23 * 60 * 60
+        assert abs(minted["exp"] - (body["invoice_expires_at"] + config.PAYWALL_CLAIM_GRACE_SECONDS)) <= 3
+        assert body["claim_until"] == minted["exp"]
+        assert body["valid_until"] == minted["exp"]
+        assert body["cache_until"] == minted["exp"]
+        assert "invoice_expires_at" in body["note"]
+        assert "content" not in body["note"] or "your decision" in body["note"]
+        assert body["payee_saved"] is False
+
+    # The default mock invoice (no stub) still follows its own expiry plus grace,
+    # which is longer than the old 600s token TTL.
+    plain = client.post(
         "/v1/paywall/challenge",
         headers={"X-Api-Key": api_key},
-        json={"resource": "api/short", "amount_sats": 2, "ttl_seconds": 90},
+        json={"resource": "api/plain", "amount_sats": 1},
     )
-    assert custom.status_code == 200, custom.text
-    custom_body = custom.json()
-    custom_exp = l402.peek_bindings(custom_body["macaroon"])["exp"]
-    assert abs(custom_exp - (time.time() + 90)) <= 3
-    assert abs(custom_body["valid_until"] - custom_exp) <= 3
+    assert plain.status_code == 200, plain.text
+    plain_body = plain.json()
+    plain_exp = l402.peek_bindings(plain_body["macaroon"])["exp"]
+    assert abs(plain_body["invoice_expires_at"] - (time.time() + config.TOKEN_TTL_SECONDS)) <= 3
+    assert abs(plain_exp - (plain_body["invoice_expires_at"] + config.PAYWALL_CLAIM_GRACE_SECONDS)) <= 3
 
-    # Stretching the stored challenge row must not keep an expired paywall token alive.
-    client_id = client.get("/v1/client", headers={"X-Api-Key": api_key}).json()["client_id"]
-    preimage = client.get(f"/dev/mock/pay/{challenge['payment_hash']}").json()["preimage"]
+
+def test_paywall_paid_after_ten_minutes_still_unlocks(client):
+    """Paying a 24h invoice after the old 10-minute TTL still unlocks, once.
+
+    Covers a macaroon minted for that invoice and a macaroon whose caveat has
+    already expired. No preimage and no settled LUD-21 check does not spend a
+    credit. Past the claim window the route returns invoice expired.
+    """
+    from app import config, l402
+    from app import wallet_lnaddr
+
+    api_key = _buy_client(client)
+    wallet, original = _with_paywall_invoice_lifetime(24 * 60 * 60)
+    try:
+        challenge = _challenge(client, api_key, resource="api/premium", amount_sats=21)
+    finally:
+        _restore_wallet(wallet, original)
+
     before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    import app.main as mainmod
+
+    frozen = time.time() + 11 * 60
+    mainmod.time.time = lambda: frozen
+    try:
+        preimage = client.get(f"/dev/mock/pay/{challenge['payment_hash']}").json()["preimage"]
+        paid_late = client.post(
+            "/v1/paywall/verify",
+            headers={"X-Api-Key": api_key, "Authorization": _auth(challenge["macaroon"], preimage)},
+            json={"expected_resource": "api/premium"},
+        )
+    finally:
+        mainmod.time.time = time.time
+    assert paid_late.status_code == 200, paid_late.text
+    assert paid_late.json()["charged_credits"] == 1
+    assert paid_late.json()["cache_until"] == paid_late.json()["claim_until"]
+    assert "cache_until" in paid_late.json()["note"]
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before - 1
+
+    # In-flight 10-minute caveat: the stored invoice is still open, so proof unlocks it.
+    wallet, original = _with_paywall_invoice_lifetime(24 * 60 * 60)
+    try:
+        legacy = _challenge(client, api_key, resource="api/legacy", amount_sats=4)
+    finally:
+        _restore_wallet(wallet, original)
+    client_id = client.get("/v1/client", headers={"X-Api-Key": api_key}).json()["client_id"]
+    legacy_mac = l402.make_macaroon(
+        secret=config.MACAROON_SECRET,
+        kid=config.MACAROON_KEY_ID,
+        purpose=l402.PURPOSE_PAYWALL,
+        payment_hash=legacy["payment_hash"],
+        resource="api/legacy",
+        amount_sats=4,
+        invoice=legacy["invoice"],
+        ttl_seconds=-601,
+        client_id=client_id,
+        payee=legacy.get("payee_lightning_address"),
+    )
+    assert l402.peek_bindings(legacy_mac)["exp"] < time.time() - 600
+    legacy_before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    no_proof = client.get(
+        f"/v1/paywall/status/{legacy['payment_hash']}",
+        headers={"X-Api-Key": api_key, "Authorization": f"L402 {legacy_mac}"},
+        params={"expected_resource": "api/legacy"},
+    )
+    assert no_proof.status_code == 401
+    assert no_proof.json()["error"] == "preimage_required"
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == legacy_before
+
+    legacy_preimage = client.get(f"/dev/mock/pay/{legacy['payment_hash']}").json()["preimage"]
+    unlocked = client.post(
+        "/v1/paywall/verify",
+        headers={"X-Api-Key": api_key, "Authorization": _auth(legacy_mac, legacy_preimage)},
+        json={"expected_resource": "api/legacy"},
+    )
+    assert unlocked.status_code == 200, unlocked.text
+    assert unlocked.json()["charged_credits"] == 1
+    assert unlocked.json()["valid_until"] < time.time()
+    assert unlocked.json()["claim_until"] > time.time()
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == legacy_before - 1
+
+    # A closed window does not unlock, even if LUD-21 would report the invoice settled.
+    wallet, original = _with_paywall_invoice_lifetime(24 * 60 * 60)
+    try:
+        closed = _challenge(client, api_key, resource="api/closed", amount_sats=3)
+    finally:
+        _restore_wallet(wallet, original)
+    from app import db
+
+    with db._connect(config.DB_PATH) as conn:
+        conn.execute(
+            "UPDATE paywall_challenges SET verify_url = ? WHERE payment_hash = ?",
+            ("https://ln.example/verify/" + closed["payment_hash"], closed["payment_hash"]),
+        )
+    _set_paywall_window(
+        closed["payment_hash"],
+        expires_at=int(time.time()) - config.PAYWALL_CLAIM_GRACE_SECONDS - 5,
+        created_at=int(time.time()) - config.PAYWALL_TOKEN_TTL_CAP_SECONDS - 5,
+    )
+    closed_before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    original_confirm = wallet_lnaddr.confirm_lud21
+    wallet_lnaddr.confirm_lud21 = lambda **_kwargs: None
+    try:
+        rejected = client.get(
+            f"/v1/paywall/status/{closed['payment_hash']}",
+            headers={"X-Api-Key": api_key, "Authorization": f"L402 {closed['macaroon']}"},
+            params={"expected_resource": "api/closed"},
+        )
+    finally:
+        wallet_lnaddr.confirm_lud21 = original_confirm
+    assert rejected.status_code == 401
+    assert rejected.json()["error"] == "invoice expired"
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == closed_before
+
+    # Grace still covers a payment made just as the invoice expired.
+    wallet, original = _with_paywall_invoice_lifetime(24 * 60 * 60)
+    try:
+        grace = _challenge(client, api_key, resource="api/grace", amount_sats=2)
+    finally:
+        _restore_wallet(wallet, original)
+    _set_paywall_window(grace["payment_hash"], expires_at=int(time.time()) - 30)
+    grace_preimage = client.get(f"/dev/mock/pay/{grace['payment_hash']}").json()["preimage"]
+    grace_before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    grace_paid = client.post(
+        "/v1/paywall/verify",
+        headers={"X-Api-Key": api_key, "Authorization": _auth(grace["macaroon"], grace_preimage)},
+        json={"expected_resource": "api/grace"},
+    )
+    assert grace_paid.status_code == 200, grace_paid.text
+    assert grace_paid.json()["charged_credits"] == 1
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == grace_before - 1
+
+
+def test_paywall_claim_cap_bounds_a_long_invoice(client):
+    from app import config, l402
+
+    api_key = _buy_client(client)
+    previous = config.PAYWALL_TOKEN_TTL_CAP_SECONDS
+    config.PAYWALL_TOKEN_TTL_CAP_SECONDS = 3600
+    wallet, original = _with_paywall_invoice_lifetime(10 * 24 * 60 * 60)
+    try:
+        challenge = _challenge(client, api_key, resource="api/capped", amount_sats=5)
+    finally:
+        _restore_wallet(wallet, original)
+        config.PAYWALL_TOKEN_TTL_CAP_SECONDS = previous
+
+    now = time.time()
+    minted = l402.peek_bindings(challenge["macaroon"])
+    assert challenge["invoice_expires_at"] - now > 9 * 24 * 60 * 60
+    assert abs(minted["exp"] - (now + 3600)) <= 3
+    assert challenge["claim_until"] < challenge["invoice_expires_at"]
+    assert "claim cap" in challenge["note"]
+
+    config.PAYWALL_TOKEN_TTL_CAP_SECONDS = 3600
+    try:
+        _set_paywall_window(
+            challenge["payment_hash"],
+            expires_at=int(now) + 10 * 24 * 60 * 60,
+            created_at=int(now) - 3601,
+        )
+        preimage = client.get(f"/dev/mock/pay/{challenge['payment_hash']}").json()["preimage"]
+        before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+        rejected = client.post(
+            "/v1/paywall/verify",
+            headers={"X-Api-Key": api_key, "Authorization": _auth(challenge["macaroon"], preimage)},
+            json={"expected_resource": "api/capped"},
+        )
+    finally:
+        config.PAYWALL_TOKEN_TTL_CAP_SECONDS = previous
+    assert rejected.status_code == 401
+    assert rejected.json()["error"] == "invoice expired"
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before
+
+
+def test_paywall_old_row_uses_decoded_invoice_expiry(client):
+    """A pre-0.4.2 row stored the 10-minute TTL. The BOLT11 expiry still opens the claim."""
+    from app import config, l402
+    import app.main as mainmod
+
+    api_key = _buy_client(client)
+    challenge = _challenge(client, api_key, resource="api/old-row", amount_sats=6)
+    issued_at = int(time.time()) - 1201
+    _set_paywall_window(challenge["payment_hash"], expires_at=issued_at + config.TOKEN_TTL_SECONDS, created_at=issued_at)
+    client_id = client.get("/v1/client", headers={"X-Api-Key": api_key}).json()["client_id"]
     expired = l402.make_macaroon(
         secret=config.MACAROON_SECRET,
         kid=config.MACAROON_KEY_ID,
         purpose=l402.PURPOSE_PAYWALL,
         payment_hash=challenge["payment_hash"],
-        resource="api/premium",
-        amount_sats=3,
+        resource="api/old-row",
+        amount_sats=6,
         invoice=challenge["invoice"],
-        ttl_seconds=-30,
+        ttl_seconds=-601,
         client_id=client_id,
         payee=challenge.get("payee_lightning_address"),
     )
+    original = mainmod.bolt11_expiry_unix
+    mainmod.bolt11_expiry_unix = lambda _invoice: issued_at + 24 * 60 * 60
+    try:
+        preimage = client.get(f"/dev/mock/pay/{challenge['payment_hash']}").json()["preimage"]
+        before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+        unlocked = client.post(
+            "/v1/paywall/verify",
+            headers={"X-Api-Key": api_key, "Authorization": _auth(expired, preimage)},
+            json={"expected_resource": "api/old-row"},
+        )
+    finally:
+        mainmod.bolt11_expiry_unix = original
+    assert unlocked.status_code == 200, unlocked.text
+    assert unlocked.json()["charged_credits"] == 1
+    assert unlocked.json()["invoice_expires_at"] == issued_at + 24 * 60 * 60
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before - 1
+
+
+def test_first_challenge_saves_payee_and_mismatch_explains_how_to_change_it(client):
+    api_key = _buy_client(client)
+    first = client.post(
+        "/v1/paywall/challenge",
+        headers={"X-Api-Key": api_key},
+        json={"resource": "api/premium", "amount_sats": 1, "payee_lightning_address": "merchant@pay.example"},
+    )
+    assert first.status_code == 200, first.text
+    saved = first.json()
+    assert saved["payee_saved"] is True
+    assert saved["payee_lightning_address"] == "merchant@pay.example"
+    assert "POST /v1/client/payee" in saved["payee_note"]
+    info = client.get("/v1/client", headers={"X-Api-Key": api_key}).json()
+    assert info["payee_lightning_address"] == "merchant@pay.example"
+
+    second = client.post(
+        "/v1/paywall/challenge",
+        headers={"X-Api-Key": api_key},
+        json={"resource": "api/premium", "amount_sats": 1, "payee_lightning_address": "other@pay.example"},
+    )
+    assert second.status_code == 400
+    mismatch = second.json()
+    assert mismatch["error"] == "payee_mismatch"
+    assert mismatch["registered_payee_lightning_address"] == "merchant@pay.example"
+    assert "saved" in mismatch["detail"]
+    assert "POST /v1/client/payee" in mismatch["hint"]
+    assert client.get("/v1/client", headers={"X-Api-Key": api_key}).json()["payee_lightning_address"] == "merchant@pay.example"
+
+    changed = client.post(
+        "/v1/client/payee",
+        headers={"X-Api-Key": api_key},
+        json={"payee_lightning_address": "other@pay.example"},
+    )
+    assert changed.status_code == 200, changed.text
+    third = client.post(
+        "/v1/paywall/challenge",
+        headers={"X-Api-Key": api_key},
+        json={"resource": "api/next", "amount_sats": 1, "payee_lightning_address": "other@pay.example"},
+    )
+    assert third.status_code == 200, third.text
+    assert third.json()["payee_saved"] is False
+    assert third.json()["payee_note"] is None
+    assert third.json()["payee_lightning_address"] == "other@pay.example"
+
+
+def test_status_and_verify_share_one_charge_and_document_pending_codes(client):
+    from app import config, db
+    from app import wallet_lnaddr
+    from app.invoices import InvoiceValidationError
+
+    api_key = _buy_client(client)
+    challenge = _challenge(client, api_key, resource="api/premium", amount_sats=21)
+    before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
     with db._connect(config.DB_PATH) as conn:
         conn.execute(
-            "UPDATE paywall_challenges SET expires_at = ? WHERE payment_hash = ?",
-            (int(time.time()) + 24 * 60 * 60, challenge["payment_hash"]),
+            "UPDATE paywall_challenges SET verify_url = ? WHERE payment_hash = ?",
+            ("https://ln.example/verify/" + challenge["payment_hash"], challenge["payment_hash"]),
         )
-    rejected = client.post(
-        "/v1/paywall/verify",
-        headers={"X-Api-Key": api_key, "Authorization": _auth(expired, preimage)},
-        json={"expected_resource": "api/premium"},
-    )
-    assert rejected.status_code == 401
-    assert rejected.json()["error"] == "token expired"
+
+    def _not_settled(**kwargs):
+        assert kwargs["preimage_hex"] is None
+        raise InvoiceValidationError("lud21_not_settled")
+
+    original = wallet_lnaddr.confirm_lud21
+    wallet_lnaddr.confirm_lud21 = _not_settled
+    try:
+        pending_status = client.get(
+            f"/v1/paywall/status/{challenge['payment_hash']}",
+            headers={"X-Api-Key": api_key, "Authorization": f"L402 {challenge['macaroon']}"},
+            params={"expected_resource": "api/premium"},
+        )
+        pending_verify = client.post(
+            "/v1/paywall/verify",
+            headers={"X-Api-Key": api_key, "Authorization": f"L402 {challenge['macaroon']}"},
+            json={"expected_resource": "api/premium"},
+        )
+    finally:
+        wallet_lnaddr.confirm_lud21 = original
+
+    assert pending_status.status_code == 200, pending_status.text
+    status_body = pending_status.json()
+    assert status_body["status"] == "pending"
+    assert status_body["settled"] is False
+    assert status_body["charged_credits"] == 0
+    assert "402" in status_body["note"]
+    assert "payment_pending" in status_body["note"]
+
+    assert pending_verify.status_code == 402
+    verify_body = pending_verify.json()
+    assert verify_body["error"] == "payment_pending"
+    assert verify_body["status"] == "pending"
+    assert verify_body["charged_credits"] == 0
+    assert "200" in verify_body["note"]
     assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before
 
-    status = client.get(
-        f"/v1/paywall/status/{challenge['payment_hash']}",
-        headers={"X-Api-Key": api_key, "Authorization": f"L402 {expired}"},
-        params={"expected_resource": "api/premium"},
+    wallet_lnaddr.confirm_lud21 = lambda **_kwargs: None
+    try:
+        unlocked = client.get(
+            f"/v1/paywall/status/{challenge['payment_hash']}",
+            headers={"X-Api-Key": api_key, "Authorization": f"L402 {challenge['macaroon']}"},
+            params={"expected_resource": "api/premium", "cost_credits": 1},
+        )
+    finally:
+        wallet_lnaddr.confirm_lud21 = original
+    assert unlocked.status_code == 200, unlocked.text
+    assert unlocked.json()["charged_credits"] == 1
+    assert unlocked.json()["settled"] is True
+    assert "GET /v1/paywall/status" in unlocked.json()["note"]
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before - 1
+
+    replay = client.post(
+        "/v1/paywall/verify",
+        headers={
+            "X-Api-Key": api_key,
+            "Authorization": _auth(
+                challenge["macaroon"],
+                client.get(f"/dev/mock/pay/{challenge['payment_hash']}").json()["preimage"],
+            ),
+        },
+        json={"expected_resource": "api/premium"},
     )
-    assert status.status_code == 401
-    assert status.json()["error"] == "token expired"
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["charged_credits"] == 0
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before - 1
+
+
+def test_paywall_window_env_rejects_bad_values(tmp_path):
+    keys = ("SATSGATE_PAYWALL_TOKEN_TTL_CAP_SECONDS", "SATSGATE_PAYWALL_CLAIM_GRACE_SECONDS")
+    try:
+        with pytest.raises(RuntimeError, match="SATSGATE_PAYWALL_TOKEN_TTL_CAP_SECONDS must be an integer"):
+            _load_app(tmp_path / "bad-int", SATSGATE_PAYWALL_TOKEN_TTL_CAP_SECONDS="abc")
+        with pytest.raises(RuntimeError, match="SATSGATE_PAYWALL_CLAIM_GRACE_SECONDS cannot exceed"):
+            _load_app(
+                tmp_path / "grace",
+                SATSGATE_PAYWALL_TOKEN_TTL_CAP_SECONDS="3600",
+                SATSGATE_PAYWALL_CLAIM_GRACE_SECONDS="7200",
+            )
+    finally:
+        for key in keys:
+            os.environ.pop(key, None)
 
 
 def test_topup_window_env_rejects_bad_values(tmp_path):

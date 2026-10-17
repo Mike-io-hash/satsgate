@@ -29,6 +29,10 @@ class Challenge:
     payment_hash: str
     valid_until: int
     www_authenticate: str
+    claim_until: int | None = None
+    invoice_expires_at: int | None = None
+    cache_until: int | None = None
+    payee_saved: bool = False
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,9 @@ class VerifyResult:
     valid_until: int
     amount_sats: int | None = None
     payee_lightning_address: str | None = None
+    claim_until: int | None = None
+    invoice_expires_at: int | None = None
+    cache_until: int | None = None
 
 
 def _decode_token_bytes(token: str) -> bytes:
@@ -120,6 +127,25 @@ def sha256_hex_of_hexbytes(preimage_hex: str) -> str:
     return hashlib.sha256(bytes.fromhex(preimage_hex)).hexdigest()
 
 
+def _optional_int(data: dict, key: str) -> int | None:
+    raw = data.get(key)
+    if raw is None or raw == "":
+        return None
+    return int(raw)
+
+
+def _cache_deadline(data: dict) -> int:
+    """How long the SDK may remember a successful unlock.
+
+    `cache_until` is that hint. Older servers only send `valid_until` (the macaroon exp).
+    """
+    for key in ("cache_until", "claim_until", "valid_until"):
+        value = _optional_int(data, key)
+        if value:
+            return value
+    return 0
+
+
 class SatsgateClient:
     """Minimal synchronous client for the satsgate API."""
 
@@ -134,7 +160,7 @@ class SatsgateClient:
         self.api_key = api_key
         self._http = httpx.Client(timeout=timeout_seconds)
 
-        # Simple cache: payment_hash -> valid_until
+        # payment_hash -> cache_until (a cache hint, not a content-access grant)
         self._verified: dict[str, int] = {}
 
     def __enter__(self) -> "SatsgateClient":
@@ -272,6 +298,10 @@ class SatsgateClient:
             payment_hash=data["payment_hash"],
             valid_until=int(data["valid_until"]),
             www_authenticate=data["www_authenticate"],
+            claim_until=_optional_int(data, "claim_until"),
+            invoice_expires_at=_optional_int(data, "invoice_expires_at"),
+            cache_until=_optional_int(data, "cache_until"),
+            payee_saved=bool(data.get("payee_saved")),
         )
 
     def paywall_verify(
@@ -284,10 +314,13 @@ class SatsgateClient:
     ) -> VerifyResult:
         """Verify payment and spend credits.
 
-        `expected_resource` is required: a token issued for another resource is rejected.
+        `expected_resource` is required and must exactly match the challenge resource.
         Tokens are v2 and are bound to the satsgate client that minted them.
-        `use_cache=True` avoids calling the server repeatedly for the same payment_hash
-        (until `valid_until`).
+        `use_cache=True` remembers a successful unlock until `cache_until` (or
+        `valid_until` on older servers). That avoids calling verify on every request.
+        It is not a content-access window; the merchant decides how long the buyer may use the product.
+        The server, not this client, decides whether a macaroon whose `exp` has passed
+        can still be unlocked inside the invoice claim window.
         """
 
         if not expected_resource or not str(expected_resource).strip():
@@ -302,15 +335,12 @@ class SatsgateClient:
             raise SatsgateError("resource mismatch")
 
         payment_hash = str(payload.get("ph"))
-        valid_until = int(payload.get("exp") or 0)
 
         # quick local check
         if sha256_hex_of_hexbytes(preimage_hex) != payment_hash:
             raise SatsgateError("preimage does not match payment_hash")
 
         now = int(time.time())
-        if valid_until and now > valid_until:
-            raise SatsgateError("token expired")
 
         if use_cache:
             cached_until = self._verified.get(payment_hash)
@@ -337,8 +367,9 @@ class SatsgateClient:
         data = self._ok_or_raise(r)
 
         vu = int(data.get("valid_until") or 0)
-        if vu:
-            self._verified[payment_hash] = vu
+        cache_until = _cache_deadline(data)
+        if cache_until:
+            self._verified[payment_hash] = cache_until
 
         return VerifyResult(
             ok=True,
@@ -350,6 +381,9 @@ class SatsgateClient:
             valid_until=vu,
             amount_sats=int(data["amount_sats"]) if data.get("amount_sats") is not None else None,
             payee_lightning_address=data.get("payee_lightning_address"),
+            claim_until=_optional_int(data, "claim_until"),
+            invoice_expires_at=_optional_int(data, "invoice_expires_at"),
+            cache_until=cache_until or None,
         )
 
     def _poll(self, send, *, interval_seconds: float, timeout_seconds: float) -> dict:
@@ -414,7 +448,8 @@ class SatsgateClient:
         """Poll a paywall challenge until the stored LUD-21 URL reports it settled.
 
         Uses the merchant API key plus `Authorization: L402 <macaroon>`.
-        Credits are spent once, the same as `paywall_verify`.
+        This is an alternative to `paywall_verify`. The first settled response
+        spends credits once for the payment hash; a repeat spends 0.
         """
 
         if not expected_resource or not str(expected_resource).strip():
@@ -429,8 +464,9 @@ class SatsgateClient:
 
         data = self._poll(_send, interval_seconds=interval_seconds, timeout_seconds=timeout_seconds)
         vu = int(data.get("valid_until") or 0)
-        if vu:
-            self._verified[str(data["payment_hash"])] = vu
+        cache_until = _cache_deadline(data)
+        if cache_until:
+            self._verified[str(data["payment_hash"])] = cache_until
         return VerifyResult(
             ok=True,
             client_id=int(data["client_id"]),
@@ -441,4 +477,7 @@ class SatsgateClient:
             valid_until=vu,
             amount_sats=int(data["amount_sats"]) if data.get("amount_sats") is not None else None,
             payee_lightning_address=data.get("payee_lightning_address"),
+            claim_until=_optional_int(data, "claim_until"),
+            invoice_expires_at=_optional_int(data, "invoice_expires_at"),
+            cache_until=cache_until or None,
         )

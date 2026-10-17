@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 # Load env vars from .env if present. Existing process env wins.
 load_dotenv()
 
-APP_VERSION = "0.4.1"
+APP_VERSION = "0.4.2"
 
 # production is the safe default. Local mock/dev only runs when this is explicit.
 SATSGATE_ENV = os.environ.get("SATSGATE_ENV", "production").strip().lower() or "production"
@@ -20,7 +20,9 @@ _PREVIOUS_KEYS_RAW = os.environ.get("SATSGATE_MACAROON_PREVIOUS_KEYS", "").strip
 # Demo endpoint pricing (/v1/tickets, dev-only)
 PRICE_SATS = int(os.environ.get("SATSGATE_PRICE_SATS", "10"))
 
-# Paywall and dev-ticket macaroons. Top-up macaroons follow the invoice expiry.
+# Minimum invoice lifetime for a paywall challenge, and the dev-ticket macaroon TTL.
+# Paywall claim windows follow the invoice expiry (see the paywall settings below).
+# Top-up macaroons follow the invoice expiry with their own grace and cap.
 TOKEN_TTL_SECONDS = int(os.environ.get("SATSGATE_TOKEN_TTL_SECONDS", "600"))
 
 # A top-up macaroon stays valid until the stored BOLT11 expiry, plus this grace
@@ -60,6 +62,26 @@ TOPUP_CLAIM_GRACE_SECONDS = _optional_int(
 )
 if TOPUP_CLAIM_GRACE_SECONDS > TOPUP_TOKEN_TTL_CAP_SECONDS:
     raise RuntimeError("SATSGATE_TOPUP_CLAIM_GRACE_SECONDS cannot exceed SATSGATE_TOPUP_TOKEN_TTL_CAP_SECONDS")
+
+# Paywall macaroons stay valid until the stored invoice expiry, plus this grace
+# so a buyer can finish polling after paying near the end of the invoice, and
+# never longer than the cap. The cap bounds a bearer that can spend the
+# merchant's credits once payment is proven. ttl_seconds on the challenge is
+# only the minimum invoice lifetime, not this window.
+PAYWALL_TOKEN_TTL_CAP_SECONDS = _optional_int(
+    "SATSGATE_PAYWALL_TOKEN_TTL_CAP_SECONDS",
+    _DEFAULT_TOPUP_TOKEN_TTL_CAP_SECONDS,
+    minimum=60,
+    maximum=_MAX_TOPUP_TOKEN_TTL_CAP_SECONDS,
+)
+PAYWALL_CLAIM_GRACE_SECONDS = _optional_int(
+    "SATSGATE_PAYWALL_CLAIM_GRACE_SECONDS",
+    _DEFAULT_TOPUP_CLAIM_GRACE_SECONDS,
+    minimum=0,
+    maximum=_MAX_TOPUP_CLAIM_GRACE_SECONDS,
+)
+if PAYWALL_CLAIM_GRACE_SECONDS > PAYWALL_TOKEN_TTL_CAP_SECONDS:
+    raise RuntimeError("SATSGATE_PAYWALL_CLAIM_GRACE_SECONDS cannot exceed SATSGATE_PAYWALL_TOKEN_TTL_CAP_SECONDS")
 
 # Wallet backend
 # - mock: simulated wallet (local testing only)

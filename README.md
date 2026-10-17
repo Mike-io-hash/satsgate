@@ -2,9 +2,16 @@
 
 [![CI](https://github.com/Mike-io-hash/satsgate/actions/workflows/ci.yml/badge.svg)](https://github.com/Mike-io-hash/satsgate/actions/workflows/ci.yml)
 
-`satsgate` lets you **charge sats** for AI agents, APIs, and web apps in minutes — without building a payment stack.
+`satsgate` lets you **charge sats** for AI agents, APIs, and web apps — without building a payment stack.
 
-Add a Lightning paywall to any endpoint with two calls: `/v1/paywall/challenge` (return 402) and `/v1/paywall/verify`.
+The merchant flow from a cold start:
+
+1. Top up payment verifications (credits) and save the API key. `GET /v1/topup/{plan_id}` returns the invoice. Pay it, then poll `GET /v1/topup/status/{payment_hash}`.
+2. Register the Lightning Address that receives your users' payments with `POST /v1/client/payee`. The first `POST /v1/paywall/challenge` that includes `payee_lightning_address` saves it too (`payee_saved: true`). Change it later with `POST /v1/client/payee`.
+3. `POST /v1/paywall/challenge` and give that invoice to your user.
+4. When they have paid, unlock with `GET /v1/paywall/status/{payment_hash}` (any wallet, when the payee advertises LUD-21) or `POST /v1/paywall/verify` (preimage). The first settled call spends 1 credit. A repeat spends 0.
+
+Challenge plus status (or verify) is the per-purchase pair, after the account has credits and a payee.
 
 It’s a hosted + self-hostable FastAPI service that gives you:
 
@@ -62,7 +69,7 @@ Configured via env vars:
   - checks the BOLT11 amount, network, `description_hash` (LUD-06), expiry, and payment hash before issuing a challenge
   - if the provider advertises LUD-21 `verify`, settlement is confirmed there too, including without the payer returning a preimage. Providers that omit it (Wallet of Satoshi) stay preimage-only
 
-`GET /health` returns `{"ok": true, "version": "0.4.1"}` and nothing else.
+`GET /health` returns `{"ok": true, "version": "0.4.2"}` and nothing else.
 
 ## Prepaid payment verifications (credits)
 
@@ -86,18 +93,57 @@ Reporting:
 - `GET /v1/usage/forecast?lookback_hours=24&buffer_days=7&max_topups=3&trigger_hours=24` with `X-Api-Key: ...`
   - forecast + recommended purchase + “when to top up” trigger
 
+## What a credit costs
+
+Each successful unlock spends **1 credit**, whatever `amount_sats` on the invoice is. Credits are the merchant's prepaid fee for the verification. The buyer pays the invoice amount to the merchant's Lightning Address.
+
+| Plan | Price | Credits | Sats per unlock |
+| --- | --- | --- | --- |
+| trial | 1000 | 200 | 5 |
+| starter | 10000 | 2500 | 4 |
+| growth | 100000 | 30000 | ~3.33 |
+| scale | 500000 | 200000 | 2.5 |
+| hyper | 1000000 | 500000 | 2 |
+| mega | 10000000 | 10000000 | 1 |
+
+Example: a **21-sat** item on the trial plan. The buyer pays 21 sats to you. You spend 1 credit, about 5 sats. That fee is 5/21 of the item, about **25%**. A 100-sat item on the same plan is about 5%. Price the item so this fee is the margin you intend. Larger packs lower the fee per unlock.
+
 ## Paywall (for your customers)
 
 These are the endpoints your **customers** (agent operators) integrate:
 
 - `POST /v1/paywall/challenge` with `X-Api-Key: ...` → returns `invoice + macaroon` for a resource
+  - `invoice_expires_at` is when the Lightning invoice stops being payable (often about 24 hours from the payee's provider)
+  - `claim_until` is when satsgate will still accept a first unlock: that invoice expiry plus a grace period (default 1 hour), and never later than 48 hours after the challenge was created
+  - `valid_until` matches `claim_until` on a newly minted token. It is the macaroon expiry caveat. The merchant chooses how long the buyer may use the product
+  - `cache_until` is the hint for how long to cache a successful unlock. On this response it matches `claim_until`
+  - `ttl_seconds`, when sent, is the minimum time the invoice must stay payable. It does not shorten the macaroon below the invoice
+  - `payee_saved: true` means this call stored `payee_lightning_address`. Later challenges use it. `payee_mismatch` means a different address was sent after that save. Change the saved address with `POST /v1/client/payee`
 - `POST /v1/paywall/verify` with `X-Api-Key: ...` + `Authorization: L402 ...` and **`expected_resource` (required)**
+  - `expected_resource` must exactly match the challenge `resource` (case-sensitive). A mismatch is HTTP 401 `resource mismatch`, and the body includes the issued `resource` when the macaroon belongs to this API key
   - verifies the preimage, or the stored LUD-21 URL when the header is `L402 <macaroon>` with no preimage
   - checks that the token was issued to **this** API key, for **this** resource, amount, payee, and invoice
-  - charges payment verifications (credits) once per `payment_hash` (`cost_credits`, default 1, is the merchant's own debit)
-- `GET /v1/paywall/status/{payment_hash}` with the same API key and macaroon → poll that check
+  - charges payment verifications (credits) once per `payment_hash` (`cost_credits`, default 1, is the merchant's own debit). `charged_credits` on the response is that debit
+- `GET /v1/paywall/status/{payment_hash}` with the same API key and macaroon. **This GET spends a credit when it first settles.** Verify is the other call that can settle the same payment. `charged_credits` is 0 while pending and on every repeat
 
-Tokens are version 2 (`token_version` on the challenge). A token minted for one client never verifies for another. v1 tokens are rejected. Paywall macaroons expire at `SATSGATE_TOKEN_TTL_SECONDS` (default 10 minutes) or the `ttl_seconds` on that challenge. See the 0.4.1 notes in [`CHANGELOG.md`](./CHANGELOG.md).
+`POST /v1/paywall/verify` and `GET /v1/paywall/status/{payment_hash}` share one debit per `payment_hash`. Use either one.
+
+| State | `POST /v1/paywall/verify` | `GET /v1/paywall/status/{payment_hash}` |
+| --- | --- | --- |
+| Invoice not settled yet (LUD-21, no preimage) | HTTP 402, `error: payment_pending`, `status: pending`, `charged_credits: 0` | HTTP 200, `status: pending`, `settled: false`, `charged_credits: 0` |
+| No LUD-21 URL and no preimage | HTTP 401 `preimage_required` | HTTP 401 `preimage_required` |
+| LUD-21 disagrees after a preimage was sent | HTTP 401 `lud21_not_settled` | HTTP 401 `lud21_not_settled` |
+| Bad macaroon, wrong client, or `resource mismatch` | HTTP 401 | HTTP 401 |
+| Claim window has closed and this payment was not unlocked yet | HTTP 401 `invoice expired` | HTTP 401 `invoice expired` |
+| Not enough credits | HTTP 402 | HTTP 402 |
+| Settled (first time) | HTTP 200, `charged_credits` is `cost_credits` (default 1) | HTTP 200, same debit |
+| Settled again | HTTP 200, `charged_credits: 0` | HTTP 200, `charged_credits: 0` |
+
+The 402-vs-200 difference for "not paid yet" stays so existing clients keep working. Both bodies say which code the other route uses.
+
+On a successful unlock, `valid_until` remains the macaroon `exp` caveat (older clients cache with it). `claim_until` is the server deadline for a first unlock. `cache_until` is how long to cache that successful result so you do not call again. A token minted before 0.4.2 can have `valid_until` in the past while `claim_until` is still open. Cache with `cache_until`.
+
+Tokens are version 2 (`token_version` on the challenge). A token minted for one client never verifies for another. v1 tokens are rejected. See the 0.4.2 notes in [`CHANGELOG.md`](./CHANGELOG.md).
 
 ## Pay from any wallet, then poll
 
@@ -112,6 +158,8 @@ The Python SDK helpers are `SatsgateClient.poll_topup` and `SatsgateClient.poll_
 
 The top-up macaroon stays valid until the invoice's `expires_at`, plus a grace period (default 1 hour) so a buyer can finish polling after paying near the end of the invoice, and never longer than 48 hours. A buyer can pay at any point while the invoice itself is still valid. `SATSGATE_TOKEN_TTL_SECONDS` does not apply to top-ups. A top-up token minted before 0.4.1, whose caveat expires after 10 minutes, is still accepted inside that same window when the pending row is unpaid, as long as the caller presents that macaroon and a preimage or a settled LUD-21 check. Past the window the response is `invoice expired` and nothing is credited.
 
+Paywall challenges use the same shape of window (`SATSGATE_PAYWALL_CLAIM_GRACE_SECONDS`, `SATSGATE_PAYWALL_TOKEN_TTL_CAP_SECONDS`, same defaults). A buyer can pay the paywall invoice at any point while that invoice is payable, then the merchant can unlock until `claim_until`. A paywall token minted before 0.4.2, whose caveat expires after 10 minutes, is still accepted inside that window when the caller presents the macaroon and a preimage or a settled LUD-21 check. `SATSGATE_TOKEN_TTL_SECONDS` is only the minimum invoice lifetime (and the dev-ticket macaroon TTL). Dev-ticket macaroons still use that TTL.
+
 ## L402 client compatibility
 
 Challenges use `WWW-Authenticate: L402 macaroon="<standard base64>", invoice="<bolt11>"`. `Authorization` accepts `L402` and the legacy `LSAT` prefix, in the form `<macaroon>:<64-hex-preimage>`.
@@ -122,7 +170,7 @@ Challenges use `WWW-Authenticate: L402 macaroon="<standard base64>", invoice="<b
 | Alby `fetch402` (`@getalby/lightning-tools`) | Treats the macaroon as an opaque string, pays, retries with `L402 <token>:<preimage>` | Works. The macaroon is re-rolled if its base64 would contain the substrings `L402` or `LSAT`, which that parser strips from the whole header. |
 | Aperture as a verifying proxy | Expects its own service and capability caveats | Does not accept satsgate tokens. Our caveats are the v2 bindings (`v`, `kid`, `purpose`, `cid`, `ph`, `res`, `amt`, `payee_h`, `inv_h`, `exp`), not Aperture's. |
 
-Tokens issued before 0.4.0 were signed JSON in url-safe base64. This server still verifies those. lnget cannot unmarshal them. A top-up JSON token whose `exp` has passed still claims while the stored invoice window is open; a paywall JSON token does not.
+Tokens issued before 0.4.0 were signed JSON in url-safe base64. This server still verifies those. lnget cannot unmarshal them. A top-up or paywall token whose `exp` has passed still completes while its stored invoice window is open. Dev tickets do not.
 
 ## Scripts
 

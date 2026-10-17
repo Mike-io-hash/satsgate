@@ -98,6 +98,25 @@ def validate_bolt11(
     )
 
 
+def bolt11_expiry_unix(invoice: str | None) -> int | None:
+    """Read a BOLT11 expiry. Mock invoices and anything that does not decode return None."""
+    if not isinstance(invoice, str) or not invoice.lower().startswith("ln"):
+        return None
+    if invoice.lower().startswith("lnmock"):
+        return None
+    try:
+        decoded = bolt11.decode(invoice)
+    except Exception:  # noqa: BLE001
+        return None
+    expiry = getattr(decoded, "expiry_time", None)
+    if expiry is None or isinstance(expiry, bool):
+        return None
+    try:
+        return int(expiry)
+    except (TypeError, ValueError):
+        return None
+
+
 def assert_verify_url_consistent(verify_url: str, payment_hash: str) -> None:
     """If the LUD-21 URL embeds a payment hash, it must be this invoice's hash."""
     segment = urlsplit(verify_url).path.rstrip("/").split("/")[-1]
