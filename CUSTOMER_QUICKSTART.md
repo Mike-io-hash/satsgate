@@ -71,6 +71,8 @@ That key can call the paywall challenge, status, and verify routes for resources
 
 To put that key in front of an API you already have, without writing paywall code, run [`satsgate-proxy`](./proxy/README.md). It is a separate process (version 0.8.0) and uses resource ids `route:<name>` or `site`, so set `resource_prefix` to match those (or omit it). The core in this quickstart stays the hosted API.
 
+A buyer-side agent uses [`satsgate-mcp`](./mcp/README.md) (version 0.9.0). That process does not create challenges. It pays a URL the proxy already protects. The optional `sgr_` key on the MCP server is only for read-only status and is a different key from the one in the proxy.
+
 ## 3) End-to-end test (challenge → pay → unlock)
 
 This script:
