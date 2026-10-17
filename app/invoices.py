@@ -105,15 +105,27 @@ def assert_verify_url_consistent(verify_url: str, payment_hash: str) -> None:
         raise InvoiceValidationError("verify_url_mismatch")
 
 
-def assert_lud21_settled(data: dict, *, payment_hash: str, preimage_hex: str) -> None:
-    """Additional settlement check. Caller already proved sha256(preimage)=payment_hash."""
+def assert_lud21_settled(data: dict, *, payment_hash: str, preimage_hex: str | None) -> None:
+    """Settlement check against a LUD-21 verify response.
+
+    When the caller already holds a preimage, a missing remote preimage is
+    still accepted (Wallet of Satoshi never sends `verify`). When the caller
+    has no preimage, the provider must return one that hashes to this payment
+    hash. A bare `settled: true` is not enough to credit an account.
+    """
     if str(data.get("status", "")).upper() != "OK":
         raise InvoiceValidationError("lud21_unavailable")
     if data.get("settled") is not True:
         raise InvoiceValidationError("lud21_not_settled")
 
     remote_preimage = data.get("preimage")
-    if remote_preimage is not None:
+    if preimage_hex is None:
+        if not isinstance(remote_preimage, str) or not _HEX64.fullmatch(remote_preimage):
+            raise InvoiceValidationError("lud21_not_settled")
+        digest = hashlib.sha256(bytes.fromhex(remote_preimage)).hexdigest()
+        if digest != payment_hash.lower():
+            raise InvoiceValidationError("lud21_mismatch")
+    elif remote_preimage is not None:
         if not isinstance(remote_preimage, str) or not _HEX64.fullmatch(remote_preimage):
             raise InvoiceValidationError("lud21_mismatch")
         digest = hashlib.sha256(bytes.fromhex(remote_preimage)).hexdigest()

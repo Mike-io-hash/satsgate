@@ -38,6 +38,14 @@ res = sg.paywall_verify(
 )
 print(res)
 
+# Or, when the payee's wallet advertised LUD-21 verify: the payer pays `ch.invoice`
+# from any wallet and you poll without a preimage.
+# settled = sg.poll_paywall(
+#     macaroon=ch.macaroon,
+#     payment_hash=ch.payment_hash,
+#     expected_resource="demo/test",
+# )
+
 # 4) Reporting
 print(sg.usage_forecast(lookback_hours=24, buffer_days=7, trigger_hours=24))
 print(sg.usage_daily(days=30))

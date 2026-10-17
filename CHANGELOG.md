@@ -7,9 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-17
+
+### Added
+- Top-ups, paywall unlocks, and dev-only tickets can finish without a preimage when the LNURL-pay provider returned a LUD-21 `verify` URL (Alby does). Poll `GET /v1/topup/status/{payment_hash}` or `GET /v1/paywall/status/{payment_hash}` with `Authorization: L402 <macaroon>` and no preimage. The same macaroon-only header is accepted on `GET /v1/topup/{plan_id}`, `POST /v1/paywall/verify`, and `GET /v1/tickets`.
+- The new account's API key is returned only by the request that creates it. A replay is idempotent: it does not credit again and does not show the key. The macaroon (not the payment hash) is the claim.
+- Python SDK `0.3.0`: `poll_topup` and `poll_paywall` for that pay-from-any-wallet flow.
+- New tokens are libmacaroons V2 macaroons, standard base64, with an L402 v0 identifier (so lnget can read the payment hash) and caveats for the existing v2 bindings. `Authorization` accepts `L402` and legacy `LSAT`.
+
+### Changed
+- In production, `/openapi.json` and `/docs` omit `/v1/admin/*`, `/v1/tickets`, `/v1/spend`, and `/dev/mock/pay`. Those routes still behave as before.
+- `GET /health` reports `0.4.0`.
+
 ### Fixed
+- `GET` and `HEAD` for `/health` and `/.well-known/satsgate.json` no longer share one OpenAPI operation id.
 - LNURL-pay invoice requests no longer send a LUD-12 `comment` unless `SATSGATE_LNURL_SEND_COMMENT=1` and the provider advertises `commentAllowed`. Alby puts that comment in the BOLT11 description and omits `description_hash = SHA256(metadata)`, which challenge and top-up routes rejected (`invoice_rejected` / `description_hash_mismatch`). The description-hash check stays strict.
 - Docker Compose assigns the app container `172.28.0.3` so it cannot take Caddy's pinned address `172.28.0.2` (`Address already in use`). The app service checks `GET /health`.
+
+### Security
+- Auto-confirm reads only the verify URL stored with the invoice, checks it again with the SSRF guard, and credits only when the provider returns a preimage that hashes to that invoice. A caller cannot pass a verify URL. `settled: true` without that preimage does not credit.
+- In-flight v2 JSON tokens from 0.3.0 still verify until they expire. v1 tokens stay rejected. Client, resource, amount, payee, and invoice bindings are unchanged.
+
+### Migration
+No new environment variables. Restart the process to serve 0.4.0.
+
+Buyers on a provider that advertises LUD-21 `verify` can pay the invoice from any wallet and poll. Wallet of Satoshi does not advertise `verify`; those payments still need `Authorization: L402 <macaroon>:<preimage>`.
+
+HTTP clients that pass the macaroon through unchanged (the Node demos, lnget, Alby `fetch402`) keep working. Code that decodes the old JSON token locally, including satsgate-sdk `0.2.0`, should upgrade to satsgate-sdk `0.3.0`.
 
 ## [0.3.0] - 2026-10-16
 

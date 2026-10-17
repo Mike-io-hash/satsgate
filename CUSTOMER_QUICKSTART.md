@@ -41,6 +41,8 @@ node client_topup_nwc.mjs trial
 
 Save the returned `api_key` (it may only be shown once).
 
+If the hosted payee's provider advertises LUD-21 `verify` (Alby does), you can skip NWC: pay the 402 invoice from any wallet, then poll `GET /v1/topup/status/{payment_hash}` with `Authorization: L402 <macaroon>` until `settled` is true. The Python SDK method is `poll_topup`. Wallet of Satoshi still needs the preimage.
+
 ## 2) Register your payee (where your users will pay)
 
 ```bash

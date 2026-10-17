@@ -9,7 +9,9 @@ from fastapi.responses import JSONResponse
 from . import config
 from . import db_admin
 
-router = APIRouter()
+# Operator routes stay callable when SATSGATE_ADMIN_TOKEN is set, but the
+# public docs and OpenAPI document only the customer API in production.
+router = APIRouter(include_in_schema=config.is_local_env())
 
 
 def _require_admin(x_admin_token: str | None):

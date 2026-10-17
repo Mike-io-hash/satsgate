@@ -193,11 +193,15 @@ def confirm_lud21(
     *,
     verify_url: str,
     payment_hash: str,
-    preimage_hex: str,
+    preimage_hex: str | None,
     fetch_json: Callable | None = None,
     resolver: Callable | None = None,
 ) -> None:
-    """Optional LUD-21 check. No-op is the caller's job when the provider omitted `verify`."""
+    """LUD-21 check of a URL satsgate stored at invoice time.
+
+    The caller must pass the stored URL. A client-supplied URL is not accepted.
+    `preimage_hex=None` asks the provider to prove settlement itself.
+    """
     ssrf.guard_url(verify_url, resolver=resolver)
     if fetch_json is not None:
         data = fetch_json(verify_url, None)

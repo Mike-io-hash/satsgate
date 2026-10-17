@@ -13,6 +13,7 @@ import hmac
 import importlib
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -112,9 +113,9 @@ def test_one_sat_cross_tenant_token_does_not_verify(client):
     stolen = _challenge(client, attacker_key, resource=resource, amount_sats=1)
     stolen_auth = _pay(client, stolen)
 
-    padded = stolen["macaroon"] + "=" * ((4 - len(stolen["macaroon"]) % 4) % 4)
-    payload_raw = base64.urlsafe_b64decode(padded)
-    payload = json.loads(payload_raw.split(b".", 1)[0])
+    from app import l402
+
+    payload = l402.peek_bindings(stolen["macaroon"])
     assert payload["v"] == 2
     assert payload["cid"] != client.get("/v1/client", headers={"X-Api-Key": victim_key}).json()["client_id"]
     assert "amt" in payload and payload["amt"] == 1
@@ -183,10 +184,9 @@ def test_bad_preimage_expired_token_and_bad_signature_are_rejected(client):
     assert bad_preimage.status_code == 401
     assert bad_preimage.json()["error"] == "preimage does not match payment_hash"
 
-    padded = challenge["macaroon"] + "=" * ((4 - len(challenge["macaroon"]) % 4) % 4)
-    raw = bytearray(base64.urlsafe_b64decode(padded))
-    raw[-2] ^= 0x01
-    tampered = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    raw = bytearray(base64.b64decode(challenge["macaroon"]))
+    raw[-1] ^= 0x01
+    tampered = base64.b64encode(bytes(raw)).decode("ascii")
     bad_sig = client.post(
         "/v1/paywall/verify",
         headers={"X-Api-Key": api_key, "Authorization": _auth(tampered, preimage)},
@@ -295,7 +295,7 @@ def test_health_does_not_leak_internals(client):
     body = response.json()
     assert set(body) == {"ok", "version"}
     assert body["ok"] is True
-    assert body["version"] == "0.3.0"
+    assert body["version"] == "0.4.0"
     serialized = json.dumps(body).lower()
     assert "sqlite" not in serialized
     assert "db_path" not in serialized
@@ -611,6 +611,28 @@ def test_lud21_verify_url_must_match_payment_hash():
     with pytest.raises(InvoiceValidationError) as caught:
         assert_lud21_settled({"status": "OK", "settled": False}, payment_hash="ab" * 32, preimage_hex="11" * 32)
     assert caught.value.code == "lud21_not_settled"
+
+    # A settled flag without the provider preimage is not enough to auto-confirm.
+    with pytest.raises(InvoiceValidationError) as caught:
+        assert_lud21_settled({"status": "OK", "settled": True}, payment_hash="ab" * 32, preimage_hex=None)
+    assert caught.value.code == "lud21_not_settled"
+
+    preimage = bytes.fromhex("11" * 32)
+    payment_hash = hashlib.sha256(preimage).hexdigest()
+    assert_lud21_settled(
+        {"status": "OK", "settled": True, "preimage": preimage.hex()},
+        payment_hash=payment_hash,
+        preimage_hex=None,
+    )
+    with pytest.raises(InvoiceValidationError) as caught:
+        assert_lud21_settled(
+            {"status": "OK", "settled": True, "preimage": "22" * 32},
+            payment_hash=payment_hash,
+            preimage_hex=None,
+        )
+    assert caught.value.code == "lud21_mismatch"
+    # The preimage path still accepts a settled response that omits the preimage.
+    assert_lud21_settled({"status": "OK", "settled": True}, payment_hash=payment_hash, preimage_hex=preimage.hex())
 
 
 def test_wallet_rejects_bad_invoices_and_private_callbacks():
@@ -982,3 +1004,453 @@ def test_startup_allows_explicit_local_dev_and_strong_production_secret(tmp_path
         }
     )
     assert production.returncode == 0, production.stderr
+
+
+def _decode_uvarint(data: bytes) -> tuple[int, int]:
+    value = 0
+    shift = 0
+    for index, byte in enumerate(data, start=1):
+        if byte < 0x80:
+            return value | (byte << shift), index
+        value |= (byte & 0x7F) << shift
+        shift += 7
+    raise AssertionError("bad uvarint")
+
+
+def _lnget_identifier(raw: bytes) -> bytes:
+    """Independent V2 macaroon walk, the same steps lnget does after base64."""
+    assert raw[:1] == b"\x02"
+    data = raw[1:]
+    fields: list[tuple[int, bytes]] = []
+    while True:
+        field_type, used = _decode_uvarint(data)
+        data = data[used:]
+        if field_type == 0:
+            break
+        length, used = _decode_uvarint(data)
+        data = data[used:]
+        fields.append((field_type, data[:length]))
+        data = data[length:]
+    identifier = dict(fields)[2]
+    assert len(identifier) == 66
+    assert int.from_bytes(identifier[:2], "big") == 0
+    return identifier
+
+
+def _alby_parse_l402(header: str) -> dict[str, str]:
+    """@getalby/lightning-tools parseL402: first L402/LSAT stripped, then key=value."""
+    text = header.replace("L402", "", 1).replace("LSAT", "", 1).strip()
+    pairs: dict[str, str] = {}
+    for match in re.finditer(r'(\w+)=("([^"]*)"|\'([^\']*)\'|([^,]*))', text):
+        pairs[match.group(1)] = match.group(3) or match.group(4) or match.group(5)
+    if "token" not in pairs and "macaroon" in pairs:
+        pairs["token"] = pairs.pop("macaroon")
+    return pairs
+
+
+def test_l402_challenge_parses_like_lnget_and_alby(client):
+    import re as _re
+
+    started = client.get("/v1/topup/trial")
+    assert started.status_code == 402, started.text
+    body = started.json()
+    header = started.headers["www-authenticate"]
+
+    # lnget ParseChallenge
+    challenge_re = _re.compile(r'(?i)(LSAT|L402)\s+macaroon="([^"]+)",\s*invoice="([^"]+)"')
+    match = challenge_re.search(header)
+    assert match is not None, header
+    assert match.group(1).upper() == "L402"
+    mac_b64 = match.group(2)
+    assert match.group(3) == body["invoice"]
+    assert _re.fullmatch(r"[A-Za-z0-9+/=]+", mac_b64)
+    assert "L402" not in mac_b64 and "LSAT" not in mac_b64
+    raw = base64.standard_b64decode(mac_b64)
+    identifier = _lnget_identifier(raw)
+    assert identifier[2:34].hex() == body["payment_hash"]
+
+    # Aperture FromHeader credential grammar, including the legacy LSAT prefix.
+    preimage = client.get(f"/dev/mock/pay/{body['payment_hash']}").json()["preimage"]
+    for scheme in ("L402", "LSAT"):
+        auth = f"{scheme} {mac_b64}:{preimage}"
+        assert _re.fullmatch(r"(?i:(LSAT|L402))[ ]+([A-Za-z0-9+/=]+):([0-9a-fA-F]{64})", auth)
+
+    # Alby fetch402 treats the macaroon as an opaque token.
+    parsed = _alby_parse_l402(header)
+    assert parsed["token"] == body["macaroon"] == mac_b64
+    assert parsed["invoice"] == body["invoice"]
+
+    settled = client.get("/v1/topup/trial", headers={"Authorization": f"LSAT {mac_b64}:{preimage}"})
+    assert settled.status_code == 200, settled.text
+    assert settled.json()["api_key"].startswith("sg_")
+
+
+def test_in_flight_v2_json_token_still_verifies(client):
+    api_key = _buy_client(client)
+    challenge = _challenge(client, api_key, resource="api/premium", amount_sats=5)
+    client_id = client.get("/v1/client", headers={"X-Api-Key": api_key}).json()["client_id"]
+    from app.l402 import invoice_binding, payee_binding
+
+    payload = {
+        "v": 2,
+        "kid": "1",
+        "purpose": "paywall",
+        "cid": client_id,
+        "ph": challenge["payment_hash"],
+        "res": "api/premium",
+        "amt": 5,
+        "payee_h": payee_binding(challenge.get("payee_lightning_address")),
+        "inv_h": invoice_binding(challenge["invoice"]),
+        "exp": int(time.time()) + 600,
+        "nonce": "legacy-json",
+    }
+    body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    sig = hmac.new(b"test-secret", body, hashlib.sha256).hexdigest()
+    token = base64.urlsafe_b64encode(body + b"." + sig.encode()).decode().rstrip("=")
+    preimage = client.get(f"/dev/mock/pay/{challenge['payment_hash']}").json()["preimage"]
+    accepted = client.post(
+        "/v1/paywall/verify",
+        headers={"X-Api-Key": api_key, "Authorization": _auth(token, preimage)},
+        json={"expected_resource": "api/premium"},
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["charged_credits"] == 1
+
+
+def test_topup_claim_without_preimage_is_idempotent_and_bound(client):
+    from app import config, db
+    from app.invoices import InvoiceValidationError
+    from app import wallet_lnaddr
+
+    started = client.get("/v1/topup/trial")
+    assert started.status_code == 402, started.text
+    body = started.json()
+    payment_hash = body["payment_hash"]
+    macaroon = body["macaroon"]
+
+    # No verify URL: the macaroon alone cannot mint an API key.
+    refused = client.get(
+        f"/v1/topup/status/{payment_hash}",
+        headers={"Authorization": f"L402 {macaroon}"},
+    )
+    assert refused.status_code == 401
+    assert refused.json()["error"] == "preimage_required"
+
+    naked = client.get(f"/v1/topup/status/{payment_hash}")
+    assert naked.status_code == 401
+
+    with db._connect(config.DB_PATH) as conn:
+        conn.execute(
+            "UPDATE topups SET verify_url = ? WHERE payment_hash = ?",
+            ("https://ln.example/verify/" + payment_hash, payment_hash),
+        )
+
+    calls = {"n": 0}
+
+    def _later(**kwargs):
+        assert kwargs["verify_url"].endswith(payment_hash)
+        assert kwargs["preimage_hex"] is None
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise InvoiceValidationError("lud21_not_settled")
+        return None
+
+    original = wallet_lnaddr.confirm_lud21
+    wallet_lnaddr.confirm_lud21 = _later
+    try:
+        pending = client.get(
+            f"/v1/topup/status/{payment_hash}",
+            headers={"Authorization": f"L402 {macaroon}"},
+        )
+        assert pending.status_code == 200, pending.text
+        assert pending.json()["settled"] is False
+        assert "api_key" not in pending.json()
+
+        # A macaroon for a different invoice cannot claim this payment hash.
+        other = client.get("/v1/topup/trial")
+        stolen = client.get(
+            f"/v1/topup/status/{payment_hash}",
+            headers={"Authorization": f"L402 {other.json()['macaroon']}"},
+        )
+        assert stolen.status_code == 401
+
+        settled = client.get(
+            f"/v1/topup/status/{payment_hash}",
+            headers={"Authorization": f"L402 {macaroon}"},
+        )
+    finally:
+        wallet_lnaddr.confirm_lud21 = original
+
+    assert settled.status_code == 200, settled.text
+    first = settled.json()
+    assert first["settled"] is True
+    assert first["credits_added"] == body["plan"]["credits"]
+    assert first["api_key"].startswith("sg_")
+
+    again = client.get(
+        f"/v1/topup/status/{payment_hash}",
+        headers={"Authorization": f"L402 {macaroon}"},
+    )
+    assert again.status_code == 200, again.text
+    replay = again.json()
+    assert replay["credits_added"] == 0
+    assert "api_key" not in replay
+    assert replay["new_balance"] == first["new_balance"]
+
+    # The preimage form still settles a fresh top-up, including under LSAT above.
+    # A stored private verify URL must not be fetched and must not credit anyone.
+    poisoned = client.get("/v1/topup/starter")
+    poisoned_body = poisoned.json()
+    with db._connect(config.DB_PATH) as conn:
+        conn.execute(
+            "UPDATE topups SET verify_url = ? WHERE payment_hash = ?",
+            ("http://127.0.0.1/verify", poisoned_body["payment_hash"]),
+        )
+    blocked = client.get(
+        f"/v1/topup/status/{poisoned_body['payment_hash']}",
+        headers={"Authorization": f"L402 {poisoned_body['macaroon']}", "verify_url": "https://ln.example/verify"},
+    )
+    assert blocked.status_code == 502
+    assert blocked.json()["error"] == "payee_destination_rejected"
+    assert "api_key" not in blocked.json()
+
+    # Preimage flow remains available when no verify URL was stored.
+    plain = client.get("/v1/topup/growth")
+    plain_body = plain.json()
+    plain_preimage = client.get(f"/dev/mock/pay/{plain_body['payment_hash']}").json()["preimage"]
+    credited = client.get(
+        "/v1/topup/growth",
+        headers={"Authorization": _auth(plain_body["macaroon"], plain_preimage)},
+    )
+    assert credited.status_code == 200, credited.text
+    assert credited.json()["api_key"].startswith("sg_")
+
+
+def test_topup_claim_does_not_double_credit(client):
+    from app import config, db
+
+    started = client.get("/v1/topup/trial")
+    body = started.json()
+    barrier = threading.Barrier(2)
+    results: list[dict] = []
+    errors: list[BaseException] = []
+
+    def _once() -> None:
+        try:
+            barrier.wait(timeout=5)
+            results.append(
+                db.settle_topup_and_credit(config.DB_PATH, payment_hash=body["payment_hash"], client_id=None)
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_once) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert errors == []
+    assert sum(item["credits_added"] for item in results) == body["plan"]["credits"]
+    assert sum(1 for item in results if item["api_key"]) == 1
+    assert results[0]["client_id"] == results[1]["client_id"]
+    balance = db.get_balance(config.DB_PATH, client_id=results[0]["client_id"])
+    assert balance == body["plan"]["credits"]
+
+
+def test_paywall_and_ticket_can_settle_from_stored_verify_url(client):
+    from app import config, db
+    from app.invoices import InvoiceValidationError
+    from app import wallet_lnaddr
+
+    api_key = _buy_client(client)
+    challenge = _challenge(client, api_key, resource="api/premium", amount_sats=4)
+    before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    with db._connect(config.DB_PATH) as conn:
+        conn.execute(
+            "UPDATE paywall_challenges SET verify_url = ? WHERE payment_hash = ?",
+            ("https://ln.example/verify/" + challenge["payment_hash"], challenge["payment_hash"]),
+        )
+
+    def _not_settled(**kwargs):
+        assert kwargs["preimage_hex"] is None
+        raise InvoiceValidationError("lud21_not_settled")
+
+    original = wallet_lnaddr.confirm_lud21
+    wallet_lnaddr.confirm_lud21 = _not_settled
+    try:
+        pending = client.get(
+            f"/v1/paywall/status/{challenge['payment_hash']}",
+            headers={"X-Api-Key": api_key, "Authorization": f"L402 {challenge['macaroon']}"},
+            params={"expected_resource": "api/premium"},
+        )
+    finally:
+        wallet_lnaddr.confirm_lud21 = original
+    assert pending.status_code == 200, pending.text
+    assert pending.json()["settled"] is False
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before
+
+    stranger = _buy_client(client)
+    rejected = client.get(
+        f"/v1/paywall/status/{challenge['payment_hash']}",
+        headers={"X-Api-Key": stranger, "Authorization": f"L402 {challenge['macaroon']}"},
+        params={"expected_resource": "api/premium"},
+    )
+    assert rejected.status_code == 401
+    assert rejected.json()["error"] == "client mismatch"
+
+    wallet_lnaddr.confirm_lud21 = lambda **_kwargs: None
+    try:
+        unlocked = client.get(
+            f"/v1/paywall/status/{challenge['payment_hash']}",
+            headers={"X-Api-Key": api_key, "Authorization": f"L402 {challenge['macaroon']}"},
+            params={"expected_resource": "api/premium"},
+        )
+    finally:
+        wallet_lnaddr.confirm_lud21 = original
+    assert unlocked.status_code == 200, unlocked.text
+    assert unlocked.json()["charged_credits"] == 1
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before - 1
+
+    # Replay does not ask LUD-21 again and does not charge.
+    wallet_lnaddr.confirm_lud21 = _not_settled
+    try:
+        replay = client.get(
+            f"/v1/paywall/status/{challenge['payment_hash']}",
+            headers={"X-Api-Key": api_key, "Authorization": f"L402 {challenge['macaroon']}"},
+            params={"expected_resource": "api/premium"},
+        )
+    finally:
+        wallet_lnaddr.confirm_lud21 = original
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["charged_credits"] == 0
+
+    ticket = client.get("/v1/tickets")
+    assert ticket.status_code == 402, ticket.text
+    ticket_body = ticket.json()
+    with db._connect(config.DB_PATH) as conn:
+        conn.execute(
+            "UPDATE ticket_challenges SET verify_url = ? WHERE payment_hash = ?",
+            ("https://ln.example/verify/" + ticket_body["payment_hash"], ticket_body["payment_hash"]),
+        )
+    wallet_lnaddr.confirm_lud21 = lambda **_kwargs: None
+    try:
+        granted = client.get("/v1/tickets", headers={"Authorization": f"L402 {ticket_body['macaroon']}"})
+    finally:
+        wallet_lnaddr.confirm_lud21 = original
+    assert granted.status_code == 200, granted.text
+    assert granted.json()["ticket"]["payment_hash"] == ticket_body["payment_hash"]
+
+
+def test_public_openapi_hides_dev_and_admin_routes(tmp_path):
+    import warnings
+
+    from fastapi.testclient import TestClient
+
+    dev = _load_app(tmp_path / "dev")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        schema = dev.app.openapi()
+    assert not any("Duplicate Operation ID" in str(item.message) for item in caught)
+    operation_ids = [
+        op.get("operationId")
+        for ops in schema["paths"].values()
+        for op in ops.values()
+        if isinstance(op, dict)
+    ]
+    assert len(operation_ids) == len(set(operation_ids))
+
+    production = _load_app(
+        tmp_path / "prod",
+        SATSGATE_ENV="production",
+        SATSGATE_DEV_MODE="0",
+        SATSGATE_WALLET_MODE="lnaddr",
+        SATSGATE_LIGHTNING_ADDRESS="ops@example.com",
+        SATSGATE_MACAROON_SECRET="ab" * 32,
+        SATSGATE_ADMIN_TOKEN="prod-admin-token",
+    )
+    with TestClient(production.app) as http:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            public = http.get("/openapi.json")
+        assert public.status_code == 200
+        assert not any("Duplicate Operation ID" in str(item.message) for item in caught)
+        paths = set(public.json()["paths"])
+        assert "/v1/plans" in paths
+        assert "/v1/topup/status/{payment_hash}" in paths
+        assert "/v1/paywall/status/{payment_hash}" in paths
+        assert "/v1/admin/overview" not in paths
+        assert "/v1/tickets" not in paths
+        assert "/v1/spend" not in paths
+        assert "/dev/mock/pay/{payment_hash}" not in paths
+        # The admin route still answers; it is only absent from the public document.
+        hidden = http.get("/v1/admin/overview", headers={"X-Admin-Token": "prod-admin-token"})
+        assert hidden.status_code == 200
+        assert http.get("/v1/tickets").status_code == 404
+
+
+def test_sdk_polls_topup_and_decodes_macaroon(client):
+    import sys
+
+    import httpx
+
+    sdk_src = REPO_ROOT / "sdk" / "python" / "src"
+    if str(sdk_src) not in sys.path:
+        sys.path.insert(0, str(sdk_src))
+    from satsgate_sdk import SatsgateClient, SatsgateError
+    from satsgate_sdk.client import decode_macaroon_payload
+
+    started = client.get("/v1/topup/trial")
+    body = started.json()
+    decoded = decode_macaroon_payload(body["macaroon"])
+    assert decoded["v"] == 2
+    assert decoded["ph"] == body["payment_hash"]
+    assert decoded["res"] == "v1/topup/trial"
+    assert decoded["purpose"] == "topup"
+
+    calls = {"n": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == f"L402 {body['macaroon']}"
+        assert ":" not in request.headers["authorization"].split(" ", 1)[1]
+        assert request.url.path.endswith("/" + body["payment_hash"])
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(
+                200,
+                json={"ok": True, "status": "pending", "settled": False, "payment_hash": body["payment_hash"]},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "settled": True,
+                "api_key": "sg_from_poll",
+                "credits_added": 200,
+                "new_balance": 200,
+                "client_id": 1,
+                "payment_hash": body["payment_hash"],
+            },
+        )
+
+    sdk = SatsgateClient(base_url="http://testserver", api_key="unused")
+    sdk._http.close()
+    sdk._http = httpx.Client(transport=httpx.MockTransport(_handler), base_url="http://testserver")
+    result = sdk.poll_topup(
+        macaroon=body["macaroon"],
+        payment_hash=body["payment_hash"],
+        interval_seconds=0,
+        timeout_seconds=5,
+    )
+    assert result["settled"] is True
+    assert result["api_key"] == "sg_from_poll"
+    assert calls["n"] == 2
+
+    def _stuck(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True, "status": "pending", "settled": False})
+
+    sdk._http.close()
+    sdk._http = httpx.Client(transport=httpx.MockTransport(_stuck), base_url="http://testserver")
+    with pytest.raises(SatsgateError) as caught:
+        sdk.poll_topup(macaroon=body["macaroon"], payment_hash=body["payment_hash"], interval_seconds=0, timeout_seconds=0)
+    assert "pending" in str(caught.value)
