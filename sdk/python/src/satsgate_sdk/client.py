@@ -217,6 +217,40 @@ class SatsgateClient:
         )
         return self._ok_or_raise(r)
 
+    def create_api_key(self, *, label: str, resource_prefix: str | None = None) -> dict:
+        """Create a restricted key. Requires the account key. ``api_key`` is shown only in this response.
+
+        A restricted key (prefix ``sgr_``) can challenge, check status, and verify.
+        ``resource_prefix`` limits those calls to resources that start with it.
+        Pass the returned secret to a new ``SatsgateClient`` for the proxy or MCP server.
+        """
+        body: dict[str, Any] = {"label": label}
+        if resource_prefix is not None:
+            body["resource_prefix"] = resource_prefix
+        r = self._http.post(
+            f"{self.base_url}/v1/api-keys",
+            headers={**self._headers(), "Content-Type": "application/json"},
+            json=body,
+        )
+        return self._ok_or_raise(r)
+
+    def list_api_keys(self, *, include_revoked: bool = False) -> dict:
+        """List restricted keys for this account. Secrets are not included."""
+        r = self._http.get(
+            f"{self.base_url}/v1/api-keys",
+            headers=self._headers(),
+            params={"include_revoked": bool(include_revoked)},
+        )
+        return self._ok_or_raise(r)
+
+    def revoke_api_key(self, key_id: int) -> dict:
+        """Revoke a restricted key. Requires the account key. Repeating this is safe."""
+        r = self._http.post(
+            f"{self.base_url}/v1/api-keys/{int(key_id)}/revoke",
+            headers=self._headers(),
+        )
+        return self._ok_or_raise(r)
+
     # --- Reporting ---
 
     def ledger(self, *, limit: int = 50, before_id: int | None = None) -> dict:

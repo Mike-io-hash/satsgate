@@ -109,15 +109,48 @@ def init_db(db_path: str) -> None:
             """
         )
 
+        # Additive only. Existing rows keep NULL api_key_id / resource.
+        ledger_cols = [r["name"] for r in conn.execute("PRAGMA table_info(ledger)").fetchall()]
+        if "api_key_id" not in ledger_cols:
+            conn.execute("ALTER TABLE ledger ADD COLUMN api_key_id INTEGER")
+        if "resource" not in ledger_cols:
+            conn.execute("ALTER TABLE ledger ADD COLUMN resource TEXT")
+
+        challenge_cols = [r["name"] for r in conn.execute("PRAGMA table_info(paywall_challenges)").fetchall()]
+        if "api_key_id" not in challenge_cols:
+            conn.execute("ALTER TABLE paywall_challenges ADD COLUMN api_key_id INTEGER")
+
+        # Restricted keys. The account key stays on clients.api_key_hash.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS api_keys (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              client_id INTEGER NOT NULL,
+              key_hash TEXT NOT NULL UNIQUE,
+              key_prefix TEXT NOT NULL,
+              label TEXT NOT NULL,
+              scope TEXT NOT NULL,
+              resource_prefix TEXT,
+              created_at INTEGER NOT NULL,
+              last_used_at INTEGER,
+              revoked_at INTEGER,
+              FOREIGN KEY(client_id) REFERENCES clients(id)
+            );
+            """
+        )
+
         # Indexes (improve dashboard/reporting performance)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_client_id ON ledger(client_id, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_client_created ON ledger(client_id, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_api_key ON ledger(client_id, api_key_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_topups_client_created ON topups(client_id, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_topups_pending_ip ON topups(requester_ip, status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_verifications_client_created ON verifications(client_id, created_at)")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_challenges_client_expires ON paywall_challenges(client_id, expires_at)"
         )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_challenges_api_key ON paywall_challenges(api_key_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_client ON api_keys(client_id, revoked_at)")
 
         conn.execute(
             """
@@ -141,7 +174,7 @@ def hash_api_key(api_key: str) -> str:
 
 
 def new_api_key() -> str:
-    # Prefix for identification only (not secret)
+    # Prefix for identification only (not secret). Restricted keys use sgr_ (see db_keys).
     return "sg_" + secrets.token_urlsafe(32)
 
 
@@ -411,6 +444,7 @@ def add_paywall_challenge(
     resource: str,
     verify_url: str | None,
     expires_at: int,
+    api_key_id: int | None = None,
     max_open_per_client: int = 100,
     now: int | None = None,
     claim_grace_seconds: int = 0,
@@ -444,9 +478,10 @@ def add_paywall_challenge(
         conn.execute(
             """
             INSERT INTO paywall_challenges(
-              payment_hash, client_id, invoice, amount_sats, payee, resource, verify_url, created_at, expires_at
+              payment_hash, client_id, invoice, amount_sats, payee, resource, verify_url, created_at, expires_at,
+              api_key_id
             )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payment_hash,
@@ -458,6 +493,7 @@ def add_paywall_challenge(
                 verify_url,
                 now,
                 int(expires_at),
+                int(api_key_id) if api_key_id is not None else None,
             ),
         )
         conn.execute("COMMIT")

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-17
+
+### Added
+- Restricted API keys. The account key (`sg_...`, from top-up) can `POST /v1/api-keys`, `GET /v1/api-keys`, and `POST /v1/api-keys/{key_id}/revoke`. A new key is returned once, stored as a SHA-256 hash, and starts with `sgr_` so it is distinguishable from the account key. Each key has a label, `created_at`, `last_used_at` (updated at most once a minute), and `revoked_at`.
+- An optional `resource_prefix` limits that key to paywall resources that start with the prefix (case-sensitive). Omit it to allow every resource. Up to 50 active restricted keys per client.
+- A restricted key can `POST /v1/paywall/challenge`, `GET /v1/paywall/status/{payment_hash}`, and `POST /v1/paywall/verify`. It cannot top up, set or change the payee (including on the first challenge), create or revoke keys, or read balance, client, ledger, or usage.
+- Paywall debits record `api_key_id` and `resource`. `GET /v1/ledger` adds `api_key_id`, `api_key_label`, `api_key_prefix`, and `resource`. Null `api_key_id` means the account key. `GET /v1/usage/summary` adds `summary.by_api_key`.
+- Python SDK `0.4.0`: `create_api_key`, `list_api_keys`, `revoke_api_key`.
+
+### Security
+- A leaked restricted key cannot redirect payouts or mint another key. Revocation is checked on every request (`api_key_revoked`). Forbidden account calls return HTTP 403 `insufficient_scope`. A resource outside the prefix returns HTTP 403 `resource_not_allowed`.
+- The account key is unchanged. Existing `sg_` keys keep full access. Unknown account keys on top-up stay anonymous, as before. A presented `sgr_` key is never treated as anonymous.
+
+### Migration
+No new environment variables. Restart the process to serve 0.5.0. Startup adds the `api_keys` table and nullable `ledger.api_key_id`, `ledger.resource`, and `paywall_challenges.api_key_id` columns. Existing rows are left in place. Copy the SQLite file first if you want a rollback point. Nothing else has to be configured.
+
 ## [0.4.2] - 2026-10-17
 
 ### Fixed

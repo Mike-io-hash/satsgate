@@ -19,16 +19,19 @@ def list_ledger(
     limit = max(1, min(int(limit), 200))
 
     sql = (
-        "SELECT id, delta_credits, reason, ref, created_at "
-        "FROM ledger WHERE client_id = ? "
+        "SELECT l.id, l.delta_credits, l.reason, l.ref, l.created_at, "
+        "l.api_key_id, l.resource, k.label AS api_key_label, k.key_prefix AS api_key_prefix "
+        "FROM ledger l "
+        "LEFT JOIN api_keys k ON k.id = l.api_key_id "
+        "WHERE l.client_id = ? "
     )
     params: list = [int(client_id)]
 
     if before_id is not None:
-        sql += "AND id < ? "
+        sql += "AND l.id < ? "
         params.append(int(before_id))
 
-    sql += "ORDER BY id DESC LIMIT ?"
+    sql += "ORDER BY l.id DESC LIMIT ?"
     params.append(limit)
 
     with _connect(db_path) as conn:
@@ -37,6 +40,7 @@ def list_ledger(
     out: list[dict] = []
     for r in rows:
         ts = int(r["created_at"])
+        api_key_id = r["api_key_id"]
         out.append(
             {
                 "id": int(r["id"]),
@@ -45,6 +49,10 @@ def list_ledger(
                 "ref": r["ref"],
                 "created_at": ts,
                 "created_at_iso": _iso(ts),
+                "api_key_id": int(api_key_id) if api_key_id is not None else None,
+                "api_key_label": r["api_key_label"],
+                "api_key_prefix": r["api_key_prefix"],
+                "resource": r["resource"],
             }
         )
     return out
@@ -89,6 +97,24 @@ def usage_summary(
             (int(client_id), since_ts),
         ).fetchall()
 
+        key_rows = conn.execute(
+            """
+            SELECT
+              l.api_key_id,
+              MAX(k.label) AS api_key_label,
+              MAX(k.key_prefix) AS api_key_prefix,
+              MAX(k.resource_prefix) AS resource_prefix,
+              COALESCE(SUM(CASE WHEN l.delta_credits < 0 THEN -l.delta_credits ELSE 0 END), 0) AS credits_out,
+              COUNT(*) AS verify_events
+            FROM ledger l
+            LEFT JOIN api_keys k ON k.id = l.api_key_id
+            WHERE l.client_id = ? AND l.created_at >= ? AND l.reason = 'paywall_verify'
+            GROUP BY l.api_key_id
+            ORDER BY credits_out DESC, l.api_key_id ASC
+            """,
+            (int(client_id), since_ts),
+        ).fetchall()
+
     by_reason = []
     for r in rows:
         by_reason.append(
@@ -97,6 +123,20 @@ def usage_summary(
                 "events": int(r["events"]),
                 "net_credits": int(r["net_credits"]),
                 "credits_in": int(r["credits_in"]),
+                "credits_out": int(r["credits_out"]),
+            }
+        )
+
+    by_api_key = []
+    for r in key_rows:
+        api_key_id = r["api_key_id"]
+        by_api_key.append(
+            {
+                "api_key_id": int(api_key_id) if api_key_id is not None else None,
+                "label": r["api_key_label"],
+                "key_prefix": r["api_key_prefix"],
+                "resource_prefix": r["resource_prefix"],
+                "verify_events": int(r["verify_events"]),
                 "credits_out": int(r["credits_out"]),
             }
         )
@@ -110,6 +150,7 @@ def usage_summary(
         "verify_events": int(row["verify_events"]),
         "topup_events": int(row["topup_events"]),
         "by_reason": by_reason,
+        "by_api_key": by_api_key,
     }
 
 

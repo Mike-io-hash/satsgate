@@ -8,7 +8,7 @@ The merchant flow from a cold start:
 
 1. Top up payment verifications (credits) and save the API key. `GET /v1/topup/{plan_id}` returns the invoice. Pay it, then poll `GET /v1/topup/status/{payment_hash}`.
 2. Register the Lightning Address that receives your users' payments with `POST /v1/client/payee`. The first `POST /v1/paywall/challenge` that includes `payee_lightning_address` saves it too (`payee_saved: true`). Change it later with `POST /v1/client/payee`.
-3. `POST /v1/paywall/challenge` and give that invoice to your user.
+3. `POST /v1/paywall/challenge` and give that invoice to your user. A proxy or MCP server should use a restricted key for this step (see [Restricted API keys](#restricted-api-keys)).
 4. When they have paid, unlock with `GET /v1/paywall/status/{payment_hash}` (any wallet, when the payee advertises LUD-21) or `POST /v1/paywall/verify` (preimage). The first settled call spends 1 credit. A repeat spends 0.
 
 Challenge plus status (or verify) is the per-purchase pair, after the account has credits and a payee.
@@ -69,7 +69,7 @@ Configured via env vars:
   - checks the BOLT11 amount, network, `description_hash` (LUD-06), expiry, and payment hash before issuing a challenge
   - if the provider advertises LUD-21 `verify`, settlement is confirmed there too, including without the payer returning a preimage. Providers that omit it (Wallet of Satoshi) stay preimage-only
 
-`GET /health` returns `{"ok": true, "version": "0.4.2"}` and nothing else.
+`GET /health` returns `{"ok": true, "version": "0.5.0"}` and nothing else.
 
 ## Prepaid payment verifications (credits)
 
@@ -85,10 +85,16 @@ Endpoints:
 - `GET /v1/client` with `X-Api-Key: ...` → client info (incl. payee)
 - `POST /v1/client/payee` with `X-Api-Key: ...` → register client payee (Lightning Address)
 
+Restricted keys (account key only):
+
+- `POST /v1/api-keys` with `X-Api-Key: sg_...` → create a restricted key (`sgr_...`, shown once)
+- `GET /v1/api-keys` → list restricted keys (no secrets). `include_revoked=true` includes revoked rows
+- `POST /v1/api-keys/{key_id}/revoke` → revoke a restricted key
+
 Reporting:
 
-- `GET /v1/ledger` with `X-Api-Key: ...` → verification ledger entries (credits)
-- `GET /v1/usage/summary?since_hours=24` with `X-Api-Key: ...` → usage summary
+- `GET /v1/ledger` with `X-Api-Key: ...` → verification ledger entries (credits). Paywall debits include `api_key_id`, `api_key_label`, `api_key_prefix`, and `resource` (`api_key_id` is null when the account key spent the credit)
+- `GET /v1/usage/summary?since_hours=24` with `X-Api-Key: ...` → usage summary. `summary.by_api_key` groups paywall debits by the key that spent them (null `api_key_id` is the account key)
 - `GET /v1/usage/daily?days=30` with `X-Api-Key: ...` → daily series (UTC)
 - `GET /v1/usage/forecast?lookback_hours=24&buffer_days=7&max_topups=3&trigger_hours=24` with `X-Api-Key: ...`
   - forecast + recommended purchase + “when to top up” trigger
@@ -122,7 +128,7 @@ These are the endpoints your **customers** (agent operators) integrate:
 - `POST /v1/paywall/verify` with `X-Api-Key: ...` + `Authorization: L402 ...` and **`expected_resource` (required)**
   - `expected_resource` must exactly match the challenge `resource` (case-sensitive). A mismatch is HTTP 401 `resource mismatch`, and the body includes the issued `resource` when the macaroon belongs to this API key
   - verifies the preimage, or the stored LUD-21 URL when the header is `L402 <macaroon>` with no preimage
-  - checks that the token was issued to **this** API key, for **this** resource, amount, payee, and invoice
+  - checks that the token was issued to **this client**, for **this** resource, amount, payee, and invoice. Any of that client's keys can unlock it, unless the key has a `resource_prefix` the resource does not start with
   - charges payment verifications (credits) once per `payment_hash` (`cost_credits`, default 1, is the merchant's own debit). `charged_credits` on the response is that debit
 - `GET /v1/paywall/status/{payment_hash}` with the same API key and macaroon. **This GET spends a credit when it first settles.** Verify is the other call that can settle the same payment. `charged_credits` is 0 while pending and on every repeat
 
@@ -144,6 +150,33 @@ The 402-vs-200 difference for "not paid yet" stays so existing clients keep work
 On a successful unlock, `valid_until` remains the macaroon `exp` caveat (older clients cache with it). `claim_until` is the server deadline for a first unlock. `cache_until` is how long to cache that successful result so you do not call again. A token minted before 0.4.2 can have `valid_until` in the past while `claim_until` is still open. Cache with `cache_until`.
 
 Tokens are version 2 (`token_version` on the challenge). A token minted for one client never verifies for another. v1 tokens are rejected. See the 0.4.2 notes in [`CHANGELOG.md`](./CHANGELOG.md).
+
+## Restricted API keys
+
+The key from top-up (`sg_...`) is the account key. It can top up, change the payee, read the ledger, and mint other keys. A proxy or MCP server that only needs to sell access should not hold that key: if it leaked, the holder could point payouts at another Lightning Address.
+
+Create a restricted key with the account key. The full secret starts with `sgr_` and is returned once. Store only its hash. Up to 50 active restricted keys per client. Revoked keys stay in the list when you ask for them, so ledger rows can still name them.
+
+```bash
+curl -s -X POST https://api.satsgate.org/v1/api-keys \
+  -H 'Content-Type: application/json' \
+  -H 'X-Api-Key: sg_...ACCOUNT_KEY...' \
+  -d '{"label":"blog-proxy","resource_prefix":"blog/"}'
+```
+
+`resource_prefix` is optional. When it is set, challenge, status, and verify accept only resources that start with it (case-sensitive, same rule as `expected_resource`). Use a trailing slash (`blog/`) when you want a path boundary. `blog` also matches `blogger`.
+
+| Call | Account key `sg_` | Restricted key `sgr_` |
+| --- | --- | --- |
+| `POST /v1/paywall/challenge` | yes | yes, and it cannot save or change the payee |
+| `POST /v1/paywall/verify` and `GET /v1/paywall/status/{payment_hash}` | yes | yes |
+| Top-up, payee, balance, client, ledger, usage, create/list/revoke keys | yes | HTTP 403 `insufficient_scope` |
+| Resource outside the key's prefix | yes | HTTP 403 `resource_not_allowed` |
+| After revoke | — | HTTP 401 `api_key_revoked` |
+
+A restricted key is still the same client. It spends that client's credits, and a challenge minted by one key can be unlocked by another key of that client when the resource is allowed. The paywall debit records which key did it.
+
+Set the payee with the account key before the proxy creates challenges. There is nothing new to configure. Restarting on 0.5.0 applies the migration.
 
 ## Pay from any wallet, then poll
 
