@@ -81,7 +81,9 @@ Pay that invoice from a **different** wallet than the payee. Alby Go paying an i
 
 If you pay from a wallet that does not hand you the preimage, poll `GET /v1/paywall/status/{payment_hash}` with the API key and `Authorization: L402 <macaroon>` until `settled` is true. That GET spends the credit when it settles. `POST /v1/paywall/verify` is the preimage alternative. Only the first settled call spends a credit.
 
-`invoice_expires_at` is when the buyer must pay. `claim_until` (and `valid_until` on a new challenge) is when you can still unlock. Those used to differ by hours: the invoice lived about a day and the token died after 10 minutes. They now stay aligned, plus a grace period. `cache_until` on a successful unlock is how long to cache that result. How long the buyer may use your product is your decision.
+`invoice_expires_at` is when the buyer must pay. `claim_until` (and `valid_until` on a new challenge) is when you can still unlock. Those used to differ by hours: the invoice lived about a day and the token died after 10 minutes. They now stay aligned, plus a grace period. `cache_until` on a successful unlock is how long to cache that result when the challenge has no usage policy.
+
+One credit is one settled payment. A cheap API call should be a bundle or a time pass, not a new Lightning invoice. On the challenge, send `max_uses` (how many requests) and/or `access_seconds` (how long after settlement). Then each buyer request calls verify or status with `consume=true`. The server stores the counter, so more than one proxy replica shares it. HTTP 401 `token_used_up` or `token_expired` means mint a new challenge. Without those fields, behaviour is unchanged. Python SDK 0.5.0: `paywall_challenge(max_uses=1)` and `paywall_verify(..., consume=True)`. `max_uses: 1` is the right default for a proxy in front of a paid request. A 50-call bundle or a one-hour pass is how you price something cheaper than one credit.
 
 ```bash
 SATSGATE_BASE_URL='https://api.satsgate.org' \

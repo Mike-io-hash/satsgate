@@ -1120,6 +1120,25 @@ class PaywallChallengeIn(BaseModel):
             "Omit it to use SATSGATE_TOKEN_TTL_SECONDS as that minimum."
         ),
     )
+    max_uses: int | None = Field(
+        default=None,
+        ge=1,
+        le=config.MAX_PAYWALL_USES,
+        description=(
+            "How many consume=true calls this payment covers. "
+            "Omit it, and omit access_seconds, to keep the previous unlimited re-verify behaviour."
+        ),
+    )
+    access_seconds: int | None = Field(
+        default=None,
+        ge=1,
+        le=config._MAX_PAYWALL_ACCESS_CAP_SECONDS,
+        description=(
+            "Seconds of access starting when the payment first settles. "
+            "The server caps this (SATSGATE_PAYWALL_ACCESS_CAP_SECONDS, default 7 days). "
+            "A max_uses bundle that omits this still ends at that cap."
+        ),
+    )
 
 
 class PaywallVerifyIn(BaseModel):
@@ -1133,6 +1152,14 @@ class PaywallVerifyIn(BaseModel):
         ),
     )
     cost_credits: int = Field(default=1, ge=1, le=10_000)
+    consume: bool = Field(
+        default=False,
+        description=(
+            "When true, atomically take one use of this payment. "
+            "Required to enforce max_uses or access_seconds. "
+            "False leaves the counter unchanged and still settles a first unlock."
+        ),
+    )
 
 
 # Simple cache of LNURL-pay wallets by Lightning Address
@@ -1192,6 +1219,16 @@ def v1_paywall_challenge(
     auth = _paywall_principal(x_api_key, body.resource)
     if isinstance(auth, JSONResponse):
         return auth
+    if body.access_seconds is not None and int(body.access_seconds) > int(config.PAYWALL_ACCESS_CAP_SECONDS):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "ok": False,
+                "error": "access_seconds_too_long",
+                "max_access_seconds": int(config.PAYWALL_ACCESS_CAP_SECONDS),
+                "detail": "access_seconds cannot exceed the server cap. Shorten the pass or raise the cap.",
+            },
+        )
     client = auth.client
 
     # Minimum payable lifetime. The macaroon follows the invoice claim window,
@@ -1304,6 +1341,8 @@ def v1_paywall_challenge(
             verify_url=getattr(inv, "verify_url", None),
             expires_at=invoice_expires_at,
             api_key_id=auth.api_key_id,
+            max_uses=body.max_uses,
+            access_seconds=body.access_seconds,
             max_open_per_client=config.MAX_OPEN_CHALLENGES_PER_CLIENT,
             now=created_at,
             claim_grace_seconds=config.PAYWALL_CLAIM_GRACE_SECONDS,
@@ -1323,6 +1362,13 @@ def v1_paywall_challenge(
             "Saved payee_lightning_address as this client's payee. "
             "Later challenges use it. Change it with POST /v1/client/payee."
         )
+    note = _challenge_expiry_note(invoice_expires_at=invoice_expires_at, claim_until=claim_until)
+    if body.max_uses is not None or body.access_seconds is not None:
+        note += (
+            " This challenge has a usage policy. Pass consume=true on verify or status to take one use."
+            " access_until is set when the payment first settles."
+            " HTTP 401 token_used_up or token_expired means the buyer needs a new challenge."
+        )
 
     return {
         "ok": True,
@@ -1338,9 +1384,15 @@ def v1_paywall_challenge(
         "claim_until": claim_until,
         "invoice_expires_at": invoice_expires_at,
         "cache_until": claim_until,
+        "max_uses": body.max_uses,
+        "access_seconds": body.access_seconds,
+        "uses_consumed": 0,
+        "uses_remaining": body.max_uses,
+        "access_until": None,
+        "settled_at": None,
         "www_authenticate": www_auth,
         "token_version": TOKEN_VERSION,
-        "note": _challenge_expiry_note(invoice_expires_at=invoice_expires_at, claim_until=claim_until),
+        "note": note,
     }
 
 
@@ -1416,6 +1468,7 @@ def _unlock_paywall(
     payment_hash: str | None = None,
     poll: bool = False,
     api_key_id: int | None = None,
+    consume: bool = False,
 ) -> JSONResponse | dict:
     macaroon_b64, preimage_hex = parse_authorization_header(authorization)
     peeked = peek_bindings(macaroon_b64)
@@ -1484,16 +1537,47 @@ def _unlock_paywall(
             if state == "pending":
                 return _paywall_pending(payment_hash=token_hash, poll=poll)
 
-    spend = db_verify.verify_once_and_spend(
-        config.DB_PATH,
-        client_id=client.id,
-        payment_hash=token_hash,
-        cost=int(cost_credits),
-        resource=expected_resource,
-        api_key_id=api_key_id,
-    )
+    try:
+        spend = db_verify.settle_and_consume(
+            config.DB_PATH,
+            client_id=client.id,
+            payment_hash=token_hash,
+            cost=int(cost_credits),
+            resource=expected_resource,
+            api_key_id=api_key_id,
+            consume=bool(consume),
+            access_cap_seconds=config.PAYWALL_ACCESS_CAP_SECONDS,
+            now=now,
+        )
+    except db_verify.UsageDenied as exc:
+        detail = (
+            "This payment has no uses left. Create a new challenge for another request."
+            if exc.code == "token_used_up"
+            else "This payment's access window has ended. Create a new challenge for another request."
+        )
+        return JSONResponse(
+            status_code=401,
+            content={
+                "ok": False,
+                "error": exc.code,
+                "status": "settled",
+                "settled": True,
+                "payment_hash": token_hash,
+                "resource": expected_resource,
+                "charged_credits": exc.charged,
+                "new_balance": exc.new_balance,
+                "detail": detail,
+                **exc.usage,
+            },
+        )
 
     claim_until = int(deadline) if deadline is not None else int(payload["exp"])
+    note = _PAYWALL_UNLOCK_NOTE
+    if spend.get("max_uses") is not None or spend.get("access_seconds") is not None:
+        note += (
+            " consume=true takes one use. uses_remaining and access_until are what this payment has left."
+            " HTTP 401 token_used_up or token_expired means the buyer needs a new challenge."
+        )
     return {
         "ok": True,
         "status": "settled",
@@ -1509,7 +1593,14 @@ def _unlock_paywall(
         "claim_until": claim_until,
         "invoice_expires_at": _paywall_invoice_expiry(stored_expires_at=stored_expiry, invoice=str(row["invoice"])),
         "cache_until": claim_until,
-        "note": _PAYWALL_UNLOCK_NOTE,
+        "max_uses": spend["max_uses"],
+        "access_seconds": spend["access_seconds"],
+        "uses_consumed": spend["uses_consumed"],
+        "uses_remaining": spend["uses_remaining"],
+        "access_until": spend["access_until"],
+        "settled_at": spend["settled_at"],
+        "consumed": spend["consumed"],
+        "note": note,
     }
 
 
@@ -1545,6 +1636,7 @@ def v1_paywall_verify(
             cost_credits=int(body.cost_credits),
             client=auth.client,
             api_key_id=auth.api_key_id,
+            consume=bool(body.consume),
         )
     except L402Error as e:
         return _paywall_auth_error(e, expected_resource=body.expected_resource)
@@ -1565,6 +1657,10 @@ def v1_paywall_status(
     payment_hash: str,
     expected_resource: str = Query(..., min_length=1, max_length=200),
     cost_credits: int = Query(default=1, ge=1, le=10_000),
+    consume: bool = Query(
+        default=False,
+        description="When true, atomically take one use of this payment. False checks without consuming.",
+    ),
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
 ):
@@ -1593,6 +1689,7 @@ def v1_paywall_status(
             payment_hash=normalized,
             poll=True,
             api_key_id=auth.api_key_id,
+            consume=bool(consume),
         )
     except L402Error as e:
         return _paywall_auth_error(e, expected_resource=expected_resource)

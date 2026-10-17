@@ -69,7 +69,7 @@ Configured via env vars:
   - checks the BOLT11 amount, network, `description_hash` (LUD-06), expiry, and payment hash before issuing a challenge
   - if the provider advertises LUD-21 `verify`, settlement is confirmed there too, including without the payer returning a preimage. Providers that omit it (Wallet of Satoshi) stay preimage-only
 
-`GET /health` returns `{"ok": true, "version": "0.5.0"}` and nothing else.
+`GET /health` returns `{"ok": true, "version": "0.6.0"}` and nothing else.
 
 ## Prepaid payment verifications (credits)
 
@@ -114,6 +114,8 @@ Each successful unlock spends **1 credit**, whatever `amount_sats` on the invoic
 
 Example: a **21-sat** item on the trial plan. The buyer pays 21 sats to you. You spend 1 credit, about 5 sats. That fee is 5/21 of the item, about **25%**. A 100-sat item on the same plan is about 5%. Price the item so this fee is the margin you intend. Larger packs lower the fee per unlock.
 
+One credit is one settled payment, not one HTTP call. A cheap call should be a bundle or a time pass on that payment (`max_uses` or `access_seconds` below), so one Lightning payment and one credit cover many requests. `max_uses: 1` is one payment, one request.
+
 ## Paywall (for your customers)
 
 These are the endpoints your **customers** (agent operators) integrate:
@@ -129,8 +131,9 @@ These are the endpoints your **customers** (agent operators) integrate:
   - `expected_resource` must exactly match the challenge `resource` (case-sensitive). A mismatch is HTTP 401 `resource mismatch`, and the body includes the issued `resource` when the macaroon belongs to this API key
   - verifies the preimage, or the stored LUD-21 URL when the header is `L402 <macaroon>` with no preimage
   - checks that the token was issued to **this client**, for **this** resource, amount, payee, and invoice. Any of that client's keys can unlock it, unless the key has a `resource_prefix` the resource does not start with
-  - charges payment verifications (credits) once per `payment_hash` (`cost_credits`, default 1, is the merchant's own debit). `charged_credits` on the response is that debit
-- `GET /v1/paywall/status/{payment_hash}` with the same API key and macaroon. **This GET spends a credit when it first settles.** Verify is the other call that can settle the same payment. `charged_credits` is 0 while pending and on every repeat
+  - charges payment verifications (credits) once per `payment_hash` (`cost_credits`, default 1, is the merchant's own debit). `charged_credits` on the response is that debit. Later uses of the same payment do not charge again
+  - `consume: true` atomically takes one use when the challenge set `max_uses` and/or `access_seconds`. Omit it, or send false, to check without taking a use
+- `GET /v1/paywall/status/{payment_hash}` with the same API key and macaroon. **This GET spends a credit when it first settles.** Verify is the other call that can settle the same payment. `charged_credits` is 0 while pending and on every repeat. `consume=true` takes one use here too
 
 `POST /v1/paywall/verify` and `GET /v1/paywall/status/{payment_hash}` share one debit per `payment_hash`. Use either one.
 
@@ -144,12 +147,45 @@ These are the endpoints your **customers** (agent operators) integrate:
 | Not enough credits | HTTP 402 | HTTP 402 |
 | Settled (first time) | HTTP 200, `charged_credits` is `cost_credits` (default 1) | HTTP 200, same debit |
 | Settled again | HTTP 200, `charged_credits: 0` | HTTP 200, `charged_credits: 0` |
+| `consume=true` and the use counter is exhausted | HTTP 401 `token_used_up` | HTTP 401 `token_used_up` |
+| `consume=true` and the access window has ended | HTTP 401 `token_expired` | HTTP 401 `token_expired` |
 
 The 402-vs-200 difference for "not paid yet" stays so existing clients keep working. Both bodies say which code the other route uses.
 
 On a successful unlock, `valid_until` remains the macaroon `exp` caveat (older clients cache with it). `claim_until` is the server deadline for a first unlock. `cache_until` is how long to cache that successful result so you do not call again. A token minted before 0.4.2 can have `valid_until` in the past while `claim_until` is still open. Cache with `cache_until`.
 
 Tokens are version 2 (`token_version` on the challenge). A token minted for one client never verifies for another. v1 tokens are rejected. See the 0.4.2 notes in [`CHANGELOG.md`](./CHANGELOG.md).
+
+## What one payment buys
+
+With no `max_uses` and no `access_seconds`, a settled payment can be verified again until the challenge row is cleaned up (about a day for an Alby invoice). That is the previous behaviour, and it is still the default. Behind a proxy, that one payment would cover every call in that window.
+
+Set a policy on `POST /v1/paywall/challenge` when the proxy should decide what the buyer paid for:
+
+| Policy | Meaning |
+| --- | --- |
+| `{"max_uses": 1}` | One payment, one request. The server also ends the grant 7 days after settlement. |
+| `{"max_uses": 50}` | A bundle of 50 requests, same 7-day cap when `access_seconds` is omitted. |
+| `{"access_seconds": 3600}` | A time pass. The clock starts at settlement, not at challenge creation. |
+| both | The buyer needs a remaining use and an open window. |
+| neither | Unlimited re-verify, as before. |
+
+`access_seconds` must be from 1 to the server cap. The cap is `SATSGATE_PAYWALL_ACCESS_CAP_SECONDS` (default `604800`, seven days, and it cannot be set higher). Lower it if you want shorter passes. You do not have to set it.
+
+The proxy takes a use by sending `consume=true` on verify or status. That update is one database transaction, so two replicas cannot both take the last use. A check without `consume` still works and returns `uses_remaining` and `access_until` without changing the counter. `uses_remaining` is null when there is no `max_uses`. `access_until` is null until the payment settles, then it is the deadline. `consumed` is true when this call took a use. Each `consume=true` takes one use, including a retry after a lost response.
+
+When the grant is over, `consume=true` returns HTTP 401 `token_used_up` or `token_expired`. Create a new challenge. Credits were already charged once, on the first settled unlock, and are not charged again for these errors.
+
+Do not cache a policy grant locally for `cache_until`. That hint is for challenges with no policy. The Python SDK skips its cache when a policy is present or when `consume=true`. Call the server on each buyer request.
+
+A restricted key can set this policy on the challenges it creates, and `resource_prefix` still applies.
+
+```bash
+curl -s -X POST https://api.satsgate.org/v1/paywall/challenge \
+  -H 'Content-Type: application/json' \
+  -H 'X-Api-Key: sgr_...RESTRICTED_KEY...' \
+  -d '{"resource":"blog/post","amount_sats":21,"max_uses":1}'
+```
 
 ## Restricted API keys
 
