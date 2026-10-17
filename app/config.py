@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 # Load env vars from .env if present. Existing process env wins.
 load_dotenv()
 
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.7.0"
 
 # production is the safe default. Local mock/dev only runs when this is explicit.
 SATSGATE_ENV = os.environ.get("SATSGATE_ENV", "production").strip().lower() or "production"
@@ -127,6 +127,23 @@ RL_MAX_KEYS = int(os.environ.get("SATSGATE_RL_MAX_KEYS", "10000"))
 # Abuse caps for rows created before payment settles.
 MAX_PENDING_TOPUPS_PER_IP = int(os.environ.get("SATSGATE_MAX_PENDING_TOPUPS_PER_IP", "20"))
 MAX_OPEN_CHALLENGES_PER_CLIENT = int(os.environ.get("SATSGATE_MAX_OPEN_CHALLENGES_PER_CLIENT", "100"))
+
+# Per-buyer challenge limits. They apply only when a trusted proxy passes
+# X-Satsgate-Buyer-Ip. 0 disables that one limit. The rate uses RL_WINDOW_SECONDS.
+# Scope "client" shares a buyer's budget across the account's keys. "key"
+# gives each restricted key (and the account key) its own budget.
+BUYER_CHALLENGE_MAX = _optional_int("SATSGATE_BUYER_CHALLENGE_MAX", 10, minimum=0, maximum=100_000)
+BUYER_MAX_OPEN_CHALLENGES = _optional_int(
+    "SATSGATE_BUYER_MAX_OPEN_CHALLENGES",
+    5,
+    minimum=0,
+    maximum=100_000,
+)
+CHALLENGE_REUSE_SECONDS = _optional_int("SATSGATE_CHALLENGE_REUSE_SECONDS", 30, minimum=0, maximum=600)
+_BUYER_LIMIT_SCOPES = frozenset({"client", "key"})
+BUYER_LIMIT_SCOPE = os.environ.get("SATSGATE_BUYER_LIMIT_SCOPE", "client").strip().lower() or "client"
+if BUYER_LIMIT_SCOPE not in _BUYER_LIMIT_SCOPES:
+    raise RuntimeError("SATSGATE_BUYER_LIMIT_SCOPE must be 'client' or 'key'")
 
 # Operator/admin token.
 # When set, enables /v1/admin/* endpoints (protected via X-Admin-Token header).

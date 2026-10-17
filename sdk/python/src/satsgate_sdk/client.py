@@ -39,6 +39,8 @@ class Challenge:
     uses_remaining: int | None = None
     access_until: int | None = None
     settled_at: int | None = None
+    reused: bool = False
+    buyer_ip_accepted: bool = False
 
 
 @dataclass(frozen=True)
@@ -326,6 +328,7 @@ class SatsgateClient:
         ttl_seconds: int | None = None,
         max_uses: int | None = None,
         access_seconds: int | None = None,
+        buyer_ip: str | None = None,
     ) -> Challenge:
         body: dict[str, Any] = {
             "resource": resource,
@@ -340,9 +343,14 @@ class SatsgateClient:
         if access_seconds is not None:
             body["access_seconds"] = int(access_seconds)
 
+        headers = {**self._headers(), "Content-Type": "application/json"}
+        if buyer_ip is not None:
+            # Honored only when this connection's peer is a trusted proxy.
+            headers["X-Satsgate-Buyer-Ip"] = str(buyer_ip)
+
         r = self._http.post(
             f"{self.base_url}/v1/paywall/challenge",
-            headers={**self._headers(), "Content-Type": "application/json"},
+            headers=headers,
             json=body,
         )
         data = self._ok_or_raise(r)
@@ -366,6 +374,8 @@ class SatsgateClient:
             uses_remaining=_optional_int(data, "uses_remaining"),
             access_until=_optional_int(data, "access_until"),
             settled_at=_optional_int(data, "settled_at"),
+            reused=bool(data.get("reused")),
+            buyer_ip_accepted=bool(data.get("buyer_ip_accepted")),
         )
 
     def paywall_verify(

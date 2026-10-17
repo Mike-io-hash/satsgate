@@ -132,6 +132,10 @@ def init_db(db_path: str) -> None:
             conn.execute("ALTER TABLE paywall_challenges ADD COLUMN settled_at INTEGER")
         if "access_until" not in challenge_cols:
             conn.execute("ALTER TABLE paywall_challenges ADD COLUMN access_until INTEGER")
+        # Truncated-IP HMAC. NULL means the caller did not pass a trusted buyer address.
+        # The raw IP is never stored. The row's existing cleanup deletes the digest with it.
+        if "buyer_ip_hash" not in challenge_cols:
+            conn.execute("ALTER TABLE paywall_challenges ADD COLUMN buyer_ip_hash TEXT")
 
         # Restricted keys. The account key stays on clients.api_key_hash.
         conn.execute(
@@ -163,6 +167,12 @@ def init_db(db_path: str) -> None:
             "CREATE INDEX IF NOT EXISTS idx_challenges_client_expires ON paywall_challenges(client_id, expires_at)"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_challenges_api_key ON paywall_challenges(api_key_id)")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_challenges_buyer
+            ON paywall_challenges(client_id, buyer_ip_hash, created_at)
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_client ON api_keys(client_id, revoked_at)")
 
         conn.execute(
@@ -446,6 +456,265 @@ def get_balance(db_path: str, *, client_id: int) -> int:
         return int(row[0]) if row else 0
 
 
+class ChallengeLimit(Exception):
+    """A new challenge would exceed an open-row or per-buyer cap."""
+
+    def __init__(self, code: str, retry_after: int) -> None:
+        super().__init__(code)
+        self.code = code
+        self.retry_after = max(1, int(retry_after))
+
+
+def _retry_after(deadline: int | None, now: int) -> int:
+    if deadline is None:
+        return 1
+    return max(1, int(deadline) - int(now))
+
+
+def _buyer_rate_row(
+    conn: sqlite3.Connection,
+    *,
+    client_id: int,
+    buyer_ip_hash: str,
+    since: int,
+    scope: str,
+    api_key_id: int | None,
+):
+    if scope == "key" and api_key_id is None:
+        return conn.execute(
+            """
+            SELECT COUNT(*), MIN(created_at)
+            FROM paywall_challenges
+            WHERE client_id = ? AND buyer_ip_hash = ? AND created_at >= ? AND api_key_id IS NULL
+            """,
+            (client_id, buyer_ip_hash, since),
+        ).fetchone()
+    if scope == "key":
+        return conn.execute(
+            """
+            SELECT COUNT(*), MIN(created_at)
+            FROM paywall_challenges
+            WHERE client_id = ? AND buyer_ip_hash = ? AND created_at >= ? AND api_key_id = ?
+            """,
+            (client_id, buyer_ip_hash, since, int(api_key_id)),
+        ).fetchone()
+    return conn.execute(
+        """
+        SELECT COUNT(*), MIN(created_at)
+        FROM paywall_challenges
+        WHERE client_id = ? AND buyer_ip_hash = ? AND created_at >= ?
+        """,
+        (client_id, buyer_ip_hash, since),
+    ).fetchone()
+
+
+def _buyer_open_row(
+    conn: sqlite3.Connection,
+    *,
+    client_id: int,
+    buyer_ip_hash: str,
+    grace: int,
+    cap: int,
+    invoice_cutoff: int,
+    cap_cutoff: int,
+    scope: str,
+    api_key_id: int | None,
+):
+    if scope == "key" and api_key_id is None:
+        return conn.execute(
+            """
+            SELECT COUNT(*), MIN(min(expires_at + ?, created_at + ?))
+            FROM paywall_challenges
+            WHERE client_id = ? AND buyer_ip_hash = ? AND settled_at IS NULL
+              AND expires_at >= ? AND created_at >= ? AND api_key_id IS NULL
+            """,
+            (grace, cap, client_id, buyer_ip_hash, invoice_cutoff, cap_cutoff),
+        ).fetchone()
+    if scope == "key":
+        return conn.execute(
+            """
+            SELECT COUNT(*), MIN(min(expires_at + ?, created_at + ?))
+            FROM paywall_challenges
+            WHERE client_id = ? AND buyer_ip_hash = ? AND settled_at IS NULL
+              AND expires_at >= ? AND created_at >= ? AND api_key_id = ?
+            """,
+            (grace, cap, client_id, buyer_ip_hash, invoice_cutoff, cap_cutoff, int(api_key_id)),
+        ).fetchone()
+    return conn.execute(
+        """
+        SELECT COUNT(*), MIN(min(expires_at + ?, created_at + ?))
+        FROM paywall_challenges
+        WHERE client_id = ? AND buyer_ip_hash = ? AND settled_at IS NULL
+          AND expires_at >= ? AND created_at >= ?
+        """,
+        (grace, cap, client_id, buyer_ip_hash, invoice_cutoff, cap_cutoff),
+    ).fetchone()
+
+
+def enforce_challenge_capacity(
+    conn: sqlite3.Connection,
+    *,
+    client_id: int,
+    now: int,
+    invoice_cutoff: int,
+    cap_cutoff: int,
+    claim_grace_seconds: int,
+    claim_cap_seconds: int,
+    max_open_per_client: int,
+    buyer_ip_hash: str | None,
+    buyer_rate_max: int,
+    buyer_rate_window_seconds: int,
+    buyer_max_open: int,
+    buyer_limit_scope: str,
+    api_key_id: int | None,
+) -> None:
+    """Raise ChallengeLimit when this insert would pass a cap. Caller holds the write lock."""
+    if buyer_ip_hash and int(buyer_rate_max) > 0:
+        window = max(1, int(buyer_rate_window_seconds))
+        rate = _buyer_rate_row(
+            conn,
+            client_id=int(client_id),
+            buyer_ip_hash=buyer_ip_hash,
+            since=int(now) - window,
+            scope=buyer_limit_scope,
+            api_key_id=api_key_id,
+        )
+        if rate and int(rate[0]) >= int(buyer_rate_max):
+            raise ChallengeLimit("buyer_rate_limited", _retry_after(int(rate[1]) + window, now))
+
+    if buyer_ip_hash and int(buyer_max_open) > 0:
+        # Unpaid only. A settled challenge no longer occupies the buyer's slot.
+        # "Unexpired" matches the cleanup window: invoice expiry plus grace, and
+        # not older than the claim cap.
+        open_buyer = _buyer_open_row(
+            conn,
+            client_id=int(client_id),
+            buyer_ip_hash=buyer_ip_hash,
+            grace=int(claim_grace_seconds),
+            cap=int(claim_cap_seconds),
+            invoice_cutoff=int(invoice_cutoff),
+            cap_cutoff=int(cap_cutoff),
+            scope=buyer_limit_scope,
+            api_key_id=api_key_id,
+        )
+        if open_buyer and int(open_buyer[0]) >= int(buyer_max_open):
+            raise ChallengeLimit("too_many_open_challenges_for_buyer", _retry_after(open_buyer[1], now))
+
+    open_rows = conn.execute(
+        """
+        SELECT COUNT(*),
+               MIN(min(expires_at + ?, created_at + ?))
+        FROM paywall_challenges
+        WHERE client_id = ? AND expires_at >= ? AND created_at >= ?
+        """,
+        (
+            int(claim_grace_seconds),
+            int(claim_cap_seconds),
+            int(client_id),
+            int(invoice_cutoff),
+            int(cap_cutoff),
+        ),
+    ).fetchone()
+    if open_rows and int(open_rows[0]) >= int(max_open_per_client):
+        raise ChallengeLimit("too_many_open_challenges", _retry_after(open_rows[1], now))
+
+
+def preview_challenge_capacity(
+    db_path: str,
+    *,
+    client_id: int,
+    now: int,
+    claim_grace_seconds: int,
+    claim_cap_seconds: int,
+    max_open_per_client: int,
+    buyer_ip_hash: str | None,
+    buyer_rate_max: int,
+    buyer_rate_window_seconds: int,
+    buyer_max_open: int,
+    buyer_limit_scope: str,
+    api_key_id: int | None,
+) -> None:
+    """Check caps before calling the LNURL provider. The insert checks again."""
+    now = int(now)
+    grace = int(claim_grace_seconds)
+    cap = int(claim_cap_seconds)
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        enforce_challenge_capacity(
+            conn,
+            client_id=int(client_id),
+            now=now,
+            invoice_cutoff=now - grace,
+            cap_cutoff=now - cap,
+            claim_grace_seconds=grace,
+            claim_cap_seconds=cap,
+            max_open_per_client=int(max_open_per_client),
+            buyer_ip_hash=buyer_ip_hash,
+            buyer_rate_max=int(buyer_rate_max),
+            buyer_rate_window_seconds=int(buyer_rate_window_seconds),
+            buyer_max_open=int(buyer_max_open),
+            buyer_limit_scope=buyer_limit_scope,
+            api_key_id=api_key_id,
+        )
+        conn.execute("COMMIT")
+
+
+def find_reusable_paywall_challenge(
+    db_path: str,
+    *,
+    client_id: int,
+    buyer_ip_hash: str | None,
+    resource: str,
+    amount_sats: int,
+    payee: str | None,
+    max_uses: int | None,
+    access_seconds: int | None,
+    api_key_id: int | None,
+    reuse_seconds: int,
+    now: int,
+) -> sqlite3.Row | None:
+    """Pending challenge this buyer already holds for the same purchase.
+
+    Identity is buyer, resource, amount, usage policy, payee, and key.
+    Memo and ttl are not part of it. Reuse is off without a buyer hash or
+    when reuse_seconds is 0, so two callers who share an API key do not
+    receive each other's invoice.
+    """
+    if not buyer_ip_hash or int(reuse_seconds) <= 0:
+        return None
+    with _connect(db_path) as conn:
+        return conn.execute(
+            """
+            SELECT * FROM paywall_challenges
+            WHERE client_id = ?
+              AND buyer_ip_hash = ?
+              AND resource = ?
+              AND amount_sats = ?
+              AND payee IS ?
+              AND max_uses IS ?
+              AND access_seconds IS ?
+              AND api_key_id IS ?
+              AND settled_at IS NULL
+              AND created_at >= ?
+              AND expires_at > ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (
+                int(client_id),
+                buyer_ip_hash,
+                resource,
+                int(amount_sats),
+                payee,
+                int(max_uses) if max_uses is not None else None,
+                int(access_seconds) if access_seconds is not None else None,
+                int(api_key_id) if api_key_id is not None else None,
+                int(now) - int(reuse_seconds),
+                int(now),
+            ),
+        ).fetchone()
+
+
 def add_paywall_challenge(
     db_path: str,
     *,
@@ -460,7 +729,12 @@ def add_paywall_challenge(
     api_key_id: int | None = None,
     max_uses: int | None = None,
     access_seconds: int | None = None,
+    buyer_ip_hash: str | None = None,
     max_open_per_client: int = 100,
+    buyer_rate_max: int = 0,
+    buyer_rate_window_seconds: int = 60,
+    buyer_max_open: int = 0,
+    buyer_limit_scope: str = "client",
     now: int | None = None,
     claim_grace_seconds: int = 0,
     claim_cap_seconds: int = 86_400,
@@ -493,23 +767,33 @@ def add_paywall_challenge(
             """,
             (invoice_cutoff, cap_cutoff, retain_after),
         )
-        open_rows = conn.execute(
-            """
-            SELECT COUNT(*) FROM paywall_challenges
-            WHERE client_id = ? AND expires_at >= ? AND created_at >= ?
-            """,
-            (int(client_id), invoice_cutoff, cap_cutoff),
-        ).fetchone()
-        if open_rows and int(open_rows[0]) >= int(max_open_per_client):
+        try:
+            enforce_challenge_capacity(
+                conn,
+                client_id=int(client_id),
+                now=now,
+                invoice_cutoff=invoice_cutoff,
+                cap_cutoff=cap_cutoff,
+                claim_grace_seconds=int(claim_grace_seconds),
+                claim_cap_seconds=int(claim_cap_seconds),
+                max_open_per_client=int(max_open_per_client),
+                buyer_ip_hash=buyer_ip_hash,
+                buyer_rate_max=int(buyer_rate_max),
+                buyer_rate_window_seconds=int(buyer_rate_window_seconds),
+                buyer_max_open=int(buyer_max_open),
+                buyer_limit_scope=buyer_limit_scope,
+                api_key_id=api_key_id,
+            )
+        except ChallengeLimit:
             conn.execute("ROLLBACK")
-            raise ValueError("too_many_open_challenges")
+            raise
         conn.execute(
             """
             INSERT INTO paywall_challenges(
               payment_hash, client_id, invoice, amount_sats, payee, resource, verify_url, created_at, expires_at,
-              api_key_id, max_uses, access_seconds, uses_consumed
+              api_key_id, max_uses, access_seconds, uses_consumed, buyer_ip_hash
             )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
             """,
             (
                 payment_hash,
@@ -524,6 +808,7 @@ def add_paywall_challenge(
                 int(api_key_id) if api_key_id is not None else None,
                 int(max_uses) if max_uses is not None else None,
                 int(access_seconds) if access_seconds is not None else None,
+                buyer_ip_hash,
             ),
         )
         conn.execute("COMMIT")

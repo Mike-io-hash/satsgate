@@ -69,7 +69,7 @@ Configured via env vars:
   - checks the BOLT11 amount, network, `description_hash` (LUD-06), expiry, and payment hash before issuing a challenge
   - if the provider advertises LUD-21 `verify`, settlement is confirmed there too, including without the payer returning a preimage. Providers that omit it (Wallet of Satoshi) stay preimage-only
 
-`GET /health` returns `{"ok": true, "version": "0.6.0"}` and nothing else.
+`GET /health` returns `{"ok": true, "version": "0.7.0"}` and nothing else.
 
 ## Prepaid payment verifications (credits)
 
@@ -186,6 +186,37 @@ curl -s -X POST https://api.satsgate.org/v1/paywall/challenge \
   -H 'X-Api-Key: sgr_...RESTRICTED_KEY...' \
   -d '{"resource":"blog/post","amount_sats":21,"max_uses":1}'
 ```
+
+## Buyer limits
+
+`POST /v1/paywall/challenge` is per merchant. Without a buyer address, one caller can use the whole account budget (`SATSGATE_RL_MAX_CHALLENGE`, default 30 per minute, and `SATSGATE_MAX_OPEN_CHALLENGES_PER_CLIENT`, default 100) and each of those calls asks the payee's LNURL provider for an invoice.
+
+A proxy that holds a restricted key can send the end buyer's address:
+
+```bash
+curl -s -X POST https://api.satsgate.org/v1/paywall/challenge \
+  -H 'Content-Type: application/json' \
+  -H 'X-Api-Key: sgr_...RESTRICTED_KEY...' \
+  -H 'X-Satsgate-Buyer-Ip: 203.0.113.10' \
+  -d '{"resource":"blog/post","amount_sats":21,"max_uses":1}'
+```
+
+The header is used only when the TCP connection comes from `SATSGATE_TRUSTED_PROXIES` (the same list as `X-Forwarded-For`). Any other caller can send the header and it is ignored, so the request behaves as before. `buyer_ip_accepted: false` on the response means the address was not used. A trusted peer that sends a value which is not one IP gets HTTP 400 `invalid_buyer_ip`.
+
+The address is not stored. Satsgate keeps an HMAC of the truncated form (IPv4 /24, IPv6 /64), keyed by the macaroon secret, on the challenge row. That digest is deleted with the row, on the same cleanup as every other challenge. `1.2.3.4` and `1.2.3.50` share a bucket. `1.2.4.1` does not.
+
+| Limit | Default | Env |
+| --- | --- | --- |
+| New challenges per buyer per `SATSGATE_RL_WINDOW_SECONDS` | 10 | `SATSGATE_BUYER_CHALLENGE_MAX` (`0` disables) |
+| Unpaid challenges still inside the claim window | 5 | `SATSGATE_BUYER_MAX_OPEN_CHALLENGES` (`0` disables) |
+| Bucket | the whole client | `SATSGATE_BUYER_LIMIT_SCOPE=client`, or `key` for a separate budget per restricted key |
+| Reuse an identical pending challenge | 30 seconds | `SATSGATE_CHALLENGE_REUSE_SECONDS` (`0` disables) |
+
+Over the rate: HTTP 429 `buyer_rate_limited`. Too many unpaid challenges: HTTP 429 `too_many_open_challenges_for_buyer`. The account cap is still HTTP 429 `too_many_open_challenges`. Each of these sends `Retry-After` and `retry_after_seconds`. Paying a challenge frees the unpaid slot. It does not reset the rate window. The per-client rate limit still applies on top of the buyer limits.
+
+Reuse returns the same invoice and payment hash when the buyer, resource, amount, usage policy, payee, and key match an unpaid challenge from the last few seconds. `reused: true`. The macaroon is signed again for that invoice (it carries a new token id) and either copy verifies. A retry does not call the LNURL provider and does not count as a new challenge. Memo and `ttl_seconds` are not part of that match. Callers that omit the buyer header never receive someone else's invoice this way.
+
+The Docker Caddyfile deletes `X-Satsgate-Buyer-Ip` from public requests, because Caddy itself is the trusted peer. Let the header through only from the paywall proxy's address. Python SDK 0.6.0: `paywall_challenge(..., buyer_ip="203.0.113.10")`.
 
 ## Restricted API keys
 
