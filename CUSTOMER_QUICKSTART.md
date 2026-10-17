@@ -69,6 +69,8 @@ curl -s -X POST https://api.satsgate.org/v1/api-keys \
 
 That key can call the paywall challenge, status, and verify routes for resources starting with `demo/`. It cannot top up, change the payee, manage keys, or read the ledger. Drop the prefix field to allow every resource. Revoke it with `POST /v1/api-keys/{id}/revoke` using the account key. Python: `SatsgateClient.create_api_key`, `list_api_keys`, `revoke_api_key` (satsgate-sdk 0.4.0).
 
+To put that key in front of an API you already have, without writing paywall code, run [`satsgate-proxy`](./proxy/README.md). It is a separate process (version 0.8.0) and uses resource ids `route:<name>` or `site`, so set `resource_prefix` to match those (or omit it). The core in this quickstart stays the hosted API.
+
 ## 3) End-to-end test (challenge → pay → unlock)
 
 This script:
