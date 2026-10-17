@@ -56,7 +56,11 @@ def _get_wallet() -> Any:
     if config.WALLET_MODE == "lnaddr":
         if not config.LIGHTNING_ADDRESS:
             raise RuntimeError("SATSGATE_LIGHTNING_ADDRESS is required when SATSGATE_WALLET_MODE=lnaddr")
-        return LightningAddressWallet(config.LIGHTNING_ADDRESS, network=config.LN_NETWORK)
+        return LightningAddressWallet(
+            config.LIGHTNING_ADDRESS,
+            network=config.LN_NETWORK,
+            send_comment=config.LNURL_SEND_COMMENT,
+        )
     raise RuntimeError(f"Invalid SATSGATE_WALLET_MODE: {config.WALLET_MODE}")
 
 
@@ -747,7 +751,11 @@ def _get_payee_wallet(lightning_address: str) -> LightningAddressWallet:
     if w is None:
         if len(PAYEE_WALLETS) >= 1024:
             PAYEE_WALLETS.pop(next(iter(PAYEE_WALLETS)))
-        w = LightningAddressWallet(lightning_address, network=config.LN_NETWORK)
+        w = LightningAddressWallet(
+            lightning_address,
+            network=config.LN_NETWORK,
+            send_comment=config.LNURL_SEND_COMMENT,
+        )
         PAYEE_WALLETS[lightning_address] = w
     return w
 

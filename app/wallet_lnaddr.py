@@ -37,6 +37,11 @@ class LightningAddressWallet:
     Outbound fetches go through the SSRF guard. The BOLT11 invoice is checked
     before it is returned. LUD-21 `verify` is stored when present and is not
     required (Wallet of Satoshi does not advertise it).
+
+    A LUD-12 ``comment`` is not sent unless ``send_comment`` is set and the
+    provider advertises ``commentAllowed`` > 0. Some hosts (Alby) otherwise
+    put the comment in the invoice description and omit
+    ``description_hash = SHA256(metadata)``.
     """
 
     def __init__(
@@ -47,6 +52,7 @@ class LightningAddressWallet:
         fetch_json: Callable | None = None,
         resolver: Callable | None = None,
         network: str = "mainnet",
+        send_comment: bool = False,
     ) -> None:
         if "@" not in lightning_address:
             raise ValueError("Invalid Lightning Address (expected user@domain)")
@@ -60,6 +66,7 @@ class LightningAddressWallet:
         self._fetch_json = fetch_json
         self._resolver = resolver
         self._network = network
+        self._send_comment = bool(send_comment)
         self._cached_payreq: dict | None = None
         self._cached_payreq_until: float = 0.0
 
@@ -122,9 +129,9 @@ class LightningAddressWallet:
             )
 
         params: dict[str, str | int] = {"amount": amount_msat}
-        comment_allowed = int(payreq.get("commentAllowed", 0) or 0)
-        if memo and comment_allowed > 0:
-            params["comment"] = memo[:comment_allowed]
+        comment = self._lud12_comment(payreq, memo)
+        if comment:
+            params["comment"] = comment
 
         data = self._get_json(callback, params=params)
         if data.get("status") == "ERROR":
@@ -156,6 +163,19 @@ class LightningAddressWallet:
             expires_at=validated.expires_at,
             verify_url=verify_url if isinstance(verify_url, str) else None,
         )
+
+    def _lud12_comment(self, payreq: dict, memo: str) -> str:
+        """Return a callback comment only when explicitly enabled and allowed.
+
+        The description_hash check stays strict either way. A comment that a
+        provider copies into the BOLT11 description will still be rejected.
+        """
+        if not self._send_comment or not memo:
+            return ""
+        comment_allowed = int(payreq.get("commentAllowed", 0) or 0)
+        if comment_allowed <= 0:
+            return ""
+        return memo[:comment_allowed]
 
     def is_settled(self, *, verify_url: str, payment_hash: str, preimage_hex: str) -> bool:
         """LUD-21 settlement probe. Raises if the provider does not confirm payment."""
