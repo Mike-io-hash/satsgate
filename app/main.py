@@ -19,7 +19,7 @@ from . import ssrf
 from . import wallet_lnaddr
 from .admin import router as admin_router
 from .client_ip import resolve_client_ip
-from .invoices import InvoiceValidationError
+from .invoices import InvoiceValidationError, bolt11_expiry_unix
 from .l402 import (
     L402Error,
     PURPOSE_PAYWALL,
@@ -249,7 +249,11 @@ def well_known_satsgate(request: Request) -> dict:
         },
         "pricing": {
             "currency": "sats",
-            "credit_definition": "1 credit (payment verification) = 1 successful /v1/paywall/verify (charged once per payment_hash). Credits do not expire.",
+            "credit_definition": (
+                "1 credit = 1 successful paid unlock, charged once per payment_hash by "
+                "POST /v1/paywall/verify or GET /v1/paywall/status. The debit does not depend on amount_sats. "
+                "Credits do not expire."
+            ),
             "plans": list_plans(),
         },
         "links": {
@@ -635,6 +639,74 @@ def _topup_macaroon_exp(*, expires_at: int | None, created_at: int) -> int:
     return deadline
 
 
+def _paywall_invoice_expiry(*, stored_expires_at: int | None, invoice: str | None) -> int | None:
+    """Invoice lifetime for a challenge row.
+
+    New rows store the BOLT11 expiry. Rows written before 0.4.2 stored the
+    macaroon TTL instead, so a decoded invoice expiry is used when it is later.
+    """
+    decoded = bolt11_expiry_unix(invoice)
+    if stored_expires_at is None:
+        return decoded
+    if decoded is None:
+        return int(stored_expires_at)
+    return max(int(stored_expires_at), int(decoded))
+
+
+def _paywall_claim_deadline(*, expires_at: int | None, created_at: int, invoice: str | None = None) -> int | None:
+    """Unix time through which a paywall payment may still be unlocked the first time.
+
+    None means there is no invoice expiry to follow, so the macaroon `exp` remains
+    the limit.
+    """
+    invoice_expiry = _paywall_invoice_expiry(stored_expires_at=expires_at, invoice=invoice)
+    if invoice_expiry is None:
+        return None
+    by_invoice = int(invoice_expiry) + int(config.PAYWALL_CLAIM_GRACE_SECONDS)
+    by_cap = int(created_at) + int(config.PAYWALL_TOKEN_TTL_CAP_SECONDS)
+    return min(by_invoice, by_cap)
+
+
+def _paywall_macaroon_exp(*, expires_at: int | None, created_at: int) -> int:
+    """Absolute `exp` caveat for a newly minted paywall macaroon."""
+    deadline = _paywall_claim_deadline(expires_at=expires_at, created_at=created_at)
+    if deadline is None:
+        return int(created_at) + int(config.TOKEN_TTL_SECONDS)
+    return max(int(created_at) + 1, int(deadline))
+
+
+def _challenge_expiry_note(*, invoice_expires_at: int, claim_until: int) -> str:
+    text = (
+        "invoice_expires_at is when the Lightning invoice stops being payable. "
+        "claim_until and valid_until are when a payment of that invoice can still be unlocked "
+        "(invoice expiry plus grace, and never later than the claim cap). "
+        "valid_until is the macaroon expiry. cache_until on a successful unlock is how long to cache that result. "
+        "How long the buyer may use your product is your decision."
+    )
+    if int(claim_until) < int(invoice_expires_at):
+        text += (
+            " claim_until is earlier than the invoice because the claim cap applies;"
+            " a payment after claim_until cannot be unlocked."
+        )
+    return text
+
+
+_PAYWALL_UNLOCK_NOTE = (
+    "charged_credits is the debit from this call (0 when this payment_hash was already unlocked). "
+    "POST /v1/paywall/verify and GET /v1/paywall/status are alternatives and share that one-time debit. "
+    "cache_until is how long to cache this successful result. "
+    "valid_until is the macaroon exp caveat. claim_until is the latest time a first unlock is still accepted. "
+    "How long the buyer may use your product is your decision."
+)
+
+_PAYWALL_PENDING_NOTE = (
+    "Not settled, so charged_credits is 0. "
+    "GET /v1/paywall/status returns HTTP 200 with status pending for this state. "
+    "POST /v1/paywall/verify returns HTTP 402 with error payment_pending for this state. "
+    "The first settled call on either route spends credits once for this payment_hash."
+)
+
+
 def _claim_topup(
     *,
     authorization: str,
@@ -895,7 +967,16 @@ class PaywallChallengeIn(BaseModel):
     amount_sats: int = Field(..., ge=1, le=10_000_000)
     resource: str = Field(..., min_length=1, max_length=200)
     memo: str | None = Field(default=None, max_length=250)
-    ttl_seconds: int | None = Field(default=None, ge=30, le=86_400)
+    ttl_seconds: int | None = Field(
+        default=None,
+        ge=30,
+        le=86_400,
+        description=(
+            "Minimum seconds the Lightning invoice must stay payable. "
+            "Does not shorten the macaroon. claim_until follows the invoice expiry plus grace, capped. "
+            "Omit it to use SATSGATE_TOKEN_TTL_SECONDS as that minimum."
+        ),
+    )
 
 
 class PaywallVerifyIn(BaseModel):
@@ -903,7 +984,10 @@ class PaywallVerifyIn(BaseModel):
         ...,
         min_length=1,
         max_length=200,
-        description="Resource this token must have been issued for. Required.",
+        description=(
+            "Must exactly match the resource from POST /v1/paywall/challenge. "
+            "The comparison is case-sensitive."
+        ),
     )
     cost_credits: int = Field(default=1, ge=1, le=10_000)
 
@@ -954,19 +1038,25 @@ def v1_paywall_challenge(
     How to use it:
     - Your backend (customer) calls this endpoint and receives invoice + macaroon.
     - Your backend returns HTTP 402 to *your* end user with those values.
+
+    `invoice_expires_at` is when the invoice stops being payable. `claim_until`
+    (also returned as `valid_until`) is when satsgate will still unlock it.
+    Passing `payee_lightning_address` on the first challenge saves it. Change
+    the saved payee with POST /v1/client/payee.
     """
 
     client = _get_client_from_api_key(x_api_key)
     if not client:
         return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_api_key"})
 
-    # Paywall unlocks stay on this TTL (or the caller's ttl_seconds). A per-request
-    # unlock is not a 24h invoice the buyer pays later; do not use the top-up window.
-    ttl = int(body.ttl_seconds or config.TOKEN_TTL_SECONDS)
+    # Minimum payable lifetime. The macaroon follows the invoice claim window,
+    # the same way a top-up does, so a 24h invoice is not trapped behind a 10-minute token.
+    min_expiry = int(body.ttl_seconds or config.TOKEN_TTL_SECONDS)
     memo = body.memo or "satsgate paywall"
 
     requested_payee = (body.payee_lightning_address or "").strip() or None
     stored_payee = (client.payee_lightning_address or "").strip() or None
+    payee_saved = False
 
     # Rule: each client has 1 registered payee. We do not allow changing it per request.
     if stored_payee:
@@ -976,7 +1066,13 @@ def v1_paywall_challenge(
                 content={
                     "ok": False,
                     "error": "payee_mismatch",
-                    "hint": "Your registered payee differs. Update it via POST /v1/client/payee.",
+                    "detail": (
+                        "This client already has a saved payee. The first challenge that includes "
+                        "payee_lightning_address saves it, and so does POST /v1/client/payee. "
+                        "This request did not change it."
+                    ),
+                    "registered_payee_lightning_address": stored_payee,
+                    "hint": "Change it with POST /v1/client/payee, then create the challenge again.",
                 },
             )
         payee = stored_payee
@@ -994,6 +1090,7 @@ def v1_paywall_challenge(
             except ValueError as e:
                 return JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
             payee = requested_payee
+            payee_saved = True
         elif config.WALLET_MODE == "mock":
             payee = None
         else:
@@ -1006,14 +1103,15 @@ def v1_paywall_challenge(
                 },
             )
 
-    # Generate invoice
+    # Generate invoice. min_expiry rejects an invoice that dies too soon. It does
+    # not shorten a longer invoice from the payee's provider.
     try:
         if config.WALLET_MODE == "mock":
             inv = WALLET.create_invoice(
                 amount_sats=int(body.amount_sats),
                 memo=memo,
-                expiry_seconds=ttl,
-                min_expiry_seconds=ttl,
+                expiry_seconds=min_expiry,
+                min_expiry_seconds=min_expiry,
             )
         else:
             if not payee or not _looks_like_lightning_address(payee):
@@ -1021,10 +1119,17 @@ def v1_paywall_challenge(
             inv = _get_payee_wallet(payee).create_invoice(
                 amount_sats=int(body.amount_sats),
                 memo=memo,
-                min_expiry_seconds=ttl,
+                min_expiry_seconds=min_expiry,
             )
     except (ssrf.SSRFError, InvoiceValidationError, LnurlError, ValueError) as exc:
         return _upstream_error(exc)
+
+    created_at = int(time.time())
+    invoice_expires_at = getattr(inv, "expires_at", None)
+    if invoice_expires_at is None:
+        invoice_expires_at = created_at + min_expiry
+    invoice_expires_at = int(invoice_expires_at)
+    claim_until = _paywall_macaroon_exp(expires_at=invoice_expires_at, created_at=created_at)
 
     macaroon = make_macaroon(
         secret=config.MACAROON_SECRET,
@@ -1034,7 +1139,8 @@ def v1_paywall_challenge(
         resource=body.resource,
         amount_sats=int(body.amount_sats),
         invoice=inv.invoice,
-        ttl_seconds=ttl,
+        ttl_seconds=max(1, claim_until - created_at),
+        exp=claim_until,
         client_id=client.id,
         payee=payee,
     )
@@ -1049,8 +1155,11 @@ def v1_paywall_challenge(
             payee=payee,
             resource=body.resource,
             verify_url=getattr(inv, "verify_url", None),
-            expires_at=int(time.time()) + ttl,
+            expires_at=invoice_expires_at,
             max_open_per_client=config.MAX_OPEN_CHALLENGES_PER_CLIENT,
+            now=created_at,
+            claim_grace_seconds=config.PAYWALL_CLAIM_GRACE_SECONDS,
+            claim_cap_seconds=config.PAYWALL_TOKEN_TTL_CAP_SECONDS,
         )
     except ValueError as exc:
         if str(exc) == "too_many_open_challenges":
@@ -1060,18 +1169,30 @@ def v1_paywall_challenge(
         return JSONResponse(status_code=500, content={"ok": False, "error": "db_error"})
 
     www_auth = www_authenticate_header(macaroon=macaroon, invoice=inv.invoice)
+    payee_note = None
+    if payee_saved:
+        payee_note = (
+            "Saved payee_lightning_address as this client's payee. "
+            "Later challenges use it. Change it with POST /v1/client/payee."
+        )
 
     return {
         "ok": True,
         "resource": body.resource,
         "amount_sats": int(body.amount_sats),
         "payee_lightning_address": payee,
+        "payee_saved": payee_saved,
+        "payee_note": payee_note,
         "macaroon": macaroon,
         "invoice": inv.invoice,
         "payment_hash": inv.payment_hash,
-        "valid_until": int(time.time()) + ttl,
+        "valid_until": claim_until,
+        "claim_until": claim_until,
+        "invoice_expires_at": invoice_expires_at,
+        "cache_until": claim_until,
         "www_authenticate": www_auth,
         "token_version": TOKEN_VERSION,
+        "note": _challenge_expiry_note(invoice_expires_at=invoice_expires_at, claim_until=claim_until),
     }
 
 
@@ -1092,6 +1213,52 @@ def _paywall_lud21(*, verify_url: str, payment_hash: str, preimage_hex: str | No
     return "settled"
 
 
+def _resource_mismatch_response(*, expected_resource: str, resource: str | None = None) -> JSONResponse:
+    content: dict[str, Any] = {
+        "ok": False,
+        "error": "resource mismatch",
+        "detail": (
+            "expected_resource must exactly match the resource from the challenge. "
+            "The comparison is case-sensitive and does not trim or rewrite the value."
+        ),
+        "expected_resource": expected_resource,
+    }
+    if resource is not None:
+        content["resource"] = resource
+        content["hint"] = "The resource field is the value this challenge was issued for."
+    return JSONResponse(status_code=401, content=content)
+
+
+def _paywall_auth_error(exc: L402Error, *, expected_resource: str) -> JSONResponse:
+    if str(exc) == "resource mismatch":
+        return _resource_mismatch_response(expected_resource=expected_resource)
+    return JSONResponse(status_code=401, content={"ok": False, "error": str(exc)})
+
+
+def _paywall_pending(*, payment_hash: str, poll: bool) -> JSONResponse | dict:
+    if poll:
+        return {
+            "ok": True,
+            "status": "pending",
+            "settled": False,
+            "payment_hash": payment_hash,
+            "charged_credits": 0,
+            "note": _PAYWALL_PENDING_NOTE,
+        }
+    return JSONResponse(
+        status_code=402,
+        content={
+            "ok": False,
+            "status": "pending",
+            "settled": False,
+            "error": "payment_pending",
+            "payment_hash": payment_hash,
+            "charged_credits": 0,
+            "note": _PAYWALL_PENDING_NOTE,
+        },
+    )
+
+
 def _unlock_paywall(
     *,
     authorization: str | None,
@@ -1102,25 +1269,36 @@ def _unlock_paywall(
     poll: bool = False,
 ) -> JSONResponse | dict:
     macaroon_b64, preimage_hex = parse_authorization_header(authorization)
+    peeked = peek_bindings(macaroon_b64)
+    token_resource = peeked.get("res") if isinstance(peeked, dict) else None
+    if not isinstance(token_resource, str) or not token_resource:
+        raise L402Error("resource mismatch")
+
+    # Verify against the token's own resource so a mismatch can name the issued
+    # resource after the signature and client checks succeed. skip_expiry lets a
+    # macaroon minted with the old 10-minute TTL finish inside the invoice window.
+    # The claim deadline below is what limits that.
     payload = parse_and_verify_macaroon(
         keys=config.MACAROON_KEYS,
         macaroon_b64=macaroon_b64,
         purpose=PURPOSE_PAYWALL,
-        resource=expected_resource,
+        resource=token_resource,
         client_id=client.id,
+        skip_expiry=True,
     )
 
     token_hash = payload["ph"]
     if payment_hash is not None and token_hash != payment_hash:
         raise L402Error("payment_hash mismatch")
-    if preimage_hex is not None:
-        verify_preimage_matches_payment_hash(preimage_hex=preimage_hex, payment_hash=token_hash)
 
     row = db.get_paywall_challenge(config.DB_PATH, token_hash)
     if row is None or int(row["client_id"]) != int(client.id):
         raise L402Error("client mismatch")
-    if row["resource"] != expected_resource or payload.get("res") != expected_resource:
-        raise L402Error("resource mismatch")
+    issued_resource = str(row["resource"])
+    if issued_resource != expected_resource or payload.get("res") != expected_resource:
+        return _resource_mismatch_response(expected_resource=expected_resource, resource=issued_resource)
+    if preimage_hex is not None:
+        verify_preimage_matches_payment_hash(preimage_hex=preimage_hex, payment_hash=token_hash)
     if int(row["amount_sats"]) != int(payload["amt"]):
         raise L402Error("amount mismatch")
     if invoice_binding(row["invoice"]) != payload["inv_h"]:
@@ -1128,25 +1306,34 @@ def _unlock_paywall(
     if payee_binding(row["payee"]) != payload["payee_h"]:
         raise L402Error("payee mismatch")
 
+    stored_expiry = int(row["expires_at"]) if row["expires_at"] is not None else None
+    now = int(time.time())
+    deadline = _paywall_claim_deadline(
+        expires_at=stored_expiry,
+        created_at=int(row["created_at"]),
+        invoice=str(row["invoice"]),
+    )
     already = db_verify.has_verification(config.DB_PATH, client_id=client.id, payment_hash=token_hash)
-    if preimage_hex is None and not already and not row["verify_url"]:
-        return JSONResponse(status_code=401, content={"ok": False, "error": "preimage_required"})
+    if not already:
+        if deadline is None:
+            if now > int(payload["exp"]):
+                raise L402Error("token expired")
+        elif now > int(deadline):
+            raise L402Error("invoice expired")
 
-    if not already and row["verify_url"]:
-        state = _paywall_lud21(
-            verify_url=str(row["verify_url"]),
-            payment_hash=token_hash,
-            preimage_hex=preimage_hex,
-        )
-        if isinstance(state, JSONResponse):
-            return state
-        if state == "pending":
-            if poll:
-                return _pending_body(token_hash)
-            return JSONResponse(
-                status_code=402,
-                content={"ok": False, "error": "payment_pending", "settled": False, "payment_hash": token_hash},
+        if preimage_hex is None and not row["verify_url"]:
+            return JSONResponse(status_code=401, content={"ok": False, "error": "preimage_required"})
+
+        if row["verify_url"]:
+            state = _paywall_lud21(
+                verify_url=str(row["verify_url"]),
+                payment_hash=token_hash,
+                preimage_hex=preimage_hex,
             )
+            if isinstance(state, JSONResponse):
+                return state
+            if state == "pending":
+                return _paywall_pending(payment_hash=token_hash, poll=poll)
 
     spend = db_verify.verify_once_and_spend(
         config.DB_PATH,
@@ -1156,6 +1343,7 @@ def _unlock_paywall(
         resource=expected_resource,
     )
 
+    claim_until = int(deadline) if deadline is not None else int(payload["exp"])
     return {
         "ok": True,
         "status": "settled",
@@ -1168,7 +1356,10 @@ def _unlock_paywall(
         "charged_credits": spend["charged"],
         "new_balance": spend["new_balance"],
         "valid_until": payload.get("exp"),
-        "note": "Cache by payment_hash until valid_until to avoid calling verify on every request.",
+        "claim_until": claim_until,
+        "invoice_expires_at": _paywall_invoice_expiry(stored_expires_at=stored_expiry, invoice=str(row["invoice"])),
+        "cache_until": claim_until,
+        "note": _PAYWALL_UNLOCK_NOTE,
     }
 
 
@@ -1187,6 +1378,10 @@ def v1_paywall_verify(
     `Authorization: L402 <macaroon>:<preimage>` is the original flow.
     `Authorization: L402 <macaroon>` settles from the stored LUD-21 verify URL when the
     payee's provider advertised one.
+
+    `GET /v1/paywall/status/{payment_hash}` is the poll alternative. While the invoice
+    is unpaid, this route returns HTTP 402 `payment_pending` and status returns HTTP 200
+    `pending`. The first settled call on either route spends credits; a repeat spends 0.
     """
 
     client = _get_client_from_api_key(x_api_key)
@@ -1201,7 +1396,7 @@ def v1_paywall_verify(
             client=client,
         )
     except L402Error as e:
-        return JSONResponse(status_code=401, content={"ok": False, "error": str(e)})
+        return _paywall_auth_error(e, expected_resource=body.expected_resource)
     except ValueError as e:
         # insufficient balance / client missing
         return JSONResponse(
@@ -1225,7 +1420,10 @@ def v1_paywall_status(
     """Poll a paywall challenge paid from any wallet.
 
     Requires the merchant API key and the macaroon issued for this payment hash.
-    Credits are spent once, when the stored LUD-21 URL reports the invoice settled.
+    This is an alternative to POST /v1/paywall/verify, not a free read. The first
+    settled call spends credits once for this payment_hash. A repeat, on either
+    route, spends 0. While the invoice is unpaid this route returns HTTP 200
+    `status=pending` (verify returns HTTP 402 `payment_pending` for that same state).
     """
     normalized = _payment_hash_or_none(payment_hash)
     if normalized is None:
@@ -1245,7 +1443,7 @@ def v1_paywall_status(
             poll=True,
         )
     except L402Error as e:
-        return JSONResponse(status_code=401, content={"ok": False, "error": str(e)})
+        return _paywall_auth_error(e, expected_resource=expected_resource)
     except ValueError as e:
         return JSONResponse(
             status_code=402,

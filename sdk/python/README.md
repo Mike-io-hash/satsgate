@@ -54,5 +54,5 @@ print(sg.ledger(limit=50))
 
 ## Cache
 
-`paywall_verify(..., use_cache=True)` caches `payment_hash` until `valid_until`.
-This avoids calling satsgate repeatedly for the same payment/session.
+`paywall_verify(..., use_cache=True)` remembers a successful `payment_hash` until `cache_until`.
+Older servers only return `valid_until`, and the SDK falls back to that. The cache is there so a busy route does not call satsgate on every request. It is not how long the buyer may use your product. `valid_until` is the macaroon expiry caveat. `claim_until` is the latest time a first unlock is accepted.

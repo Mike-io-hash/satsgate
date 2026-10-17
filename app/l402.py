@@ -430,10 +430,10 @@ def parse_and_verify_macaroon(
     provided must equal the signed `cid`. A token minted for one client never
     verifies for another.
 
-    `skip_expiry` still checks the signature and every binding. Only the top-up
-    claim path sets it, and only so a macaroon minted with the old 10-minute
-    TTL can finish while the stored invoice window is still open. Paywall and
-    ticket checks leave it false.
+    `skip_expiry` still checks the signature and every binding. Top-up and
+    paywall claims set it so a macaroon minted with the old 10-minute TTL can
+    finish while the stored invoice window is still open. The caller then
+    enforces that window. Ticket checks leave it false.
     """
     if not resource:
         raise L402Error("resource mismatch")

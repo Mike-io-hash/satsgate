@@ -412,15 +412,31 @@ def add_paywall_challenge(
     verify_url: str | None,
     expires_at: int,
     max_open_per_client: int = 100,
+    now: int | None = None,
+    claim_grace_seconds: int = 0,
+    claim_cap_seconds: int = 86_400,
 ) -> None:
-    """Remember a challenge so verify can bind the token to the invoice we issued."""
-    now = int(time.time())
+    """Remember a challenge so verify can bind the token to the invoice we issued.
+
+    `expires_at` is the invoice expiry, not the macaroon caveat. A row stays
+    until that expiry plus `claim_grace_seconds`, and never longer than
+    `claim_cap_seconds` after `created_at`.
+    """
+    now = int(time.time()) if now is None else int(now)
+    invoice_cutoff = now - int(claim_grace_seconds)
+    cap_cutoff = now - int(claim_cap_seconds)
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        conn.execute("DELETE FROM paywall_challenges WHERE expires_at < ?", (now,))
+        conn.execute(
+            "DELETE FROM paywall_challenges WHERE expires_at < ? OR created_at < ?",
+            (invoice_cutoff, cap_cutoff),
+        )
         open_rows = conn.execute(
-            "SELECT COUNT(*) FROM paywall_challenges WHERE client_id = ? AND expires_at >= ?",
-            (int(client_id), now),
+            """
+            SELECT COUNT(*) FROM paywall_challenges
+            WHERE client_id = ? AND expires_at >= ? AND created_at >= ?
+            """,
+            (int(client_id), invoice_cutoff, cap_cutoff),
         ).fetchone()
         if open_rows and int(open_rows[0]) >= int(max_open_per_client):
             conn.execute("ROLLBACK")

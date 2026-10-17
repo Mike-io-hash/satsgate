@@ -31,7 +31,7 @@ cd satsgate
 npm install
 ```
 
-Buy the `trial` plan (1000 sats → 200 payment verifications, no expiry):
+Buy the `trial` plan (1000 sats → 200 payment verifications, no expiry). Each unlock spends **1 credit**, about **5 sats** on this plan, no matter how many sats the buyer pays you. A 21-sat item therefore has about **25%** verification overhead (5/21). See the plan table in [`README.md`](./README.md) before you pick a price.
 
 ```bash
 SATSGATE_BASE_URL='https://api.satsgate.org' \
@@ -43,6 +43,8 @@ Save the returned `api_key` (it may only be shown once).
 
 If the hosted payee's provider advertises LUD-21 `verify` (Alby does), you can skip NWC: pay the 402 invoice from any wallet, then poll `GET /v1/topup/status/{payment_hash}` with `Authorization: L402 <macaroon>` until `settled` is true. The Python SDK method is `poll_topup`. Wallet of Satoshi still needs the preimage. The invoice is payable until its own expiry (often about a day). The macaroon stays valid through that time plus a short grace, not only for 10 minutes.
 
+Pay the invoice from a **different** wallet than the one that receives it. Paying yourself from the same node (for example Alby Go on the same Alby Hub) usually fails.
+
 ## 2) Register your payee (where your users will pay)
 
 ```bash
@@ -52,13 +54,21 @@ curl -s -X POST https://api.satsgate.org/v1/client/payee \
   -d '{"payee_lightning_address":"yourname@yourdomain.com"}'
 ```
 
-## 3) End-to-end test (challenge → pay → verify)
+`payee_lightning_address` on the first `POST /v1/paywall/challenge` also saves the payee (`payee_saved: true` on that response). A later challenge with a different address returns `payee_mismatch` and does not change it. Use this endpoint to change it.
+
+## 3) End-to-end test (challenge → pay → unlock)
 
 This script:
 - requests a paywall challenge
 - pays the Lightning invoice via NWC
-- verifies the L402 proof (`expected_resource` is required and must match the challenge)
+- verifies the L402 proof (`expected_resource` is required and must exactly match the challenge `resource`, including case)
 - spends **1 payment verification** (1 credit)
+
+Pay that invoice from a **different** wallet than the payee. Alby Go paying an invoice that the same Alby Hub issued usually fails. Use a second wallet for the buyer.
+
+If you pay from a wallet that does not hand you the preimage, poll `GET /v1/paywall/status/{payment_hash}` with the API key and `Authorization: L402 <macaroon>` until `settled` is true. That GET spends the credit when it settles. `POST /v1/paywall/verify` is the preimage alternative. Only the first settled call spends a credit.
+
+`invoice_expires_at` is when the buyer must pay. `claim_until` (and `valid_until` on a new challenge) is when you can still unlock. Those used to differ by hours: the invoice lived about a day and the token died after 10 minutes. They now stay aligned, plus a grace period. `cache_until` on a successful unlock is how long to cache that result. How long the buyer may use your product is your decision.
 
 ```bash
 SATSGATE_BASE_URL='https://api.satsgate.org' \

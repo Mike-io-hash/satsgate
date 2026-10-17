@@ -5,7 +5,7 @@ This example shows a more complete paywall integration pattern for satsgate cust
 What it demonstrates:
 - Proper HTTP 402 + `WWW-Authenticate` L402 challenge when Authorization is missing
 - L402 verification + prepaid credit spending via satsgate
-- In-memory caching (SDK) to avoid repeated `/verify` calls for the same payment/session
+- In-memory caching (SDK) until `cache_until`, so a paid session does not call `/verify` on every request. That hint is not a content-access window
 
 ## Setup
 
