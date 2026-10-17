@@ -56,6 +56,19 @@ curl -s -X POST https://api.satsgate.org/v1/client/payee \
 
 `payee_lightning_address` on the first `POST /v1/paywall/challenge` also saves the payee (`payee_saved: true` on that response). A later challenge with a different address returns `payee_mismatch` and does not change it. Use this endpoint to change it.
 
+## 2b) Mint a restricted key for a proxy
+
+Do this when a reverse proxy or MCP server will create challenges. Give that process the restricted key, and keep the `sg_...` account key off that host. The `sgr_...` secret is shown once.
+
+```bash
+curl -s -X POST https://api.satsgate.org/v1/api-keys \
+  -H 'Content-Type: application/json' \
+  -H 'X-Api-Key: sg_...YOUR_API_KEY...' \
+  -d '{"label":"my-proxy","resource_prefix":"demo/"}'
+```
+
+That key can call the paywall challenge, status, and verify routes for resources starting with `demo/`. It cannot top up, change the payee, manage keys, or read the ledger. Drop the prefix field to allow every resource. Revoke it with `POST /v1/api-keys/{id}/revoke` using the account key. Python: `SatsgateClient.create_api_key`, `list_api_keys`, `revoke_api_key` (satsgate-sdk 0.4.0).
+
 ## 3) End-to-end test (challenge → pay → unlock)
 
 This script:

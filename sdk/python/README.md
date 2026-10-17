@@ -50,7 +50,20 @@ print(res)
 print(sg.usage_forecast(lookback_hours=24, buffer_days=7, trigger_hours=24))
 print(sg.usage_daily(days=30))
 print(sg.ledger(limit=50))
+
+# 5) Restricted key for a proxy or MCP server (account key only).
+# The secret is in created["api_key"] and is not shown again.
+# created = sg.create_api_key(label="blog-proxy", resource_prefix="blog/")
+# proxy = SatsgateClient(base_url="http://127.0.0.1:8000", api_key=created["api_key"])
+# proxy.paywall_challenge(resource="blog/post", amount_sats=10)
+# sg.revoke_api_key(created["key"]["id"])
 ```
+
+## Restricted keys
+
+`create_api_key`, `list_api_keys`, and `revoke_api_key` talk to `/v1/api-keys` with the account key (`sg_...`).
+
+A restricted key starts with `sgr_`. It can call `paywall_challenge`, `paywall_verify`, and `poll_paywall`. Top-up, payee changes, key management, balance, client, ledger, and usage calls return HTTP 403 `insufficient_scope`. `resource_prefix` limits the three paywall calls to resources that start with that prefix (HTTP 403 `resource_not_allowed`). A revoked key returns HTTP 401 `api_key_revoked`.
 
 ## Cache
 

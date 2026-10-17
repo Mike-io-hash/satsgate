@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 # Load env vars from .env if present. Existing process env wins.
 load_dotenv()
 
-APP_VERSION = "0.4.2"
+APP_VERSION = "0.5.0"
 
 # production is the safe default. Local mock/dev only runs when this is explicit.
 SATSGATE_ENV = os.environ.get("SATSGATE_ENV", "production").strip().lower() or "production"

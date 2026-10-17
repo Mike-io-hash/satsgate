@@ -21,11 +21,13 @@ def verify_once_and_spend(
     payment_hash: str,
     cost: int,
     resource: str | None = None,
+    api_key_id: int | None = None,
 ) -> dict:
     """Mark (client_id, payment_hash) as verified and spend credits exactly once.
 
     - Idempotent: if it was already verified, it will not charge again.
     - Atomic: everything happens in a single transaction.
+    - The debit row records `api_key_id` (NULL for the account key) and `resource`.
 
     Returns: {charged, new_balance}
     """
@@ -64,8 +66,21 @@ def verify_once_and_spend(
             (cost, int(client_id)),
         )
         conn.execute(
-            "INSERT INTO ledger(client_id, delta_credits, reason, ref, created_at) VALUES(?, ?, ?, ?, ?)",
-            (int(client_id), -cost, "paywall_verify", payment_hash, now),
+            """
+            INSERT INTO ledger(
+              client_id, delta_credits, reason, ref, created_at, api_key_id, resource
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(client_id),
+                -cost,
+                "paywall_verify",
+                payment_hash,
+                now,
+                int(api_key_id) if api_key_id is not None else None,
+                resource,
+            ),
         )
         conn.execute(
             "INSERT INTO verifications(client_id, payment_hash, resource, created_at) VALUES(?, ?, ?, ?)",

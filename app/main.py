@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from . import config
 from . import db
 from . import db_clients
+from . import db_keys
 from . import db_reports
 from . import db_verify
 from . import ssrf
@@ -99,9 +100,71 @@ RL_TOPUP = RateLimiter(
 )
 
 
-def _get_client_from_api_key(x_api_key: str | None) -> db.Client | None:
+def _authenticate(x_api_key: str | None) -> db_keys.Principal | JSONResponse:
+    if not x_api_key or len(x_api_key) > 512:
+        return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_api_key"})
+    try:
+        return db_keys.authenticate(config.DB_PATH, x_api_key)
+    except db_keys.AuthError as exc:
+        return JSONResponse(status_code=401, content={"ok": False, "error": exc.code})
+
+
+def _insufficient_scope(scope: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=403,
+        content={
+            "ok": False,
+            "error": "insufficient_scope",
+            "scope": scope,
+            "detail": "This API key can only create paywall challenges, check their status, and verify them.",
+        },
+    )
+
+
+def _account_client(x_api_key: str | None) -> db.Client | JSONResponse:
+    """Account key only. Restricted keys get insufficient_scope."""
+    auth = _authenticate(x_api_key)
+    if isinstance(auth, JSONResponse):
+        return auth
+    if auth.scope != db_keys.SCOPE_ACCOUNT:
+        return _insufficient_scope(auth.scope)
+    return auth.client
+
+
+def _paywall_principal(x_api_key: str | None, resource: str) -> db_keys.Principal | JSONResponse:
+    """Account or restricted key, limited to the key's resource prefix when one is set."""
+    auth = _authenticate(x_api_key)
+    if isinstance(auth, JSONResponse):
+        return auth
+    prefix = auth.resource_prefix
+    if prefix and not resource.startswith(prefix):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "ok": False,
+                "error": "resource_not_allowed",
+                "resource": resource,
+                "resource_prefix": prefix,
+                "detail": "This API key can only use resources that start with its resource_prefix.",
+            },
+        )
+    return auth
+
+
+def _topup_client(x_api_key: str | None) -> db.Client | JSONResponse | None:
+    """Client to attach a top-up to.
+
+    Missing or unknown account keys stay anonymous, matching previous behaviour.
+    A restricted key is rejected: it must not buy credits or open a new account.
+    """
     if not x_api_key or len(x_api_key) > 512:
         return None
+    if db_keys.key_kind(x_api_key) == "restricted":
+        try:
+            auth = db_keys.authenticate(config.DB_PATH, x_api_key)
+        except db_keys.AuthError as exc:
+            return JSONResponse(status_code=401, content={"ok": False, "error": exc.code})
+        return _insufficient_scope(auth.scope)
     return db.get_client_by_api_key(config.DB_PATH, x_api_key)
 
 
@@ -143,7 +206,9 @@ async def rate_limit_mw(request: Request, call_next):
 
     ip = _peer_ip(request)
     raw_key = request.headers.get("x-api-key")
-    client = _get_client_from_api_key(raw_key)
+    client = None
+    if raw_key and len(raw_key) <= 512:
+        client = db_keys.client_for_rate_limit(config.DB_PATH, raw_key)
     if client is not None and raw_key is not None:
         # Hash only. A random key must not open its own auth bucket.
         blocked = _reject_if_limited(RL_AUTH, "k:" + db.hash_api_key(raw_key))
@@ -238,6 +303,9 @@ def well_known_satsgate(request: Request) -> dict:
                 "balance": {"method": "GET", "path": "/v1/balance"},
                 "client": {"method": "GET", "path": "/v1/client"},
                 "set_payee": {"method": "POST", "path": "/v1/client/payee"},
+                "api_keys_create": {"method": "POST", "path": "/v1/api-keys"},
+                "api_keys_list": {"method": "GET", "path": "/v1/api-keys"},
+                "api_keys_revoke": {"method": "POST", "path": "/v1/api-keys/{key_id}/revoke"},
                 "paywall_challenge": {"method": "POST", "path": "/v1/paywall/challenge"},
                 "paywall_verify": {"method": "POST", "path": "/v1/paywall/verify"},
                 "paywall_status": {"method": "GET", "path": "/v1/paywall/status/{payment_hash}"},
@@ -274,17 +342,17 @@ def v1_plans() -> dict:
 
 @app.get("/v1/balance")
 def v1_balance(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
-    client = _get_client_from_api_key(x_api_key)
-    if not client:
-        return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_api_key"})
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
     return {"ok": True, "client_id": client.id, "credits": client.credits}
 
 
 @app.get("/v1/client")
 def v1_client(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
-    client = _get_client_from_api_key(x_api_key)
-    if not client:
-        return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_api_key"})
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
 
     return {
         "ok": True,
@@ -302,9 +370,9 @@ def v1_ledger(
 ):
     """Return this client's verification ledger entries (credits)."""
 
-    client = _get_client_from_api_key(x_api_key)
-    if not client:
-        return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_api_key"})
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
 
     entries = db_reports.list_ledger(
         config.DB_PATH,
@@ -331,9 +399,9 @@ def v1_usage_summary(
 ):
     """Usage summary over a time window (default: last 24h)."""
 
-    client = _get_client_from_api_key(x_api_key)
-    if not client:
-        return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_api_key"})
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
 
     since_hours = max(1, min(int(since_hours), 24 * 365))
     since_ts = int(time.time()) - (since_hours * 3600)
@@ -356,9 +424,9 @@ def v1_usage_daily(
 ):
     """Daily (UTC) series for charts and automated top-ups."""
 
-    client = _get_client_from_api_key(x_api_key)
-    if not client:
-        return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_api_key"})
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
 
     days = max(1, min(int(days), 366))
 
@@ -386,9 +454,9 @@ def v1_usage_forecast(
     - Recommendation: suggests a plan to keep a buffer (default: 7 days).
     """
 
-    client = _get_client_from_api_key(x_api_key)
-    if not client:
-        return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_api_key"})
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
 
     lookback_hours = max(1, min(int(lookback_hours), 24 * 30))
     buffer_days = max(1, min(int(buffer_days), 365))
@@ -513,9 +581,9 @@ def v1_client_set_payee(
     body: ClientPayeeIn,
     x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
 ):
-    client = _get_client_from_api_key(x_api_key)
-    if not client:
-        return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_api_key"})
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
 
     payee = body.payee_lightning_address.strip()
     if not _looks_like_lightning_address(payee):
@@ -534,6 +602,79 @@ def v1_client_set_payee(
     }
 
 
+class ApiKeyCreateIn(BaseModel):
+    label: str = Field(..., min_length=1, max_length=64)
+    resource_prefix: str | None = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "When set, this key can only challenge, check, and verify resources that "
+            "start with this prefix. The comparison is case-sensitive. Omit it to allow any resource."
+        ),
+    )
+
+
+@app.post("/v1/api-keys")
+def v1_api_keys_create(
+    body: ApiKeyCreateIn,
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+):
+    """Create a restricted key. The account key is required. The secret is returned once."""
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    try:
+        created = db_keys.create_restricted_key(
+            config.DB_PATH,
+            client_id=client.id,
+            label=body.label,
+            resource_prefix=body.resource_prefix,
+        )
+    except ValueError as exc:
+        code = str(exc)
+        status = 409 if code == "too_many_api_keys" else 400
+        return JSONResponse(status_code=status, content={"ok": False, "error": code})
+    api_key = created.pop("api_key")
+    return {
+        "ok": True,
+        "api_key": api_key,
+        "key": created,
+        "note": "Save this API key. We will not show it again.",
+    }
+
+
+@app.get("/v1/api-keys")
+def v1_api_keys_list(
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+    include_revoked: bool = False,
+):
+    """List this client's restricted keys. Secrets are never included."""
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    keys = db_keys.list_restricted_keys(
+        config.DB_PATH,
+        client_id=client.id,
+        include_revoked=include_revoked,
+    )
+    return {"ok": True, "keys": keys}
+
+
+@app.post("/v1/api-keys/{key_id}/revoke")
+def v1_api_keys_revoke(
+    key_id: int,
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+):
+    """Revoke a restricted key. Repeating this call stays revoked."""
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    revoked = db_keys.revoke_restricted_key(config.DB_PATH, client_id=client.id, key_id=key_id)
+    if revoked is None:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "api_key_not_found"})
+    return {"ok": True, "key": revoked}
+
+
 @app.post("/v1/spend", include_in_schema=config.dev_endpoints_enabled())
 def v1_spend(
     x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
@@ -543,9 +684,9 @@ def v1_spend(
     if not config.dev_endpoints_enabled():
         return JSONResponse(status_code=404, content={"ok": False, "error": "not_found"})
 
-    client = _get_client_from_api_key(x_api_key)
-    if not client:
-        return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_api_key"})
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
 
     try:
         new_balance = db.spend_credits(
@@ -867,7 +1008,9 @@ def v1_topup(
 
     resource = f"v1/topup/{plan.id}"
 
-    client = _get_client_from_api_key(x_api_key)
+    client = _topup_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
 
     if authorization:
         try:
@@ -1042,12 +1185,14 @@ def v1_paywall_challenge(
     `invoice_expires_at` is when the invoice stops being payable. `claim_until`
     (also returned as `valid_until`) is when satsgate will still unlock it.
     Passing `payee_lightning_address` on the first challenge saves it. Change
-    the saved payee with POST /v1/client/payee.
+    the saved payee with POST /v1/client/payee. A restricted key cannot save or
+    change the payee.
     """
 
-    client = _get_client_from_api_key(x_api_key)
-    if not client:
-        return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_api_key"})
+    auth = _paywall_principal(x_api_key, body.resource)
+    if isinstance(auth, JSONResponse):
+        return auth
+    client = auth.client
 
     # Minimum payable lifetime. The macaroon follows the invoice claim window,
     # the same way a top-up does, so a 24h invoice is not trapped behind a 10-minute token.
@@ -1077,8 +1222,10 @@ def v1_paywall_challenge(
             )
         payee = stored_payee
     else:
-        # Fast onboarding: if no payee is set yet, allow setting it on the first challenge.
+        # Fast onboarding: if no payee is set yet, the account key may set it on the first challenge.
         if requested_payee:
+            if auth.scope != db_keys.SCOPE_ACCOUNT:
+                return _insufficient_scope(auth.scope)
             if not _looks_like_lightning_address(requested_payee):
                 return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_lightning_address"})
             try:
@@ -1156,6 +1303,7 @@ def v1_paywall_challenge(
             resource=body.resource,
             verify_url=getattr(inv, "verify_url", None),
             expires_at=invoice_expires_at,
+            api_key_id=auth.api_key_id,
             max_open_per_client=config.MAX_OPEN_CHALLENGES_PER_CLIENT,
             now=created_at,
             claim_grace_seconds=config.PAYWALL_CLAIM_GRACE_SECONDS,
@@ -1267,6 +1415,7 @@ def _unlock_paywall(
     client: db.Client,
     payment_hash: str | None = None,
     poll: bool = False,
+    api_key_id: int | None = None,
 ) -> JSONResponse | dict:
     macaroon_b64, preimage_hex = parse_authorization_header(authorization)
     peeked = peek_bindings(macaroon_b64)
@@ -1341,6 +1490,7 @@ def _unlock_paywall(
         payment_hash=token_hash,
         cost=int(cost_credits),
         resource=expected_resource,
+        api_key_id=api_key_id,
     )
 
     claim_until = int(deadline) if deadline is not None else int(payload["exp"])
@@ -1384,16 +1534,17 @@ def v1_paywall_verify(
     `pending`. The first settled call on either route spends credits; a repeat spends 0.
     """
 
-    client = _get_client_from_api_key(x_api_key)
-    if not client:
-        return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_api_key"})
+    auth = _paywall_principal(x_api_key, body.expected_resource)
+    if isinstance(auth, JSONResponse):
+        return auth
 
     try:
         return _unlock_paywall(
             authorization=authorization,
             expected_resource=body.expected_resource,
             cost_credits=int(body.cost_credits),
-            client=client,
+            client=auth.client,
+            api_key_id=auth.api_key_id,
         )
     except L402Error as e:
         return _paywall_auth_error(e, expected_resource=body.expected_resource)
@@ -1429,18 +1580,19 @@ def v1_paywall_status(
     if normalized is None:
         return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_payment_hash"})
 
-    client = _get_client_from_api_key(x_api_key)
-    if not client:
-        return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_api_key"})
+    auth = _paywall_principal(x_api_key, expected_resource)
+    if isinstance(auth, JSONResponse):
+        return auth
 
     try:
         return _unlock_paywall(
             authorization=authorization,
             expected_resource=expected_resource,
             cost_credits=int(cost_credits),
-            client=client,
+            client=auth.client,
             payment_hash=normalized,
             poll=True,
+            api_key_id=auth.api_key_id,
         )
     except L402Error as e:
         return _paywall_auth_error(e, expected_resource=expected_resource)
