@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 # Load env vars from .env if present. Existing process env wins.
 load_dotenv()
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 
 # production is the safe default. Local mock/dev only runs when this is explicit.
 SATSGATE_ENV = os.environ.get("SATSGATE_ENV", "production").strip().lower() or "production"
@@ -20,8 +20,46 @@ _PREVIOUS_KEYS_RAW = os.environ.get("SATSGATE_MACAROON_PREVIOUS_KEYS", "").strip
 # Demo endpoint pricing (/v1/tickets, dev-only)
 PRICE_SATS = int(os.environ.get("SATSGATE_PRICE_SATS", "10"))
 
-# Token TTL (seconds)
+# Paywall and dev-ticket macaroons. Top-up macaroons follow the invoice expiry.
 TOKEN_TTL_SECONDS = int(os.environ.get("SATSGATE_TOKEN_TTL_SECONDS", "600"))
+
+# A top-up macaroon stays valid until the stored BOLT11 expiry, plus this grace
+# so a buyer can finish polling after paying near the end of the invoice, and
+# never longer than the cap. The cap is the lifetime of a bearer that can mint
+# an API key. Both are optional; unset means these defaults.
+_DEFAULT_TOPUP_TOKEN_TTL_CAP_SECONDS = 48 * 60 * 60
+_DEFAULT_TOPUP_CLAIM_GRACE_SECONDS = 60 * 60
+_MAX_TOPUP_TOKEN_TTL_CAP_SECONDS = 7 * 24 * 60 * 60
+_MAX_TOPUP_CLAIM_GRACE_SECONDS = 24 * 60 * 60
+
+
+def _optional_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = int(str(raw).strip())
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer") from exc
+    if value < minimum or value > maximum:
+        raise RuntimeError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+TOPUP_TOKEN_TTL_CAP_SECONDS = _optional_int(
+    "SATSGATE_TOPUP_TOKEN_TTL_CAP_SECONDS",
+    _DEFAULT_TOPUP_TOKEN_TTL_CAP_SECONDS,
+    minimum=60,
+    maximum=_MAX_TOPUP_TOKEN_TTL_CAP_SECONDS,
+)
+TOPUP_CLAIM_GRACE_SECONDS = _optional_int(
+    "SATSGATE_TOPUP_CLAIM_GRACE_SECONDS",
+    _DEFAULT_TOPUP_CLAIM_GRACE_SECONDS,
+    minimum=0,
+    maximum=_MAX_TOPUP_CLAIM_GRACE_SECONDS,
+)
+if TOPUP_CLAIM_GRACE_SECONDS > TOPUP_TOKEN_TTL_CAP_SECONDS:
+    raise RuntimeError("SATSGATE_TOPUP_CLAIM_GRACE_SECONDS cannot exceed SATSGATE_TOPUP_TOKEN_TTL_CAP_SECONDS")
 
 # Wallet backend
 # - mock: simulated wallet (local testing only)

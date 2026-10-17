@@ -295,7 +295,7 @@ def test_health_does_not_leak_internals(client):
     body = response.json()
     assert set(body) == {"ok", "version"}
     assert body["ok"] is True
-    assert body["version"] == "0.4.0"
+    assert body["version"] == "0.4.1"
     serialized = json.dumps(body).lower()
     assert "sqlite" not in serialized
     assert "db_path" not in serialized
@@ -1256,6 +1256,427 @@ def test_topup_claim_does_not_double_credit(client):
     assert results[0]["client_id"] == results[1]["client_id"]
     balance = db.get_balance(config.DB_PATH, client_id=results[0]["client_id"])
     assert balance == body["plan"]["credits"]
+
+
+def _with_topup_invoice_lifetime(seconds: int):
+    """Point mock top-up invoices at a BOLT11-like lifetime. Paywall invoices stay put."""
+    from app.main import WALLET
+
+    original = WALLET.create_invoice
+
+    def create_invoice(**kwargs):
+        if "topup" in str(kwargs.get("memo", "")):
+            kwargs = dict(kwargs)
+            kwargs["expiry_seconds"] = int(seconds)
+            kwargs["min_expiry_seconds"] = int(seconds)
+        return original(**kwargs)
+
+    WALLET.create_invoice = create_invoice
+    return WALLET, original
+
+
+def _restore_wallet(wallet, original) -> None:
+    wallet.create_invoice = original
+
+
+def _set_topup_window(payment_hash: str, *, expires_at: int, created_at: int | None = None) -> None:
+    from app import config, db
+
+    with db._connect(config.DB_PATH) as conn:
+        if created_at is None:
+            conn.execute(
+                "UPDATE topups SET expires_at = ? WHERE payment_hash = ?",
+                (int(expires_at), payment_hash),
+            )
+        else:
+            conn.execute(
+                "UPDATE topups SET expires_at = ?, created_at = ? WHERE payment_hash = ?",
+                (int(expires_at), int(created_at), payment_hash),
+            )
+
+
+def _expired_topup_macaroon(body: dict, *, ttl_seconds: int = -601) -> str:
+    """A 0.4.0 macaroon whose caveat expired well after the old 600s TTL."""
+    from app import config, l402
+
+    return l402.make_macaroon(
+        secret=config.MACAROON_SECRET,
+        kid=config.MACAROON_KEY_ID,
+        purpose=l402.PURPOSE_TOPUP,
+        payment_hash=body["payment_hash"],
+        resource=f"v1/topup/{body['plan']['id']}",
+        amount_sats=int(body["plan"]["price_sats"]),
+        invoice=body["invoice"],
+        ttl_seconds=ttl_seconds,
+        client_id=None,
+        payee=config.LIGHTNING_ADDRESS or None,
+    )
+
+
+def _expired_json_topup_token(body: dict) -> str:
+    """In-flight 0.3.0 JSON token, expired by more than the old 10-minute TTL."""
+    from app.l402 import invoice_binding, payee_binding
+
+    payload = {
+        "v": 2,
+        "kid": "1",
+        "purpose": "topup",
+        "cid": None,
+        "ph": body["payment_hash"],
+        "res": f"v1/topup/{body['plan']['id']}",
+        "amt": int(body["plan"]["price_sats"]),
+        "payee_h": payee_binding(None),
+        "inv_h": invoice_binding(body["invoice"]),
+        "exp": int(time.time()) - 601,
+        "nonce": "legacy-topup",
+    }
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    sig = hmac.new(b"test-secret", raw, hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(raw + b"." + sig.encode()).decode().rstrip("=")
+
+
+def test_topup_paid_after_ten_minutes_still_claims(client):
+    """A 24h invoice can be paid after the old 10-minute token TTL, then finished.
+
+    Covers a macaroon minted for that invoice, a 0.4.0 macaroon whose `exp` has
+    already passed, and an in-flight 0.3.0 JSON token in the same state. The
+    status poll (no preimage) and the preimage claim both credit once.
+    """
+    from app import config, l402
+    from app import wallet_lnaddr
+    from app.invoices import InvoiceValidationError
+
+    wallet, original = _with_topup_invoice_lifetime(24 * 60 * 60)
+    try:
+        started = client.get("/v1/topup/trial")
+    finally:
+        _restore_wallet(wallet, original)
+
+    assert started.status_code == 402, started.text
+    body = started.json()
+    now = int(time.time())
+    minted = l402.peek_bindings(body["macaroon"])
+    # The caveat follows the invoice (plus grace), so 11 minutes is still inside it.
+    assert body["expires_at"] - now > 23 * 60 * 60
+    assert abs(minted["exp"] - (body["expires_at"] + config.TOPUP_CLAIM_GRACE_SECONDS)) <= 3
+    assert minted["exp"] - now > 11 * 60
+    assert minted["exp"] - now < config.TOPUP_TOKEN_TTL_CAP_SECONDS + 5
+
+    import app.main as mainmod
+
+    frozen = time.time() + 11 * 60
+    mainmod.time.time = lambda: frozen
+    try:
+        preimage = client.get(f"/dev/mock/pay/{body['payment_hash']}").json()["preimage"]
+        paid_late = client.get(
+            "/v1/topup/trial",
+            headers={"Authorization": _auth(body["macaroon"], preimage)},
+        )
+    finally:
+        mainmod.time.time = time.time
+    assert paid_late.status_code == 200, paid_late.text
+    assert paid_late.json()["credits_added"] == body["plan"]["credits"]
+    assert paid_late.json()["api_key"].startswith("sg_")
+
+    # Tokens already issued with the 600s TTL: the caveat is in the past, the
+    # stored invoice is still the Alby-style one, and the ledger row is pending.
+    issued_at = now - 1201
+    wallet, original = _with_topup_invoice_lifetime(24 * 60 * 60)
+    try:
+        legacy = client.get("/v1/topup/starter")
+        polling = client.get("/v1/topup/growth")
+        json_topup = client.get("/v1/topup/scale")
+    finally:
+        _restore_wallet(wallet, original)
+
+    for stale in (legacy, polling, json_topup):
+        assert stale.status_code == 402, stale.text
+        _set_topup_window(
+            stale.json()["payment_hash"],
+            expires_at=issued_at + 24 * 60 * 60,
+            created_at=issued_at,
+        )
+
+    legacy_body = legacy.json()
+    legacy_mac = _expired_topup_macaroon(legacy_body)
+    assert l402.peek_bindings(legacy_mac)["exp"] < time.time() - 600
+    legacy_preimage = client.get(f"/dev/mock/pay/{legacy_body['payment_hash']}").json()["preimage"]
+    legacy_paid = client.get(
+        "/v1/topup/starter",
+        headers={"Authorization": _auth(legacy_mac, legacy_preimage)},
+    )
+    assert legacy_paid.status_code == 200, legacy_paid.text
+    assert legacy_paid.json()["credits_added"] == legacy_body["plan"]["credits"]
+    again = client.get(
+        "/v1/topup/starter",
+        headers={"Authorization": _auth(legacy_mac, legacy_preimage)},
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["credits_added"] == 0
+    assert "api_key" not in again.json()
+
+    # No payment proof: the expired macaroon does not mint credits.
+    poll_body = polling.json()
+    poll_mac = _expired_topup_macaroon(poll_body)
+    refused = client.get(
+        f"/v1/topup/status/{poll_body['payment_hash']}",
+        headers={"Authorization": f"L402 {poll_mac}"},
+    )
+    assert refused.status_code == 401
+    assert refused.json()["error"] == "preimage_required"
+    assert "api_key" not in refused.json()
+
+    from app import db
+
+    with db._connect(config.DB_PATH) as conn:
+        conn.execute(
+            "UPDATE topups SET verify_url = ? WHERE payment_hash = ?",
+            ("https://ln.example/verify/" + poll_body["payment_hash"], poll_body["payment_hash"]),
+        )
+
+    calls = {"n": 0}
+
+    def _settle_on_second(**kwargs):
+        assert kwargs["preimage_hex"] is None
+        assert kwargs["verify_url"].endswith(poll_body["payment_hash"])
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise InvoiceValidationError("lud21_not_settled")
+        return None
+
+    original_confirm = wallet_lnaddr.confirm_lud21
+    wallet_lnaddr.confirm_lud21 = _settle_on_second
+    try:
+        pending = client.get(
+            f"/v1/topup/status/{poll_body['payment_hash']}",
+            headers={"Authorization": f"L402 {poll_mac}"},
+        )
+        assert pending.status_code == 200, pending.text
+        assert pending.json()["settled"] is False
+        assert "api_key" not in pending.json()
+        settled = client.get(
+            f"/v1/topup/status/{poll_body['payment_hash']}",
+            headers={"Authorization": f"L402 {poll_mac}"},
+        )
+    finally:
+        wallet_lnaddr.confirm_lud21 = original_confirm
+
+    assert settled.status_code == 200, settled.text
+    assert settled.json()["settled"] is True
+    assert settled.json()["credits_added"] == poll_body["plan"]["credits"]
+    assert settled.json()["api_key"].startswith("sg_")
+    assert calls["n"] == 2
+
+    # 0.3.0 JSON tokens use the same claim window.
+    json_body = json_topup.json()
+    json_mac = _expired_json_topup_token(json_body)
+    json_preimage = client.get(f"/dev/mock/pay/{json_body['payment_hash']}").json()["preimage"]
+    json_paid = client.get(
+        "/v1/topup/scale",
+        headers={"Authorization": _auth(json_mac, json_preimage)},
+    )
+    assert json_paid.status_code == 200, json_paid.text
+    assert json_paid.json()["api_key"].startswith("sg_")
+
+
+def test_topup_rejects_expired_invoice_even_with_payment_proof(client):
+    from app import config, db
+    from app import wallet_lnaddr
+
+    started = client.get("/v1/topup/trial")
+    body = started.json()
+    preimage = client.get(f"/dev/mock/pay/{body['payment_hash']}").json()["preimage"]
+    now = int(time.time())
+    _set_topup_window(body["payment_hash"], expires_at=now - config.TOPUP_CLAIM_GRACE_SECONDS - 5)
+
+    rejected = client.get("/v1/topup/trial", headers={"Authorization": _auth(body["macaroon"], preimage)})
+    assert rejected.status_code == 401
+    assert rejected.json()["error"] == "invoice expired"
+    assert "api_key" not in rejected.json()
+    assert db.get_topup(config.DB_PATH, body["payment_hash"])["status"] == "pending"
+
+    # Inside the grace window the same preimage still completes.
+    grace = client.get("/v1/topup/starter")
+    grace_body = grace.json()
+    grace_preimage = client.get(f"/dev/mock/pay/{grace_body['payment_hash']}").json()["preimage"]
+    _set_topup_window(grace_body["payment_hash"], expires_at=int(time.time()) - 30)
+    # A later top-up must not delete a row that is still inside the grace window.
+    client.get("/v1/topup/growth")
+    assert db.get_topup(config.DB_PATH, grace_body["payment_hash"])["status"] == "pending"
+    finished = client.get(
+        "/v1/topup/starter",
+        headers={"Authorization": _auth(grace_body["macaroon"], grace_preimage)},
+    )
+    assert finished.status_code == 200, finished.text
+    assert finished.json()["credits_added"] == grace_body["plan"]["credits"]
+
+    # Past the window, a settled LUD-21 response is not consulted and does not credit.
+    late = client.get("/v1/topup/scale")
+    late_body = late.json()
+    _set_topup_window(
+        late_body["payment_hash"],
+        expires_at=int(time.time()) - config.TOPUP_CLAIM_GRACE_SECONDS - 5,
+    )
+    with db._connect(config.DB_PATH) as conn:
+        conn.execute(
+            "UPDATE topups SET verify_url = ? WHERE payment_hash = ?",
+            ("https://ln.example/verify/" + late_body["payment_hash"], late_body["payment_hash"]),
+        )
+
+    def _should_not_run(**_kwargs):
+        raise AssertionError("LUD-21 must not be fetched after the invoice window")
+
+    original = wallet_lnaddr.confirm_lud21
+    wallet_lnaddr.confirm_lud21 = _should_not_run
+    try:
+        blocked = client.get(
+            f"/v1/topup/status/{late_body['payment_hash']}",
+            headers={"Authorization": f"L402 {late_body['macaroon']}"},
+        )
+    finally:
+        wallet_lnaddr.confirm_lud21 = original
+    assert blocked.status_code == 401
+    assert blocked.json()["error"] == "invoice expired"
+    assert db.get_topup(config.DB_PATH, late_body["payment_hash"])["status"] == "pending"
+
+
+def test_topup_without_stored_expiry_keeps_the_macaroon_exp(client):
+    """Rows from before expires_at existed must not become open-ended claims."""
+    from app import config, db
+
+    started = client.get("/v1/topup/trial")
+    body = started.json()
+    preimage = client.get(f"/dev/mock/pay/{body['payment_hash']}").json()["preimage"]
+    with db._connect(config.DB_PATH) as conn:
+        conn.execute("UPDATE topups SET expires_at = NULL WHERE payment_hash = ?", (body["payment_hash"],))
+    credited = client.get("/v1/topup/trial", headers={"Authorization": _auth(body["macaroon"], preimage)})
+    assert credited.status_code == 200, credited.text
+
+    stale = client.get("/v1/topup/starter")
+    stale_body = stale.json()
+    stale_preimage = client.get(f"/dev/mock/pay/{stale_body['payment_hash']}").json()["preimage"]
+    with db._connect(config.DB_PATH) as conn:
+        conn.execute("UPDATE topups SET expires_at = NULL WHERE payment_hash = ?", (stale_body["payment_hash"],))
+    rejected = client.get(
+        "/v1/topup/starter",
+        headers={"Authorization": _auth(_expired_topup_macaroon(stale_body), stale_preimage)},
+    )
+    assert rejected.status_code == 401
+    assert rejected.json()["error"] == "token expired"
+    assert db.get_topup(config.DB_PATH, stale_body["payment_hash"])["status"] == "pending"
+
+
+def test_topup_token_cap_bounds_a_long_invoice(client):
+    from app import config, l402
+
+    previous = config.TOPUP_TOKEN_TTL_CAP_SECONDS
+    config.TOPUP_TOKEN_TTL_CAP_SECONDS = 3600
+    wallet, original = _with_topup_invoice_lifetime(10 * 24 * 60 * 60)
+    try:
+        started = client.get("/v1/topup/trial")
+    finally:
+        _restore_wallet(wallet, original)
+        config.TOPUP_TOKEN_TTL_CAP_SECONDS = previous
+
+    assert started.status_code == 402, started.text
+    body = started.json()
+    now = time.time()
+    minted = l402.peek_bindings(body["macaroon"])
+    assert body["expires_at"] - now > 9 * 24 * 60 * 60
+    assert abs(minted["exp"] - (now + 3600)) <= 3
+
+    # The server cap still applies if the row is older than the cap, even when
+    # the caveat itself has not expired and the BOLT11 expiry is days away.
+    config.TOPUP_TOKEN_TTL_CAP_SECONDS = 3600
+    try:
+        _set_topup_window(
+            body["payment_hash"],
+            expires_at=int(now) + 10 * 24 * 60 * 60,
+            created_at=int(now) - 3601,
+        )
+        preimage = client.get(f"/dev/mock/pay/{body['payment_hash']}").json()["preimage"]
+        rejected = client.get("/v1/topup/trial", headers={"Authorization": _auth(body["macaroon"], preimage)})
+    finally:
+        config.TOPUP_TOKEN_TTL_CAP_SECONDS = previous
+    assert rejected.status_code == 401
+    assert rejected.json()["error"] == "invoice expired"
+
+
+def test_paywall_token_ttl_is_unchanged(client):
+    from app import config, db, l402
+
+    api_key = _buy_client(client)
+    challenge = _challenge(client, api_key, resource="api/premium", amount_sats=3)
+    now = time.time()
+    payload = l402.peek_bindings(challenge["macaroon"])
+    assert abs(payload["exp"] - (now + config.TOKEN_TTL_SECONDS)) <= 3
+    assert abs(challenge["valid_until"] - (now + config.TOKEN_TTL_SECONDS)) <= 3
+    assert payload["exp"] - now < config.TOPUP_CLAIM_GRACE_SECONDS
+
+    custom = client.post(
+        "/v1/paywall/challenge",
+        headers={"X-Api-Key": api_key},
+        json={"resource": "api/short", "amount_sats": 2, "ttl_seconds": 90},
+    )
+    assert custom.status_code == 200, custom.text
+    custom_body = custom.json()
+    custom_exp = l402.peek_bindings(custom_body["macaroon"])["exp"]
+    assert abs(custom_exp - (time.time() + 90)) <= 3
+    assert abs(custom_body["valid_until"] - custom_exp) <= 3
+
+    # Stretching the stored challenge row must not keep an expired paywall token alive.
+    client_id = client.get("/v1/client", headers={"X-Api-Key": api_key}).json()["client_id"]
+    preimage = client.get(f"/dev/mock/pay/{challenge['payment_hash']}").json()["preimage"]
+    before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    expired = l402.make_macaroon(
+        secret=config.MACAROON_SECRET,
+        kid=config.MACAROON_KEY_ID,
+        purpose=l402.PURPOSE_PAYWALL,
+        payment_hash=challenge["payment_hash"],
+        resource="api/premium",
+        amount_sats=3,
+        invoice=challenge["invoice"],
+        ttl_seconds=-30,
+        client_id=client_id,
+        payee=challenge.get("payee_lightning_address"),
+    )
+    with db._connect(config.DB_PATH) as conn:
+        conn.execute(
+            "UPDATE paywall_challenges SET expires_at = ? WHERE payment_hash = ?",
+            (int(time.time()) + 24 * 60 * 60, challenge["payment_hash"]),
+        )
+    rejected = client.post(
+        "/v1/paywall/verify",
+        headers={"X-Api-Key": api_key, "Authorization": _auth(expired, preimage)},
+        json={"expected_resource": "api/premium"},
+    )
+    assert rejected.status_code == 401
+    assert rejected.json()["error"] == "token expired"
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before
+
+    status = client.get(
+        f"/v1/paywall/status/{challenge['payment_hash']}",
+        headers={"X-Api-Key": api_key, "Authorization": f"L402 {expired}"},
+        params={"expected_resource": "api/premium"},
+    )
+    assert status.status_code == 401
+    assert status.json()["error"] == "token expired"
+
+
+def test_topup_window_env_rejects_bad_values(tmp_path):
+    keys = ("SATSGATE_TOPUP_TOKEN_TTL_CAP_SECONDS", "SATSGATE_TOPUP_CLAIM_GRACE_SECONDS")
+    try:
+        with pytest.raises(RuntimeError, match="must be an integer"):
+            _load_app(tmp_path / "bad-int", SATSGATE_TOPUP_TOKEN_TTL_CAP_SECONDS="abc")
+        with pytest.raises(RuntimeError, match="cannot exceed"):
+            _load_app(
+                tmp_path / "grace",
+                SATSGATE_TOPUP_TOKEN_TTL_CAP_SECONDS="3600",
+                SATSGATE_TOPUP_CLAIM_GRACE_SECONDS="7200",
+            )
+    finally:
+        for key in keys:
+            os.environ.pop(key, None)
 
 
 def test_paywall_and_ticket_can_settle_from_stored_verify_url(client):

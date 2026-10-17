@@ -96,6 +96,7 @@ def _mint_macaroon_b64(
     ttl_seconds: int,
     client_id: int | None,
     payee: str | None,
+    exp: int | None = None,
 ) -> str:
     token_id = secrets.token_bytes(32)
     mac = Macaroon(
@@ -104,6 +105,7 @@ def _mint_macaroon_b64(
         key=secret,
         version=MACAROON_V2,
     )
+    expiry = int(time.time()) + int(ttl_seconds) if exp is None else int(exp)
     caveats = [
         f"v={TOKEN_VERSION}",
         f"kid={kid}",
@@ -113,7 +115,7 @@ def _mint_macaroon_b64(
         f"amt={int(amount_sats)}",
         f"payee_h={payee_binding(payee)}",
         f"inv_h={invoice_binding(invoice)}",
-        f"exp={int(time.time()) + int(ttl_seconds)}",
+        f"exp={expiry}",
     ]
     if client_id is not None:
         caveats.append(f"cid={int(client_id)}")
@@ -136,11 +138,15 @@ def make_macaroon(
     ttl_seconds: int,
     client_id: int | None,
     payee: str | None,
+    exp: int | None = None,
 ) -> str:
     """Mint a real macaroon whose caveats carry the v2 bindings.
 
     The identifier is the L402 v0 binary form so lnget can read the payment
     hash. v1 JSON tokens are not issued. In-flight v2 JSON tokens still verify.
+
+    `exp`, when set, is the absolute unix expiry written into the caveat.
+    Otherwise the caveat is `now + ttl_seconds`.
     """
     if purpose not in _PURPOSES:
         raise L402Error("invalid purpose")
@@ -163,6 +169,7 @@ def make_macaroon(
             ttl_seconds=ttl_seconds,
             client_id=client_id,
             payee=payee,
+            exp=exp,
         )
         if not any(marker in token for marker in _ALBY_HEADER_TOKENS):
             return token
@@ -284,7 +291,14 @@ def peek_bindings(macaroon_b64: str) -> dict:
     return _bindings_from_macaroon(mac)
 
 
-def _check_context(payload: dict, *, purpose: str, resource: str, client_id: int | None) -> None:
+def _check_context(
+    payload: dict,
+    *,
+    purpose: str,
+    resource: str,
+    client_id: int | None,
+    skip_expiry: bool,
+) -> None:
     if payload.get("v") != TOKEN_VERSION:
         raise L402Error("unsupported version")
     if payload.get("purpose") != purpose:
@@ -293,7 +307,7 @@ def _check_context(payload: dict, *, purpose: str, resource: str, client_id: int
         raise L402Error("resource mismatch")
 
     exp = _require_int(payload.get("exp"), "exp")
-    if int(time.time()) > exp:
+    if not skip_expiry and int(time.time()) > exp:
         raise L402Error("token expired")
 
     _require_hex64(payload.get("ph"), "payment_hash")
@@ -321,6 +335,7 @@ def _parse_json_macaroon(
     purpose: str,
     resource: str,
     client_id: int | None,
+    skip_expiry: bool,
 ) -> dict:
     """Verify an in-flight v2 JSON token minted before macaroons were issued."""
     try:
@@ -348,7 +363,13 @@ def _parse_json_macaroon(
     if not signed:
         raise L402Error("invalid signature")
 
-    _check_context(payload, purpose=purpose, resource=resource, client_id=client_id)
+    _check_context(
+        payload,
+        purpose=purpose,
+        resource=resource,
+        client_id=client_id,
+        skip_expiry=skip_expiry,
+    )
     payload["ph"] = str(payload["ph"]).lower()
     payload["payee_h"] = str(payload["payee_h"]).lower()
     payload["inv_h"] = str(payload["inv_h"]).lower()
@@ -362,6 +383,7 @@ def _parse_real_macaroon(
     purpose: str,
     resource: str,
     client_id: int | None,
+    skip_expiry: bool,
 ) -> dict:
     try:
         mac = Macaroon.deserialize("".join(macaroon_b64.split()))
@@ -383,7 +405,13 @@ def _parse_real_macaroon(
     except Exception as exc:  # noqa: BLE001
         raise L402Error("invalid signature") from exc
 
-    _check_context(payload, purpose=purpose, resource=resource, client_id=client_id)
+    _check_context(
+        payload,
+        purpose=purpose,
+        resource=resource,
+        client_id=client_id,
+        skip_expiry=skip_expiry,
+    )
     return payload
 
 
@@ -394,12 +422,18 @@ def parse_and_verify_macaroon(
     purpose: str,
     resource: str,
     client_id: int | None = None,
+    skip_expiry: bool = False,
 ) -> dict:
     """Verify a v2 macaroon (or an in-flight v2 JSON token).
 
     Resource is required. Paywall checks also pass client_id. `client_id` when
     provided must equal the signed `cid`. A token minted for one client never
     verifies for another.
+
+    `skip_expiry` still checks the signature and every binding. Only the top-up
+    claim path sets it, and only so a macaroon minted with the old 10-minute
+    TTL can finish while the stored invoice window is still open. Paywall and
+    ticket checks leave it false.
     """
     if not resource:
         raise L402Error("resource mismatch")
@@ -412,6 +446,7 @@ def parse_and_verify_macaroon(
             purpose=purpose,
             resource=resource,
             client_id=client_id,
+            skip_expiry=skip_expiry,
         )
     if raw[:1] == b"\x02":
         return _parse_real_macaroon(
@@ -420,6 +455,7 @@ def parse_and_verify_macaroon(
             purpose=purpose,
             resource=resource,
             client_id=client_id,
+            skip_expiry=skip_expiry,
         )
     raise L402Error("invalid macaroon")
 
