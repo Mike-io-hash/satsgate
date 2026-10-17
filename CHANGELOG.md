@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-17
+
+### Fixed
+- A top-up macaroon no longer expires at `SATSGATE_TOKEN_TTL_SECONDS` (default 10 minutes) while the Lightning invoice is still payable. Paying an Alby invoice hours later, then `GET /v1/topup/status/{payment_hash}` or `GET /v1/topup/{plan_id}` with the preimage, credits the account. The macaroon `exp` is the invoice `expires_at` the service already stores, plus a grace window (default 1 hour) so a payment made near expiry can still be polled, and never later than 48 hours after the row was created.
+- A top-up token already issued with that 10-minute `exp` (0.4.0 macaroon or in-flight 0.3.0 JSON) can still complete while the ledger row is pending and that server-side window is open. The macaroon signature, the invoice/amount/payee bindings, and proof of payment are unchanged.
+
+### Security
+- Credits are still not issued without a preimage or a stored LUD-21 `verify` response that carries a matching preimage. After `expires_at` plus the grace window, or after the cap, the claim returns `invoice expired` and does not credit, including when the macaroon's own `exp` has not passed and including when the provider would report the invoice settled.
+- Paywall and dev-ticket macaroons keep `SATSGATE_TOKEN_TTL_SECONDS` (or the paywall request's `ttl_seconds`). An expired paywall token still returns `token expired`.
+
+### Changed
+- `GET /health` reports `0.4.1`.
+- Optional `SATSGATE_TOPUP_TOKEN_TTL_CAP_SECONDS` (default `172800`, max `604800`) and `SATSGATE_TOPUP_CLAIM_GRACE_SECONDS` (default `3600`, max `86400`). The grace cannot exceed the cap. Neither is required.
+
 ## [0.4.0] - 2026-10-17
 
 ### Added

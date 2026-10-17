@@ -194,13 +194,22 @@ def add_topup(
     verify_url: str | None = None,
     expires_at: int | None = None,
     max_pending_per_ip: int = 20,
+    now: int | None = None,
+    claim_grace_seconds: int = 0,
+    claim_cap_seconds: int = 86_400,
 ) -> None:
-    """Insert a pending top-up. Expired pending rows are removed first.
+    """Insert a pending top-up. Rows past the claim window are removed first.
+
+    A pending row with `expires_at` stays until that expiry plus
+    `claim_grace_seconds`, and never longer than `claim_cap_seconds` after
+    `created_at`. Rows with no expiry still age out after a day.
 
     Raises ValueError('too_many_pending_topups') when this IP already has too
     many unpaid top-ups. That caps anonymous invoice spam.
     """
-    now = int(time.time())
+    now = int(time.time()) if now is None else int(now)
+    invoice_cutoff = now - int(claim_grace_seconds)
+    cap_cutoff = now - int(claim_cap_seconds)
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
@@ -208,11 +217,14 @@ def add_topup(
             DELETE FROM topups
             WHERE status = 'pending'
               AND (
-                (expires_at IS NOT NULL AND expires_at < ?)
+                (
+                  expires_at IS NOT NULL
+                  AND (expires_at < ? OR created_at < ?)
+                )
                 OR (expires_at IS NULL AND created_at < ?)
               )
             """,
-            (now, now - 86_400),
+            (invoice_cutoff, cap_cutoff, now - 86_400),
         )
         if requester_ip:
             pending = conn.execute(

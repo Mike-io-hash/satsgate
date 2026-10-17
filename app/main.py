@@ -614,6 +614,27 @@ def _topup_success_body(*, plan: dict | None, payment_hash: str, res: dict) -> d
     return out
 
 
+def _topup_claim_deadline(*, expires_at: int | None, created_at: int) -> int | None:
+    """Unix time through which this top-up may still be claimed.
+
+    None means the row has no stored invoice expiry, so the macaroon's own
+    `exp` remains the limit (the historical token TTL).
+    """
+    if expires_at is None:
+        return None
+    by_invoice = int(expires_at) + int(config.TOPUP_CLAIM_GRACE_SECONDS)
+    by_cap = int(created_at) + int(config.TOPUP_TOKEN_TTL_CAP_SECONDS)
+    return min(by_invoice, by_cap)
+
+
+def _topup_macaroon_exp(*, expires_at: int | None, created_at: int) -> int:
+    """Absolute `exp` caveat for a newly minted top-up macaroon."""
+    deadline = _topup_claim_deadline(expires_at=expires_at, created_at=created_at)
+    if deadline is None:
+        return int(created_at) + int(config.TOKEN_TTL_SECONDS)
+    return deadline
+
+
 def _claim_topup(
     *,
     authorization: str,
@@ -625,6 +646,13 @@ def _claim_topup(
 
     The macaroon is the claim capability. A payment hash alone does not reveal
     the API key, and a replay does not credit twice or return the key again.
+
+    Expiry of the macaroon caveat is not the claim limit. The stored invoice
+    `expires_at` plus the grace window is, capped from `created_at`. That lets
+    a buyer pay any time the invoice is still valid, and it lets a macaroon
+    minted before 0.4.1 (10-minute `exp`) finish the same way. Signature,
+    bindings, and payment proof are still required. Paywall tokens do not use
+    this path.
     """
     macaroon_b64, preimage_hex = parse_authorization_header(authorization)
     payload = parse_and_verify_macaroon(
@@ -633,6 +661,7 @@ def _claim_topup(
         purpose=PURPOSE_TOPUP,
         resource=resource,
         client_id=client.id if client else None,
+        skip_expiry=True,
     )
     payment_hash = payload["ph"]
     if preimage_hex is not None:
@@ -653,6 +682,14 @@ def _claim_topup(
     token_cid = payload.get("cid")
     if token_cid is not None and topup_client_id is not None and int(token_cid) != int(topup_client_id):
         raise L402Error("client mismatch")
+
+    now = int(time.time())
+    deadline = _topup_claim_deadline(expires_at=topup["expires_at"], created_at=int(topup["created_at"]))
+    if deadline is None:
+        if now > int(payload["exp"]):
+            raise L402Error("token expired")
+    elif now > deadline:
+        raise L402Error("invoice expired")
 
     if topup["status"] != "settled":
         verify_url = topup["verify_url"]
@@ -784,7 +821,12 @@ def v1_topup(
     except (ssrf.SSRFError, InvoiceValidationError, LnurlError, ValueError) as exc:
         return _upstream_error(exc)
 
-    # Persist pending topup
+    # Persist pending topup. The macaroon lives until the invoice expiry plus
+    # grace (capped), not SATSGATE_TOKEN_TTL_SECONDS. min_expiry above only
+    # rejects an invoice that dies before the buyer has had that long to pay.
+    created_at = int(time.time())
+    invoice_expires_at = getattr(inv, "expires_at", None)
+    macaroon_exp = _topup_macaroon_exp(expires_at=invoice_expires_at, created_at=created_at)
     try:
         db.add_topup(
             config.DB_PATH,
@@ -795,8 +837,11 @@ def v1_topup(
             client_id=client.id if client else None,
             requester_ip=_peer_ip(request),
             verify_url=getattr(inv, "verify_url", None),
-            expires_at=getattr(inv, "expires_at", None),
+            expires_at=invoice_expires_at,
             max_pending_per_ip=config.MAX_PENDING_TOPUPS_PER_IP,
+            now=created_at,
+            claim_grace_seconds=config.TOPUP_CLAIM_GRACE_SECONDS,
+            claim_cap_seconds=config.TOPUP_TOKEN_TTL_CAP_SECONDS,
         )
     except ValueError as exc:
         if str(exc) == "too_many_pending_topups":
@@ -816,7 +861,8 @@ def v1_topup(
         resource=resource,
         amount_sats=plan.price_sats,
         invoice=inv.invoice,
-        ttl_seconds=config.TOKEN_TTL_SECONDS,
+        ttl_seconds=max(1, macaroon_exp - created_at),
+        exp=macaroon_exp,
         client_id=client.id if client else None,
         payee=config.LIGHTNING_ADDRESS or None,
     )
@@ -914,6 +960,8 @@ def v1_paywall_challenge(
     if not client:
         return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_api_key"})
 
+    # Paywall unlocks stay on this TTL (or the caller's ttl_seconds). A per-request
+    # unlock is not a 24h invoice the buyer pays later; do not use the top-up window.
     ttl = int(body.ttl_seconds or config.TOKEN_TTL_SECONDS)
     memo = body.memo or "satsgate paywall"
 

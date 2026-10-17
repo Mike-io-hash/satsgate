@@ -62,7 +62,7 @@ Configured via env vars:
   - checks the BOLT11 amount, network, `description_hash` (LUD-06), expiry, and payment hash before issuing a challenge
   - if the provider advertises LUD-21 `verify`, settlement is confirmed there too, including without the payer returning a preimage. Providers that omit it (Wallet of Satoshi) stay preimage-only
 
-`GET /health` returns `{"ok": true, "version": "0.4.0"}` and nothing else.
+`GET /health` returns `{"ok": true, "version": "0.4.1"}` and nothing else.
 
 ## Prepaid payment verifications (credits)
 
@@ -97,7 +97,7 @@ These are the endpoints your **customers** (agent operators) integrate:
   - charges payment verifications (credits) once per `payment_hash` (`cost_credits`, default 1, is the merchant's own debit)
 - `GET /v1/paywall/status/{payment_hash}` with the same API key and macaroon → poll that check
 
-Tokens are version 2 (`token_version` on the challenge). A token minted for one client never verifies for another. v1 tokens are rejected. See the 0.4.0 notes in [`CHANGELOG.md`](./CHANGELOG.md).
+Tokens are version 2 (`token_version` on the challenge). A token minted for one client never verifies for another. v1 tokens are rejected. Paywall macaroons expire at `SATSGATE_TOKEN_TTL_SECONDS` (default 10 minutes) or the `ttl_seconds` on that challenge. See the 0.4.1 notes in [`CHANGELOG.md`](./CHANGELOG.md).
 
 ## Pay from any wallet, then poll
 
@@ -110,6 +110,8 @@ When the payee's LNURL provider returns a LUD-21 `verify` URL (Alby does):
 
 The Python SDK helpers are `SatsgateClient.poll_topup` and `SatsgateClient.poll_paywall`. If the provider did not send `verify`, the status call returns `preimage_required` and the `L402 <macaroon>:<preimage>` flow is still the way to finish.
 
+The top-up macaroon stays valid until the invoice's `expires_at`, plus a grace period (default 1 hour) so a buyer can finish polling after paying near the end of the invoice, and never longer than 48 hours. A buyer can pay at any point while the invoice itself is still valid. `SATSGATE_TOKEN_TTL_SECONDS` does not apply to top-ups. A top-up token minted before 0.4.1, whose caveat expires after 10 minutes, is still accepted inside that same window when the pending row is unpaid, as long as the caller presents that macaroon and a preimage or a settled LUD-21 check. Past the window the response is `invoice expired` and nothing is credited.
+
 ## L402 client compatibility
 
 Challenges use `WWW-Authenticate: L402 macaroon="<standard base64>", invoice="<bolt11>"`. `Authorization` accepts `L402` and the legacy `LSAT` prefix, in the form `<macaroon>:<64-hex-preimage>`.
@@ -120,7 +122,7 @@ Challenges use `WWW-Authenticate: L402 macaroon="<standard base64>", invoice="<b
 | Alby `fetch402` (`@getalby/lightning-tools`) | Treats the macaroon as an opaque string, pays, retries with `L402 <token>:<preimage>` | Works. The macaroon is re-rolled if its base64 would contain the substrings `L402` or `LSAT`, which that parser strips from the whole header. |
 | Aperture as a verifying proxy | Expects its own service and capability caveats | Does not accept satsgate tokens. Our caveats are the v2 bindings (`v`, `kid`, `purpose`, `cid`, `ph`, `res`, `amt`, `payee_h`, `inv_h`, `exp`), not Aperture's. |
 
-Tokens issued before 0.4.0 were signed JSON in url-safe base64. This server still verifies those until they expire. lnget cannot unmarshal them.
+Tokens issued before 0.4.0 were signed JSON in url-safe base64. This server still verifies those. lnget cannot unmarshal them. A top-up JSON token whose `exp` has passed still claims while the stored invoice window is open; a paywall JSON token does not.
 
 ## Scripts
 
