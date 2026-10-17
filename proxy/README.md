@@ -50,7 +50,7 @@ An unpaid request gets **402** and:
 WWW-Authenticate: L402 macaroon="<standard base64>", invoice="<bolt11>"
 ```
 
-`macaroon` comes before `invoice`, which is what lnget and Alby `fetch402` parse. The JSON body has `amount_sats`, `payment_hash`, `invoice`, `invoice_expires_at`, and a `hint` for the no-preimage path.
+`macaroon` comes before `invoice`, which is what lnget and Alby `fetch402` parse. The JSON body has `amount_sats`, `payment_hash`, `invoice`, `invoice_expires_at`, `max_uses`, `access_seconds` (null when that side is unset), and a `hint` for the no-preimage path.
 
 A paid retry is `Authorization: L402 <macaroon>:<64-hex-preimage>` (`LSAT` is accepted too). The proxy calls `POST /v1/paywall/verify` with `consume=true`.
 

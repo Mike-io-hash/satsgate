@@ -105,10 +105,11 @@ def _peer(request: Request) -> str:
     return client.host
 
 
-def _challenge_response(result: CoreResult, reason: str | None) -> JSONResponse:
+def _challenge_response(result: CoreResult, reason: str | None, route: PayRoute) -> JSONResponse:
     challenge = result.challenge
     if challenge is None:
         return _json(502, "paywall_unavailable")
+    max_uses, access_seconds = route.access.policy()
     body: dict[str, object] = {
         "ok": False,
         "error": "payment_required",
@@ -118,6 +119,8 @@ def _challenge_response(result: CoreResult, reason: str | None) -> JSONResponse:
         "invoice_expires_at": challenge.invoice_expires_at,
         "macaroon": challenge.macaroon,
         "resource": challenge.resource,
+        "max_uses": max_uses,
+        "access_seconds": access_seconds,
         "hint": _POLL_HINT,
     }
     if reason:
@@ -250,7 +253,7 @@ async def handle(request: Request) -> Response:
         return _limited(challenge)
     if challenge.action != "challenge":
         return _json(502, "paywall_unavailable")
-    return _challenge_response(challenge, reason)
+    return _challenge_response(challenge, reason, route)
 
 
 def build_app(settings: Settings, *, transport: httpx.AsyncBaseTransport | None = None) -> Starlette:

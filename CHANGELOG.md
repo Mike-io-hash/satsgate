@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-17
+
+### Added
+- `satsgate-mcp` 0.9.0, a buyer-side MCP server in `mcp/`. An agent can `discover` or `quote` a URL, read the 402 L402 challenge (price, `max_uses`, `access_seconds`, expiry), and `pay_and_fetch`. Human pay returns the BOLT11 invoice and a QR, then `check_payment` polls the no-preimage path and retries with the macaroon. NWC pay reads `SATSGATE_MCP_NWC_URI` from the environment only. Per-payment and rolling 24-hour caps refuse anything above them. A local sqlite cache reuses a token that still has uses or time left. A fresh `token_used_up` is quoted again and is not paid unless `SATSGATE_MCP_AUTO_PAY` is on and the new invoice is inside the budget.
+- Read-only merchant tools when `SATSGATE_MCP_API_KEY` is a restricted `sgr_` key: `challenge_status` (`consume=false`) and `credits_balance`. Core still refuses balance for a restricted key. There are no write tools. `list_sites` reads a JSON file or URL from `SATSGATE_MCP_REGISTRY`. A hosted registry is not part of this release.
+- `mcp/scripts/mainnet_l402_clients.py` and `mcp/scripts/fetch402.mjs` for a manual check that a live proxy 402 matches lnget and Alby fetch402. CI checks the same parsers against the proxy's 402 header and does not pay.
+
+### Changed
+- The proxy 402 JSON now includes `max_uses` and `access_seconds` from the route (null when that side of the policy is unset). Payment behaviour is unchanged. The core API stays 0.7.0. `GET /health` on the core still reports `0.7.0`. The proxy `GET /healthz` still reports `0.8.0`.
+
+No database migration. The MCP ledger and token cache are a new sqlite file on the buyer's machine.
+
 ## [0.8.0] - 2026-10-17
 
 ### Added

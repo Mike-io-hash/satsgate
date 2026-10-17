@@ -443,6 +443,8 @@ def test_unpaid_402_and_buyer_ip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert header.index("macaroon=") < header.index("invoice=")
     body = response.json()
     assert body["amount_sats"] == 100
+    assert body["max_uses"] == 1
+    assert body["access_seconds"] is None
     assert body["payment_hash"]
     assert body["invoice_expires_at"] == 1893456000
     assert "preimage" in body["hint"]
