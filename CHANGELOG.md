@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-17
+
+### Added
+- `satsgate-proxy` 0.8.0, a self-hosted reverse proxy in `proxy/`. A merchant runs it beside an existing HTTP API. It calls this core with a restricted `sgr_` key (default `https://api.satsgate.org`). The merchant does not write paywall code. YAML sets the upstream, routes (`per_request`, `uses:N`, `pass:<seconds>`, scope `route` or `site`), free paths, limits, and secrets via the environment.
+- Unpaid requests are HTTP 402 with `WWW-Authenticate: L402 macaroon="...", invoice="..."` (the same header lnget and Alby `fetch402` parse) plus a JSON body for the no-preimage poll. `Authorization: L402 <macaroon>:<preimage>` verifies with `consume=true`. `Authorization: L402 <macaroon>` polls status with `consume=true`. Pending is HTTP 402 `payment_pending` with `Retry-After` and does not mint another invoice. A used, expired, or wrong-route token is a fresh 402, not 401.
+- The proxy sends `X-Satsgate-Buyer-Ip` when the buyer address is a real IP. Hosted core counts it only when the proxy's egress IP is in `SATSGATE_TRUSTED_PROXIES` and the edge does not delete the header. Otherwise the header is ignored and per-buyer limits do not apply.
+- Paid requests are forwarded with `X-Satsgate-Signature` (HMAC-SHA256 of `{unix}|{METHOD}|{raw path and query}|{payment_hash}`) and `X-Satsgate-Payment-Hash`, `X-Satsgate-Resource`, `X-Satsgate-Paid-Sats`. Client `X-Satsgate-*` and L402 `Authorization` are stripped. Redirects are not followed. Origin checks ship for FastAPI, Express, and nginx, plus a Caddy note and a docker-compose example.
+- Startup warns when a `per_request` price is below 10 times `pricing.sats_per_credit` (default 5, so 50 sats). Cheap calls should be a bundle or a pass.
+
+### Security
+- The proxy consumes a use before it calls the origin, so two requests cannot both be forwarded on one remaining use. If the origin then times out, redirects, or exceeds the size cap, that use is spent. Credits are not refunded: Lightning sats go to the merchant, and the credit is charged once per `payment_hash` on first settlement.
+- Upstream credentials are read from the environment and are not logged. Origin responses drop `Server`, `Via`, `X-Powered-By`, and `Location`. A 3xx becomes HTTP 502 with no `Location`.
+
+The core API stays 0.7.0. `GET /health` on the core still reports `0.7.0`. `GET /healthz` on the proxy reports `0.8.0`. No database migration.
+
 ## [0.7.0] - 2026-10-17
 
 ### Added

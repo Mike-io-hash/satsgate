@@ -245,6 +245,28 @@ A restricted key is still the same client. It spends that client's credits, and 
 
 Set the payee with the account key before the proxy creates challenges. There is nothing new to configure. Restarting on 0.5.0 applies the migration.
 
+## No-code proxy
+
+`satsgate-proxy` (version 0.8.0, in [`proxy/`](./proxy/README.md)) sits in front of an HTTP API you already run. Buyers talk to the proxy. The proxy calls this core with a restricted `sgr_` key. The origin does not implement L402. It checks an HMAC instead.
+
+An unpaid request is **402** with `WWW-Authenticate: L402 macaroon="...", invoice="..."` (macaroon before invoice, standard base64), which lnget and Alby `fetch402` already parse. The JSON body carries `amount_sats`, `payment_hash`, `invoice_expires_at`, and a hint for wallets that do not return a preimage. `Authorization: L402 <macaroon>:<preimage>` verifies with `consume=true`. `Authorization: L402 <macaroon>` polls status with `consume=true`. Pending stays on that invoice (`402 payment_pending`, `Retry-After`). A used, expired, or wrong-route token is a fresh 402, not 401.
+
+The core API is still 0.7.0. `GET /health` on the core reports `0.7.0`. `GET /healthz` on the proxy reports `0.8.0`.
+
+Config is YAML: upstream base URL, routes (`per_request`, `uses:N`, `pass:<seconds>`, scope `route` or `site`), free paths, body limits, and an origin secret from the environment. A `per_request` price below about 10 times the plan's sats-per-credit logs a warning at startup. The trial plan is about 5 sats per credit, so that line is 50 sats. Cheap calls should be bundles or passes.
+
+The proxy sends `X-Satsgate-Buyer-Ip` when it has a real buyer address. Hosted `https://api.satsgate.org` uses that header only if the proxy's egress IP is in `SATSGATE_TRUSTED_PROXIES` and the edge does not strip it. Otherwise per-buyer limits do not apply and the per-client caps still do.
+
+After consume, the proxy signs `X-Satsgate-Signature: t=<unix>, v1=<hmac-sha256>` over `{unix}|{METHOD}|{raw path and query}|{payment_hash}`. Snippets for FastAPI, Express, nginx, and a Caddy network gate are in `proxy/snippets/`. If the origin fails after that consume, the use is spent. Credits are not refunded: the sats already went to the merchant, and the credit was the one-time verification fee.
+
+```bash
+export SATSGATE_API_KEY='sgr_...'
+export SATSGATE_ORIGIN_SECRET="$(openssl rand -hex 32)"
+docker compose -f proxy/docker-compose.yml up --build
+```
+
+Full steps, the signature, and a mainnet checklist are in [`proxy/README.md`](./proxy/README.md).
+
 ## Pay from any wallet, then poll
 
 When the payee's LNURL provider returns a LUD-21 `verify` URL (Alby does):

@@ -1,0 +1,17 @@
+# Stock Caddy has no HMAC matcher. Terminate TLS here if you want, and verify
+# X-Satsgate-Signature in the origin with fastapi_verify.py, express_verify.js,
+# or nginx_verify.js. A client that can reach the origin directly must fail
+# closed when that header is missing or wrong.
+#
+# This block only accepts traffic from the proxy container and forwards the
+# signature headers. It is not a substitute for the HMAC check.
+
+api.internal:8080 {
+	@from_proxy remote_ip 172.28.0.10
+	handle @from_proxy {
+		reverse_proxy 127.0.0.1:8081
+	}
+	handle {
+		respond "forbidden" 403
+	}
+}

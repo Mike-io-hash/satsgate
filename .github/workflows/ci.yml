@@ -19,16 +19,16 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install -U pip
-          pip install -r requirements.txt -r requirements-dev.txt
+          pip install -r requirements.txt -r requirements-dev.txt -r proxy/requirements.txt
 
       - name: Ruff
-        run: ruff check app tests
+        run: ruff check app tests proxy/src proxy/snippets/fastapi_verify.py
 
       - name: Bandit
-        run: bandit -r app -ll
+        run: bandit -r app proxy/src -ll
 
       - name: pip-audit
-        run: pip-audit -r requirements.txt
+        run: pip-audit -r requirements.txt -r proxy/requirements.txt
 
       - name: Run tests
         run: pytest -q

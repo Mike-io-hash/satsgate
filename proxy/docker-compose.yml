@@ -1,0 +1,27 @@
+# Run the paywall next to an existing API. Buyers use port 8080.
+# Do not publish the api service. The origin secret is the same on both.
+# Copy satsgate-proxy.example.yaml to satsgate-proxy.yaml first.
+# SATSGATE_API_KEY is a restricted sgr_ key, not the account sg_ key.
+
+services:
+  api:
+    image: your-api:local
+    expose:
+      - "8080"
+    environment:
+      SATSGATE_ORIGIN_SECRET: ${SATSGATE_ORIGIN_SECRET:?set the origin HMAC secret}
+
+  satsgate-proxy:
+    build:
+      context: ..
+      dockerfile: proxy/Dockerfile
+    image: satsgate-proxy:0.8.0
+    ports:
+      - "8080:8080"
+    environment:
+      SATSGATE_API_KEY: ${SATSGATE_API_KEY:?set the restricted sgr_ key}
+      SATSGATE_ORIGIN_SECRET: ${SATSGATE_ORIGIN_SECRET:?set the origin HMAC secret}
+    volumes:
+      - ./satsgate-proxy.yaml:/etc/satsgate/proxy.yaml:ro
+    depends_on:
+      - api
