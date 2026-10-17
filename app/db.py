@@ -119,6 +119,22 @@ def init_db(db_path: str) -> None:
             "CREATE INDEX IF NOT EXISTS idx_challenges_client_expires ON paywall_challenges(client_id, expires_at)"
         )
 
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ticket_challenges (
+              payment_hash TEXT PRIMARY KEY,
+              invoice TEXT NOT NULL,
+              amount_sats INTEGER NOT NULL,
+              payee TEXT,
+              resource TEXT NOT NULL,
+              verify_url TEXT,
+              created_at INTEGER NOT NULL,
+              expires_at INTEGER NOT NULL,
+              settled_at INTEGER
+            );
+            """
+        )
+
 
 def hash_api_key(api_key: str) -> str:
     return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
@@ -233,15 +249,33 @@ def get_topup(db_path: str, payment_hash: str) -> sqlite3.Row | None:
         return conn.execute("SELECT * FROM topups WHERE payment_hash = ?", (payment_hash,)).fetchone()
 
 
+def _insert_client(conn: sqlite3.Connection, now: int) -> tuple[str, int]:
+    api_key = new_api_key()
+    cur = conn.execute(
+        "INSERT INTO clients(api_key_hash, credits, created_at) VALUES(?, 0, ?)",
+        (hash_api_key(api_key), now),
+    )
+    client_id = int(cur.lastrowid)
+    conn.execute(
+        "INSERT INTO ledger(client_id, delta_credits, reason, ref, created_at) VALUES(?, ?, ?, ?, ?)",
+        (client_id, 0, "client_created", None, now),
+    )
+    return api_key, client_id
+
+
 def settle_topup_and_credit(
     db_path: str,
     *,
     payment_hash: str,
-    client_id: int,
+    client_id: int | None,
 ) -> dict:
     """Mark a topup as settled and add credits atomically.
 
-    Returns: {credits_added, new_balance}
+    `client_id=None` creates the account inside this transaction, and the
+    plaintext API key is returned only from that call. A replay returns
+    `api_key=None` and `credits_added=0`.
+
+    Returns: {credits_added, new_balance, client_id, api_key}
     """
     now = int(time.time())
 
@@ -259,40 +293,59 @@ def settle_topup_and_credit(
             raise ValueError("topup not found")
 
         if topup["status"] == "settled":
-            # idempotent: do not credit twice
-            bal = conn.execute("SELECT credits FROM clients WHERE id = ?", (client_id,)).fetchone()
+            # Idempotent: do not credit twice and do not reveal the API key again.
+            stored_id = topup["client_id"]
+            if stored_id is None:
+                conn.execute("ROLLBACK")
+                raise ValueError("topup not found")
+            bal = conn.execute("SELECT credits FROM clients WHERE id = ?", (int(stored_id),)).fetchone()
             conn.execute("COMMIT")
-            return {"credits_added": 0, "new_balance": int(bal[0]) if bal else 0}
+            return {
+                "credits_added": 0,
+                "new_balance": int(bal[0]) if bal else 0,
+                "client_id": int(stored_id),
+                "api_key": None,
+            }
 
         credits_added = int(topup["credits"])
-
-        # Link topup to the client if it was null
         existing_client_id = topup["client_id"]
-        if existing_client_id is not None and int(existing_client_id) != int(client_id):
-            conn.execute("ROLLBACK")
-            raise ValueError("this topup belongs to a different client")
+        api_key: str | None = None
+        if existing_client_id is not None:
+            if client_id is not None and int(existing_client_id) != int(client_id):
+                conn.execute("ROLLBACK")
+                raise ValueError("this topup belongs to a different client")
+            target_id = int(existing_client_id)
+        elif client_id is not None:
+            target_id = int(client_id)
+        else:
+            api_key, target_id = _insert_client(conn, now)
 
         conn.execute(
             "UPDATE topups SET status='settled', client_id = ?, settled_at = ? WHERE payment_hash = ?",
-            (int(client_id), now, payment_hash),
+            (target_id, now, payment_hash),
         )
 
         conn.execute(
             "UPDATE clients SET credits = credits + ? WHERE id = ?",
-            (credits_added, int(client_id)),
+            (credits_added, target_id),
         )
 
         conn.execute(
             "INSERT INTO ledger(client_id, delta_credits, reason, ref, created_at) VALUES(?, ?, ?, ?, ?)",
-            (int(client_id), credits_added, "topup_settled", payment_hash, now),
+            (target_id, credits_added, "topup_settled", payment_hash, now),
         )
 
-        bal_row = conn.execute("SELECT credits FROM clients WHERE id = ?", (int(client_id),)).fetchone()
+        bal_row = conn.execute("SELECT credits FROM clients WHERE id = ?", (target_id,)).fetchone()
         new_balance = int(bal_row[0]) if bal_row else 0
 
         conn.execute("COMMIT")
 
-    return {"credits_added": credits_added, "new_balance": new_balance}
+    return {
+        "credits_added": credits_added,
+        "new_balance": new_balance,
+        "client_id": target_id,
+        "api_key": api_key,
+    }
 
 
 def spend_credits(db_path: str, *, client_id: int, cost: int, reason: str, ref: str | None = None) -> int:
@@ -388,3 +441,65 @@ def get_paywall_challenge(db_path: str, payment_hash: str) -> sqlite3.Row | None
             "SELECT * FROM paywall_challenges WHERE payment_hash = ?",
             (payment_hash,),
         ).fetchone()
+
+
+def add_ticket_challenge(
+    db_path: str,
+    *,
+    payment_hash: str,
+    invoice: str,
+    amount_sats: int,
+    payee: str | None,
+    resource: str,
+    verify_url: str | None,
+    expires_at: int,
+    max_open: int = 100,
+) -> None:
+    """Remember a dev-only ticket challenge so a later claim can use its verify URL."""
+    now = int(time.time())
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM ticket_challenges WHERE expires_at < ?", (now,))
+        open_rows = conn.execute(
+            "SELECT COUNT(*) FROM ticket_challenges WHERE settled_at IS NULL AND expires_at >= ?",
+            (now,),
+        ).fetchone()
+        if open_rows and int(open_rows[0]) >= int(max_open):
+            conn.execute("ROLLBACK")
+            raise ValueError("too_many_open_challenges")
+        conn.execute(
+            """
+            INSERT INTO ticket_challenges(
+              payment_hash, invoice, amount_sats, payee, resource, verify_url, created_at, expires_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payment_hash,
+                invoice,
+                int(amount_sats),
+                payee,
+                resource,
+                verify_url,
+                now,
+                int(expires_at),
+            ),
+        )
+        conn.execute("COMMIT")
+
+
+def get_ticket_challenge(db_path: str, payment_hash: str) -> sqlite3.Row | None:
+    with _connect(db_path) as conn:
+        return conn.execute(
+            "SELECT * FROM ticket_challenges WHERE payment_hash = ?",
+            (payment_hash,),
+        ).fetchone()
+
+
+def mark_ticket_settled(db_path: str, *, payment_hash: str) -> None:
+    now = int(time.time())
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE ticket_challenges SET settled_at = ? WHERE payment_hash = ? AND settled_at IS NULL",
+            (now, payment_hash),
+        )

@@ -8,7 +8,7 @@ Add a Lightning paywall to any endpoint with two calls: `/v1/paywall/challenge` 
 
 It’s a hosted + self-hostable FastAPI service that gives you:
 
-- **L402 paywall primitives** (invoice + macaroon + preimage verification)
+- **L402 paywall primitives** (invoice + macaroon, preimage or LUD-21 confirmation)
 - **Prepaid payment verifications** (credits) for predictable costs (**1 verification = 1 successful paid unlock**; **verifications don’t expire**)
 - **Usage & reporting** (ledger, daily series, forecast + purchase recommendation)
 - **Roadmap (active)**: new wallet backends, integrations, and production hardening
@@ -60,9 +60,9 @@ Configured via env vars:
   - generates **real** invoices via your **Lightning Address** (LNURL-pay)
   - requires: `SATSGATE_LIGHTNING_ADDRESS=user@domain`
   - checks the BOLT11 amount, network, `description_hash` (LUD-06), expiry, and payment hash before issuing a challenge
-  - if the provider advertises LUD-21 `verify`, settlement is confirmed there too. Providers that omit it (Wallet of Satoshi) stay preimage-only
+  - if the provider advertises LUD-21 `verify`, settlement is confirmed there too, including without the payer returning a preimage. Providers that omit it (Wallet of Satoshi) stay preimage-only
 
-`GET /health` returns `{"ok": true, "version": "0.3.0"}` and nothing else.
+`GET /health` returns `{"ok": true, "version": "0.4.0"}` and nothing else.
 
 ## Prepaid payment verifications (credits)
 
@@ -72,7 +72,8 @@ Endpoints:
 
 - `GET /v1/plans` → list plans
 - `GET /v1/topup/{plan_id}` → start purchase (returns 402 + invoice + macaroon)
-- `GET /v1/topup/{plan_id}` with `Authorization: L402 ...` → finalize purchase, add verifications (credits)
+- `GET /v1/topup/{plan_id}` with `Authorization: L402 <macaroon>:<preimage>` → finalize purchase
+- `GET /v1/topup/status/{payment_hash}` with `Authorization: L402 <macaroon>` → poll until the stored LUD-21 URL says the invoice settled, then credit the account
 - `GET /v1/balance` with `X-Api-Key: ...` → current verification balance (credits)
 - `GET /v1/client` with `X-Api-Key: ...` → client info (incl. payee)
 - `POST /v1/client/payee` with `X-Api-Key: ...` → register client payee (Lightning Address)
@@ -91,10 +92,35 @@ These are the endpoints your **customers** (agent operators) integrate:
 
 - `POST /v1/paywall/challenge` with `X-Api-Key: ...` → returns `invoice + macaroon` for a resource
 - `POST /v1/paywall/verify` with `X-Api-Key: ...` + `Authorization: L402 ...` and **`expected_resource` (required)**
-  - verifies the preimage and that the token was issued to **this** API key, for **this** resource, amount, payee, and invoice
+  - verifies the preimage, or the stored LUD-21 URL when the header is `L402 <macaroon>` with no preimage
+  - checks that the token was issued to **this** API key, for **this** resource, amount, payee, and invoice
   - charges payment verifications (credits) once per `payment_hash` (`cost_credits`, default 1, is the merchant's own debit)
+- `GET /v1/paywall/status/{payment_hash}` with the same API key and macaroon → poll that check
 
-Tokens are version 2 (`token_version` on the challenge). A token minted for one client never verifies for another. v1 tokens are rejected. See the 0.3.0 notes in [`CHANGELOG.md`](./CHANGELOG.md).
+Tokens are version 2 (`token_version` on the challenge). A token minted for one client never verifies for another. v1 tokens are rejected. See the 0.4.0 notes in [`CHANGELOG.md`](./CHANGELOG.md).
+
+## Pay from any wallet, then poll
+
+When the payee's LNURL provider returns a LUD-21 `verify` URL (Alby does):
+
+1. `GET /v1/topup/trial` and read `invoice`, `macaroon`, and `payment_hash` from the 402.
+2. Pay that invoice in any Lightning wallet. You do not need the preimage.
+3. Poll `GET /v1/topup/status/{payment_hash}` with `Authorization: L402 <macaroon>` until `settled` is true.
+4. Save `api_key` from that response. A later poll succeeds but does not show the key again.
+
+The Python SDK helpers are `SatsgateClient.poll_topup` and `SatsgateClient.poll_paywall`. If the provider did not send `verify`, the status call returns `preimage_required` and the `L402 <macaroon>:<preimage>` flow is still the way to finish.
+
+## L402 client compatibility
+
+Challenges use `WWW-Authenticate: L402 macaroon="<standard base64>", invoice="<bolt11>"`. `Authorization` accepts `L402` and the legacy `LSAT` prefix, in the form `<macaroon>:<64-hex-preimage>`.
+
+| Client | What it does with the challenge | Status |
+| --- | --- | --- |
+| lnget (Lightning Labs) | Parses the header, unmarshals a real macaroon, reads the payment hash from the L402 v0 identifier, pays, retries with `L402 <macaroon>:<preimage>` | Works. The macaroon is libmacaroons V2, standard base64 (Aperture's credential grammar is `[A-Za-z0-9+/=]+`, not url-safe). |
+| Alby `fetch402` (`@getalby/lightning-tools`) | Treats the macaroon as an opaque string, pays, retries with `L402 <token>:<preimage>` | Works. The macaroon is re-rolled if its base64 would contain the substrings `L402` or `LSAT`, which that parser strips from the whole header. |
+| Aperture as a verifying proxy | Expects its own service and capability caveats | Does not accept satsgate tokens. Our caveats are the v2 bindings (`v`, `kid`, `purpose`, `cid`, `ph`, `res`, `amt`, `payee_h`, `inv_h`, `exp`), not Aperture's. |
+
+Tokens issued before 0.4.0 were signed JSON in url-safe base64. This server still verifies those until they expire. lnget cannot unmarshal them.
 
 ## Scripts
 

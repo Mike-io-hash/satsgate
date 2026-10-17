@@ -44,35 +44,60 @@ class VerifyResult:
     payee_lightning_address: str | None = None
 
 
-def _b64decode_url_nopad(s: str) -> bytes:
-    pad = "=" * ((4 - (len(s) % 4)) % 4)
-    return base64.urlsafe_b64decode(s + pad)
+def _decode_token_bytes(token: str) -> bytes:
+    compact = "".join(token.split())
+    padded = compact + ("=" * ((4 - (len(compact) % 4)) % 4))
+    if any(char in compact for char in "-_"):
+        return base64.urlsafe_b64decode(padded)
+    return base64.b64decode(padded)
 
 
 def decode_macaroon_payload(macaroon_b64: str) -> dict[str, Any]:
-    """Decode the JSON payload inside the macaroon.
+    """Read the v2 bindings inside a macaroon.
 
-    Note: this does NOT verify the signature (the server does that in /verify).
-    This is used for local caching / quick reads.
+    Accepts the macaroons satsgate issues now and the older signed-JSON tokens.
+    This does NOT verify the signature (the server does that in /verify).
     """
 
-    token = _b64decode_url_nopad(macaroon_b64)
-    payload_bytes, _sig = token.rsplit(b".", 1)
-    return json.loads(payload_bytes.decode("utf-8"))
+    raw = _decode_token_bytes(macaroon_b64)
+    if raw.startswith(b"{"):
+        payload_bytes, _sig = raw.rsplit(b".", 1)
+        return json.loads(payload_bytes.decode("utf-8"))
+
+    from pymacaroons import Macaroon
+
+    mac = Macaroon.deserialize("".join(macaroon_b64.split()))
+    fields: dict[str, str] = {}
+    for caveat in mac.caveats:
+        text = caveat.caveat_id.decode("utf-8") if isinstance(caveat.caveat_id, bytes) else str(caveat.caveat_id)
+        key, value = text.split("=", 1)
+        fields[key] = value
+    return {
+        "v": int(fields["v"]),
+        "kid": fields.get("kid"),
+        "purpose": fields.get("purpose"),
+        "cid": int(fields["cid"]) if "cid" in fields else None,
+        "ph": fields["ph"].lower(),
+        "res": fields["res"],
+        "amt": int(fields["amt"]),
+        "payee_h": fields.get("payee_h"),
+        "inv_h": fields.get("inv_h"),
+        "exp": int(fields["exp"]),
+    }
 
 
 def parse_l402_authorization(auth: str) -> tuple[str, str]:
-    """Returns (macaroon_b64, preimage_hex)."""
+    """Returns (macaroon_b64, preimage_hex). Accepts the L402 and legacy LSAT schemes."""
 
     if not auth:
         raise SatsgateError("missing Authorization credentials")
 
-    parts = auth.split(" ", 1)
+    parts = auth.strip().split(None, 1)
     if len(parts) != 2:
         raise SatsgateError("malformed Authorization header")
 
     scheme, token = parts
-    if scheme.lower() != "l402":
+    if scheme.lower() not in {"l402", "lsat"}:
         raise SatsgateError("scheme is not L402")
 
     try:
@@ -82,11 +107,13 @@ def parse_l402_authorization(auth: str) -> tuple[str, str]:
 
     # validate hex
     try:
-        bytes.fromhex(preimage_hex)
+        raw = bytes.fromhex(preimage_hex)
     except ValueError as e:
         raise SatsgateError("preimage is not hex") from e
+    if len(raw) != 32:
+        raise SatsgateError("preimage is not hex")
 
-    return macaroon_b64, preimage_hex
+    return macaroon_b64, preimage_hex.lower()
 
 
 def sha256_hex_of_hexbytes(preimage_hex: str) -> str:
@@ -313,6 +340,97 @@ class SatsgateClient:
         if vu:
             self._verified[payment_hash] = vu
 
+        return VerifyResult(
+            ok=True,
+            client_id=int(data["client_id"]),
+            resource=data.get("resource"),
+            payment_hash=str(data["payment_hash"]),
+            charged_credits=int(data["charged_credits"]),
+            new_balance=int(data["new_balance"]),
+            valid_until=vu,
+            amount_sats=int(data["amount_sats"]) if data.get("amount_sats") is not None else None,
+            payee_lightning_address=data.get("payee_lightning_address"),
+        )
+
+    def _poll(self, send, *, interval_seconds: float, timeout_seconds: float) -> dict:
+        """Call `send` until the body says the payment settled or the deadline passes."""
+        interval = max(0.0, float(interval_seconds))
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        while True:
+            response = send()
+            try:
+                data = response.json()
+            except Exception:
+                data = None
+            if response.status_code == 200 and isinstance(data, dict) and data.get("settled") is True:
+                return data
+            retryable = isinstance(data, dict) and (
+                data.get("status") == "pending" or data.get("error") in {"payment_pending", "lud21_unavailable", "payee_fetch_failed"}
+            )
+            if response.status_code not in {200, 402, 502} or not retryable or time.monotonic() >= deadline:
+                raise SatsgateError(
+                    "payment still pending" if retryable else f"request failed ({response.status_code}): {data}",
+                    status_code=response.status_code,
+                    data=data if isinstance(data, dict) else None,
+                )
+            time.sleep(interval)
+
+    def poll_topup(
+        self,
+        *,
+        macaroon: str,
+        payment_hash: str,
+        interval_seconds: float = 2.0,
+        timeout_seconds: float = 180.0,
+    ) -> dict:
+        """Poll `GET /v1/topup/status/{payment_hash}` until LUD-21 settlement.
+
+        Pay the invoice from any wallet, then call this with the macaroon from
+        the 402 response. No preimage is sent. The API key is present only on
+        the call that creates the account.
+
+        Raises if the provider did not advertise a verify URL (`preimage_required`)
+        or the timeout elapses first.
+        """
+
+        def _send():
+            return self._http.get(
+                f"{self.base_url}/v1/topup/status/{payment_hash}",
+                headers={"Authorization": f"L402 {macaroon}"},
+            )
+
+        return self._poll(_send, interval_seconds=interval_seconds, timeout_seconds=timeout_seconds)
+
+    def poll_paywall(
+        self,
+        *,
+        macaroon: str,
+        payment_hash: str,
+        expected_resource: str,
+        cost_credits: int = 1,
+        interval_seconds: float = 2.0,
+        timeout_seconds: float = 180.0,
+    ) -> VerifyResult:
+        """Poll a paywall challenge until the stored LUD-21 URL reports it settled.
+
+        Uses the merchant API key plus `Authorization: L402 <macaroon>`.
+        Credits are spent once, the same as `paywall_verify`.
+        """
+
+        if not expected_resource or not str(expected_resource).strip():
+            raise SatsgateError("expected_resource is required")
+
+        def _send():
+            return self._http.get(
+                f"{self.base_url}/v1/paywall/status/{payment_hash}",
+                headers={**self._headers(), "Authorization": f"L402 {macaroon}"},
+                params={"expected_resource": expected_resource, "cost_credits": int(cost_credits)},
+            )
+
+        data = self._poll(_send, interval_seconds=interval_seconds, timeout_seconds=timeout_seconds)
+        vu = int(data.get("valid_until") or 0)
+        if vu:
+            self._verified[str(data["payment_hash"])] = vu
         return VerifyResult(
             ok=True,
             client_id=int(data["client_id"]),

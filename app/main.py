@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from math import ceil
 from typing import Any
 
-from fastapi import FastAPI, Header, Request
+from fastapi import FastAPI, Header, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -31,7 +31,9 @@ from .l402 import (
     parse_and_verify_macaroon,
     parse_authorization_header,
     payee_binding,
+    peek_bindings,
     verify_preimage_matches_payment_hash,
+    www_authenticate_header,
 )
 from .mock_wallet import MockWallet
 from .plans import get_plan, list_plans, recommend_purchase
@@ -184,12 +186,17 @@ def _upstream_error(exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=502, content={"ok": False, "error": "payee_fetch_failed"})
 
 
-@app.api_route("/health", methods=["GET", "HEAD"])
+@app.get("/health", operation_id="health_get")
 def health() -> dict:
     return {"ok": True, "version": config.APP_VERSION}
 
 
-@app.api_route("/.well-known/satsgate.json", methods=["GET", "HEAD"])
+@app.head("/health", include_in_schema=False)
+def health_head() -> dict:
+    return health()
+
+
+@app.get("/.well-known/satsgate.json", operation_id="well_known_satsgate_get")
 def well_known_satsgate(request: Request) -> dict:
     """Machine-readable manifest for discovery (agents/frameworks).
 
@@ -216,17 +223,24 @@ def well_known_satsgate(request: Request) -> dict:
                     "type": "header",
                     "name": "Authorization",
                     "scheme": "L402",
-                    "required_for": ["/v1/paywall/verify", "/v1/topup/{plan_id}"],
+                    "required_for": [
+                        "/v1/paywall/verify",
+                        "/v1/paywall/status/{payment_hash}",
+                        "/v1/topup/{plan_id}",
+                        "/v1/topup/status/{payment_hash}",
+                    ],
                 },
             ],
             "endpoints": {
                 "plans": {"method": "GET", "path": "/v1/plans"},
                 "topup": {"method": "GET", "path": "/v1/topup/{plan_id}"},
+                "topup_status": {"method": "GET", "path": "/v1/topup/status/{payment_hash}"},
                 "balance": {"method": "GET", "path": "/v1/balance"},
                 "client": {"method": "GET", "path": "/v1/client"},
                 "set_payee": {"method": "POST", "path": "/v1/client/payee"},
                 "paywall_challenge": {"method": "POST", "path": "/v1/paywall/challenge"},
                 "paywall_verify": {"method": "POST", "path": "/v1/paywall/verify"},
+                "paywall_status": {"method": "GET", "path": "/v1/paywall/status/{payment_hash}"},
                 "ledger": {"method": "GET", "path": "/v1/ledger"},
                 "usage_summary": {"method": "GET", "path": "/v1/usage/summary"},
                 "usage_daily": {"method": "GET", "path": "/v1/usage/daily"},
@@ -242,6 +256,11 @@ def well_known_satsgate(request: Request) -> dict:
             "health": f"{base_url}/health",
         },
     }
+
+
+@app.head("/.well-known/satsgate.json", include_in_schema=False)
+def well_known_satsgate_head(request: Request) -> dict:
+    return well_known_satsgate(request)
 
 
 @app.get("/v1/plans")
@@ -511,7 +530,7 @@ def v1_client_set_payee(
     }
 
 
-@app.post("/v1/spend")
+@app.post("/v1/spend", include_in_schema=config.dev_endpoints_enabled())
 def v1_spend(
     x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
     cost: int = 1,
@@ -537,6 +556,184 @@ def v1_spend(
         return JSONResponse(status_code=402, content={"ok": False, "error": str(e)})
 
 
+def _payment_hash_or_none(payment_hash: str) -> str | None:
+    if len(payment_hash) != 64:
+        return None
+    try:
+        raw = bytes.fromhex(payment_hash)
+    except ValueError:
+        return None
+    if len(raw) != 32:
+        return None
+    return payment_hash.lower()
+
+
+def _pending_body(payment_hash: str) -> dict:
+    return {
+        "ok": True,
+        "status": "pending",
+        "settled": False,
+        "payment_hash": payment_hash,
+    }
+
+
+def _lud21_state(*, verify_url: str, payment_hash: str, preimage_hex: str | None) -> str | JSONResponse:
+    """Return 'settled', 'pending', or an error response. Never uses a client-supplied URL."""
+    try:
+        wallet_lnaddr.confirm_lud21(
+            verify_url=verify_url,
+            payment_hash=payment_hash,
+            preimage_hex=preimage_hex,
+        )
+    except InvoiceValidationError as exc:
+        if preimage_hex is None and exc.code == "lud21_not_settled":
+            return "pending"
+        status = 401 if exc.code in {"lud21_not_settled", "lud21_mismatch"} else 502
+        return JSONResponse(status_code=status, content={"ok": False, "error": exc.code})
+    except (ssrf.SSRFError, LnurlError) as exc:
+        return _upstream_error(exc)
+    return "settled"
+
+
+def _topup_success_body(*, plan: dict | None, payment_hash: str, res: dict) -> dict:
+    out = {
+        "ok": True,
+        "status": "settled",
+        "settled": True,
+        "payment_hash": payment_hash,
+        "credits_added": res["credits_added"],
+        "new_balance": res["new_balance"],
+        "client_id": res["client_id"],
+    }
+    if plan is not None:
+        out["plan"] = plan
+    api_key = res.get("api_key")
+    if api_key:
+        out["api_key"] = api_key
+        out["note"] = "Save this API key. We will not show it again."
+    return out
+
+
+def _claim_topup(
+    *,
+    authorization: str,
+    resource: str,
+    client: db.Client | None,
+    plan: dict | None,
+) -> JSONResponse | dict:
+    """Settle a top-up from a preimage or, when we stored a verify URL, from LUD-21.
+
+    The macaroon is the claim capability. A payment hash alone does not reveal
+    the API key, and a replay does not credit twice or return the key again.
+    """
+    macaroon_b64, preimage_hex = parse_authorization_header(authorization)
+    payload = parse_and_verify_macaroon(
+        keys=config.MACAROON_KEYS,
+        macaroon_b64=macaroon_b64,
+        purpose=PURPOSE_TOPUP,
+        resource=resource,
+        client_id=client.id if client else None,
+    )
+    payment_hash = payload["ph"]
+    if preimage_hex is not None:
+        verify_preimage_matches_payment_hash(preimage_hex=preimage_hex, payment_hash=payment_hash)
+
+    topup = db.get_topup(config.DB_PATH, payment_hash)
+    if not topup:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "topup_not_found"})
+
+    if invoice_binding(topup["invoice"]) != payload["inv_h"]:
+        raise L402Error("invoice mismatch")
+    if int(payload["amt"]) != int(topup["sats"]):
+        raise L402Error("amount mismatch")
+    if payee_binding(config.LIGHTNING_ADDRESS or None) != payload["payee_h"]:
+        raise L402Error("payee mismatch")
+
+    topup_client_id = topup["client_id"]
+    token_cid = payload.get("cid")
+    if token_cid is not None and topup_client_id is not None and int(token_cid) != int(topup_client_id):
+        raise L402Error("client mismatch")
+
+    if topup["status"] != "settled":
+        verify_url = topup["verify_url"]
+        if preimage_hex is None and not verify_url:
+            return JSONResponse(status_code=401, content={"ok": False, "error": "preimage_required"})
+        if verify_url:
+            state = _lud21_state(
+                verify_url=str(verify_url),
+                payment_hash=payment_hash,
+                preimage_hex=preimage_hex,
+            )
+            if isinstance(state, JSONResponse):
+                return state
+            if state == "pending":
+                return _pending_body(payment_hash)
+
+    if topup_client_id is not None:
+        credit_client_id: int | None = int(topup_client_id)
+    elif token_cid is not None:
+        credit_client_id = int(token_cid)
+    elif client is not None:
+        credit_client_id = client.id
+    else:
+        # Created inside the settlement transaction so two claims cannot mint two keys.
+        credit_client_id = None
+
+    res = db.settle_topup_and_credit(
+        config.DB_PATH,
+        payment_hash=payment_hash,
+        client_id=credit_client_id,
+    )
+    return _topup_success_body(plan=plan, payment_hash=payment_hash, res=res)
+
+
+@app.get("/v1/topup/status/{payment_hash}")
+def v1_topup_status(
+    payment_hash: str,
+    authorization: str | None = Header(default=None),
+):
+    """Poll a top-up that was paid from any wallet.
+
+    Authorization is `L402 <macaroon>` (no preimage) or the usual preimage form.
+    Settlement is read from the verify URL stored when the invoice was created.
+    The API key is returned only on the call that creates the account.
+    """
+    normalized = _payment_hash_or_none(payment_hash)
+    if normalized is None:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_payment_hash"})
+    if not authorization:
+        return JSONResponse(status_code=401, content={"ok": False, "error": "missing credentials"})
+
+    try:
+        macaroon_b64, _preimage = parse_authorization_header(authorization)
+        peeked = peek_bindings(macaroon_b64)
+    except L402Error as exc:
+        return JSONResponse(status_code=401, content={"ok": False, "error": str(exc)})
+
+    resource = str(peeked.get("res") or "")
+    peeked_hash = str(peeked.get("ph") or "").lower()
+    if peeked_hash != normalized:
+        return JSONResponse(status_code=401, content={"ok": False, "error": "payment_hash mismatch"})
+    if not resource.startswith("v1/topup/") or "/" in resource.removeprefix("v1/topup/"):
+        return JSONResponse(status_code=401, content={"ok": False, "error": "resource mismatch"})
+
+    plan_body = None
+    plan_id = resource.removeprefix("v1/topup/")
+    if plan_id and "/" not in plan_id:
+        try:
+            plan_body = get_plan(plan_id).to_dict()
+        except KeyError:
+            plan_body = None
+
+    try:
+        result = _claim_topup(authorization=authorization, resource=resource, client=None, plan=plan_body)
+    except L402Error as exc:
+        return JSONResponse(status_code=401, content={"ok": False, "error": str(exc)})
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+    return result
+
+
 @app.get("/v1/topup/{plan_id}")
 def v1_topup(
     plan_id: str,
@@ -546,10 +743,12 @@ def v1_topup(
 ):
     """Buy prepaid payment verifications (credits) by plan.
 
-    - If there is NO Authorization => 402 + invoice + macaroon
-    - If a valid L402 Authorization is provided => verifications (credits) are added and balance is returned (+ API key if new)
+    - No Authorization: 402 + invoice + macaroon
+    - `Authorization: L402 <macaroon>:<preimage>`: credit the account
+    - `Authorization: L402 <macaroon>`: credit the account when the provider's
+      stored LUD-21 verify URL reports the invoice settled
 
-    Note: payment is verified *only* via the preimage (L402). We do not depend on wallet webhooks.
+    The preimage flow keeps working for providers that do not advertise verify.
     """
 
     try:
@@ -561,75 +760,14 @@ def v1_topup(
 
     client = _get_client_from_api_key(x_api_key)
 
-    # FINALIZAR (si trae Authorization)
     if authorization:
         try:
-            macaroon_b64, preimage_hex = parse_authorization_header(authorization)
-            payload = parse_and_verify_macaroon(
-                keys=config.MACAROON_KEYS,
-                macaroon_b64=macaroon_b64,
-                purpose=PURPOSE_TOPUP,
+            return _claim_topup(
+                authorization=authorization,
                 resource=resource,
-                client_id=client.id if client else None,
+                client=client,
+                plan=plan.to_dict(),
             )
-            payment_hash = payload["ph"]
-            verify_preimage_matches_payment_hash(preimage_hex=preimage_hex, payment_hash=payment_hash)
-
-            topup = db.get_topup(config.DB_PATH, payment_hash)
-            if not topup:
-                return JSONResponse(status_code=404, content={"ok": False, "error": "topup_not_found"})
-
-            if invoice_binding(topup["invoice"]) != payload["inv_h"]:
-                raise L402Error("invoice mismatch")
-            if int(payload["amt"]) != int(topup["sats"]):
-                raise L402Error("amount mismatch")
-            if payee_binding(config.LIGHTNING_ADDRESS or None) != payload["payee_h"]:
-                raise L402Error("payee mismatch")
-
-            topup_client_id = topup["client_id"]
-            token_cid = payload.get("cid")
-            if token_cid is not None and topup_client_id is not None and int(token_cid) != int(topup_client_id):
-                raise L402Error("client mismatch")
-
-            if topup["status"] != "settled" and topup["verify_url"]:
-                try:
-                    wallet_lnaddr.confirm_lud21(
-                        verify_url=str(topup["verify_url"]),
-                        payment_hash=payment_hash,
-                        preimage_hex=preimage_hex,
-                    )
-                except (ssrf.SSRFError, LnurlError) as exc:
-                    return _upstream_error(exc)
-                except InvoiceValidationError as exc:
-                    status = 401 if exc.code in {"lud21_not_settled", "lud21_mismatch"} else 502
-                    return JSONResponse(status_code=status, content={"ok": False, "error": exc.code})
-
-            api_key_out: str | None = None
-            if topup_client_id is not None:
-                client_id = int(topup_client_id)
-            elif token_cid is not None:
-                client_id = int(token_cid)
-            elif client is not None:
-                client_id = client.id
-            else:
-                api_key_out, new_client = db.create_client(config.DB_PATH)
-                client_id = new_client.id
-
-            res = db.settle_topup_and_credit(config.DB_PATH, payment_hash=payment_hash, client_id=client_id)
-
-            out = {
-                "ok": True,
-                "plan": plan.to_dict(),
-                "payment_hash": payment_hash,
-                "credits_added": res["credits_added"],
-                "new_balance": res["new_balance"],
-                "client_id": client_id,
-            }
-            if api_key_out:
-                out["api_key"] = api_key_out
-                out["note"] = "Save this API key. We will not show it again."
-            return out
-
         except L402Error as e:
             return JSONResponse(status_code=401, content={"ok": False, "error": str(e)})
         except ValueError as e:
@@ -683,7 +821,7 @@ def v1_topup(
         payee=config.LIGHTNING_ADDRESS or None,
     )
 
-    www_auth = f'L402 macaroon="{macaroon}", invoice="{inv.invoice}"'
+    www_auth = www_authenticate_header(macaroon=macaroon, invoice=inv.invoice)
 
     return JSONResponse(
         status_code=402,
@@ -873,7 +1011,7 @@ def v1_paywall_challenge(
     except Exception:  # noqa: BLE001
         return JSONResponse(status_code=500, content={"ok": False, "error": "db_error"})
 
-    www_auth = f'L402 macaroon="{macaroon}", invoice="{inv.invoice}"'
+    www_auth = www_authenticate_header(macaroon=macaroon, invoice=inv.invoice)
 
     return {
         "ok": True,
@@ -889,6 +1027,103 @@ def v1_paywall_challenge(
     }
 
 
+def _paywall_lud21(*, verify_url: str, payment_hash: str, preimage_hex: str | None) -> str | JSONResponse:
+    try:
+        wallet_lnaddr.confirm_lud21(
+            verify_url=verify_url,
+            payment_hash=payment_hash,
+            preimage_hex=preimage_hex,
+        )
+    except InvoiceValidationError as exc:
+        if preimage_hex is None and exc.code == "lud21_not_settled":
+            return "pending"
+        status = 401 if exc.code in {"lud21_not_settled", "lud21_mismatch"} else 502
+        return JSONResponse(status_code=status, content={"ok": False, "error": exc.code})
+    except (ssrf.SSRFError, LnurlError):
+        return JSONResponse(status_code=502, content={"ok": False, "error": "lud21_unavailable"})
+    return "settled"
+
+
+def _unlock_paywall(
+    *,
+    authorization: str | None,
+    expected_resource: str,
+    cost_credits: int,
+    client: db.Client,
+    payment_hash: str | None = None,
+    poll: bool = False,
+) -> JSONResponse | dict:
+    macaroon_b64, preimage_hex = parse_authorization_header(authorization)
+    payload = parse_and_verify_macaroon(
+        keys=config.MACAROON_KEYS,
+        macaroon_b64=macaroon_b64,
+        purpose=PURPOSE_PAYWALL,
+        resource=expected_resource,
+        client_id=client.id,
+    )
+
+    token_hash = payload["ph"]
+    if payment_hash is not None and token_hash != payment_hash:
+        raise L402Error("payment_hash mismatch")
+    if preimage_hex is not None:
+        verify_preimage_matches_payment_hash(preimage_hex=preimage_hex, payment_hash=token_hash)
+
+    row = db.get_paywall_challenge(config.DB_PATH, token_hash)
+    if row is None or int(row["client_id"]) != int(client.id):
+        raise L402Error("client mismatch")
+    if row["resource"] != expected_resource or payload.get("res") != expected_resource:
+        raise L402Error("resource mismatch")
+    if int(row["amount_sats"]) != int(payload["amt"]):
+        raise L402Error("amount mismatch")
+    if invoice_binding(row["invoice"]) != payload["inv_h"]:
+        raise L402Error("invoice mismatch")
+    if payee_binding(row["payee"]) != payload["payee_h"]:
+        raise L402Error("payee mismatch")
+
+    already = db_verify.has_verification(config.DB_PATH, client_id=client.id, payment_hash=token_hash)
+    if preimage_hex is None and not already and not row["verify_url"]:
+        return JSONResponse(status_code=401, content={"ok": False, "error": "preimage_required"})
+
+    if not already and row["verify_url"]:
+        state = _paywall_lud21(
+            verify_url=str(row["verify_url"]),
+            payment_hash=token_hash,
+            preimage_hex=preimage_hex,
+        )
+        if isinstance(state, JSONResponse):
+            return state
+        if state == "pending":
+            if poll:
+                return _pending_body(token_hash)
+            return JSONResponse(
+                status_code=402,
+                content={"ok": False, "error": "payment_pending", "settled": False, "payment_hash": token_hash},
+            )
+
+    spend = db_verify.verify_once_and_spend(
+        config.DB_PATH,
+        client_id=client.id,
+        payment_hash=token_hash,
+        cost=int(cost_credits),
+        resource=expected_resource,
+    )
+
+    return {
+        "ok": True,
+        "status": "settled",
+        "settled": True,
+        "client_id": client.id,
+        "resource": expected_resource,
+        "amount_sats": int(row["amount_sats"]),
+        "payee_lightning_address": row["payee"],
+        "payment_hash": token_hash,
+        "charged_credits": spend["charged"],
+        "new_balance": spend["new_balance"],
+        "valid_until": payload.get("exp"),
+        "note": "Cache by payment_hash until valid_until to avoid calling verify on every request.",
+    }
+
+
 @app.post("/v1/paywall/verify")
 def v1_paywall_verify(
     body: PaywallVerifyIn,
@@ -900,6 +1135,10 @@ def v1_paywall_verify(
     This is the core of the "plans + prepay" model:
     - the customer tops up payment verifications (credits)
     - each verified payment consumes 1 verification (credit) (exactly once per payment_hash)
+
+    `Authorization: L402 <macaroon>:<preimage>` is the original flow.
+    `Authorization: L402 <macaroon>` settles from the stored LUD-21 verify URL when the
+    payee's provider advertised one.
     """
 
     client = _get_client_from_api_key(x_api_key)
@@ -907,66 +1146,12 @@ def v1_paywall_verify(
         return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_api_key"})
 
     try:
-        macaroon_b64, preimage_hex = parse_authorization_header(authorization)
-        payload = parse_and_verify_macaroon(
-            keys=config.MACAROON_KEYS,
-            macaroon_b64=macaroon_b64,
-            purpose=PURPOSE_PAYWALL,
-            resource=body.expected_resource,
-            client_id=client.id,
+        return _unlock_paywall(
+            authorization=authorization,
+            expected_resource=body.expected_resource,
+            cost_credits=int(body.cost_credits),
+            client=client,
         )
-
-        payment_hash = payload["ph"]
-        verify_preimage_matches_payment_hash(preimage_hex=preimage_hex, payment_hash=payment_hash)
-
-        row = db.get_paywall_challenge(config.DB_PATH, payment_hash)
-        if row is None or int(row["client_id"]) != int(client.id):
-            raise L402Error("client mismatch")
-        if row["resource"] != body.expected_resource or payload.get("res") != body.expected_resource:
-            raise L402Error("resource mismatch")
-        if int(row["amount_sats"]) != int(payload["amt"]):
-            raise L402Error("amount mismatch")
-        if invoice_binding(row["invoice"]) != payload["inv_h"]:
-            raise L402Error("invoice mismatch")
-        if payee_binding(row["payee"]) != payload["payee_h"]:
-            raise L402Error("payee mismatch")
-
-        if not db_verify.has_verification(
-            config.DB_PATH, client_id=client.id, payment_hash=payment_hash
-        ) and row["verify_url"]:
-            try:
-                wallet_lnaddr.confirm_lud21(
-                    verify_url=str(row["verify_url"]),
-                    payment_hash=payment_hash,
-                    preimage_hex=preimage_hex,
-                )
-            except (ssrf.SSRFError, LnurlError):
-                return JSONResponse(status_code=502, content={"ok": False, "error": "lud21_unavailable"})
-            except InvoiceValidationError as exc:
-                status = 401 if exc.code in {"lud21_not_settled", "lud21_mismatch"} else 502
-                return JSONResponse(status_code=status, content={"ok": False, "error": exc.code})
-
-        spend = db_verify.verify_once_and_spend(
-            config.DB_PATH,
-            client_id=client.id,
-            payment_hash=payment_hash,
-            cost=int(body.cost_credits),
-            resource=body.expected_resource,
-        )
-
-        return {
-            "ok": True,
-            "client_id": client.id,
-            "resource": body.expected_resource,
-            "amount_sats": int(row["amount_sats"]),
-            "payee_lightning_address": row["payee"],
-            "payment_hash": payment_hash,
-            "charged_credits": spend["charged"],
-            "new_balance": spend["new_balance"],
-            "valid_until": payload.get("exp"),
-            "note": "Cache by payment_hash until valid_until to avoid calling verify on every request.",
-        }
-
     except L402Error as e:
         return JSONResponse(status_code=401, content={"ok": False, "error": str(e)})
     except ValueError as e:
@@ -981,7 +1166,50 @@ def v1_paywall_verify(
         )
 
 
-@app.get("/v1/tickets")
+@app.get("/v1/paywall/status/{payment_hash}")
+def v1_paywall_status(
+    payment_hash: str,
+    expected_resource: str = Query(..., min_length=1, max_length=200),
+    cost_credits: int = Query(default=1, ge=1, le=10_000),
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+):
+    """Poll a paywall challenge paid from any wallet.
+
+    Requires the merchant API key and the macaroon issued for this payment hash.
+    Credits are spent once, when the stored LUD-21 URL reports the invoice settled.
+    """
+    normalized = _payment_hash_or_none(payment_hash)
+    if normalized is None:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_payment_hash"})
+
+    client = _get_client_from_api_key(x_api_key)
+    if not client:
+        return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_api_key"})
+
+    try:
+        return _unlock_paywall(
+            authorization=authorization,
+            expected_resource=expected_resource,
+            cost_credits=int(cost_credits),
+            client=client,
+            payment_hash=normalized,
+            poll=True,
+        )
+    except L402Error as e:
+        return JSONResponse(status_code=401, content={"ok": False, "error": str(e)})
+    except ValueError as e:
+        return JSONResponse(
+            status_code=402,
+            content={
+                "ok": False,
+                "error": str(e),
+                "hint": "Top up payment verifications (credits): GET /v1/plans then /v1/topup/{plan_id}",
+            },
+        )
+
+
+@app.get("/v1/tickets", include_in_schema=config.dev_endpoints_enabled())
 def get_ticket(authorization: str | None = Header(default=None)):
     """Demo endpoint (direct pay-per-access, no credits).
 
@@ -1007,10 +1235,48 @@ def get_ticket(authorization: str | None = Header(default=None)):
                 resource=resource,
             )
             payment_hash = payload["ph"]
-            verify_preimage_matches_payment_hash(preimage_hex=preimage_hex, payment_hash=payment_hash)
+            if preimage_hex is not None:
+                verify_preimage_matches_payment_hash(preimage_hex=preimage_hex, payment_hash=payment_hash)
 
+            row = db.get_ticket_challenge(config.DB_PATH, payment_hash)
+            if row is None or row["resource"] != resource:
+                raise L402Error("invoice mismatch")
+            if int(row["amount_sats"]) != int(payload["amt"]):
+                raise L402Error("amount mismatch")
+            if invoice_binding(row["invoice"]) != payload["inv_h"]:
+                raise L402Error("invoice mismatch")
+            if payee_binding(row["payee"]) != payload["payee_h"]:
+                raise L402Error("payee mismatch")
+
+            already = row["settled_at"] is not None
+            if preimage_hex is None and not already and not row["verify_url"]:
+                return JSONResponse(status_code=401, content={"ok": False, "error": "preimage_required"})
+            if not already and row["verify_url"]:
+                state = _paywall_lud21(
+                    verify_url=str(row["verify_url"]),
+                    payment_hash=payment_hash,
+                    preimage_hex=preimage_hex,
+                )
+                if isinstance(state, JSONResponse):
+                    return state
+                if state == "pending":
+                    return JSONResponse(
+                        status_code=402,
+                        content={
+                            "ok": False,
+                            "error": "payment_pending",
+                            "settled": False,
+                            "payment_hash": payment_hash,
+                        },
+                    )
+            if not already and preimage_hex is None and not row["verify_url"]:
+                return JSONResponse(status_code=401, content={"ok": False, "error": "preimage_required"})
+
+            db.mark_ticket_settled(config.DB_PATH, payment_hash=payment_hash)
             return {
                 "ok": True,
+                "status": "settled",
+                "settled": True,
                 "ticket": {
                     "resource": resource,
                     "payment_hash": payment_hash,
@@ -1045,7 +1311,25 @@ def get_ticket(authorization: str | None = Header(default=None)):
         payee=config.LIGHTNING_ADDRESS or None,
     )
 
-    www_auth = f'L402 macaroon="{macaroon}", invoice="{inv.invoice}"'
+    try:
+        db.add_ticket_challenge(
+            config.DB_PATH,
+            payment_hash=inv.payment_hash,
+            invoice=inv.invoice,
+            amount_sats=config.PRICE_SATS,
+            payee=config.LIGHTNING_ADDRESS or None,
+            resource=resource,
+            verify_url=getattr(inv, "verify_url", None),
+            expires_at=int(getattr(inv, "expires_at", None) or (int(time.time()) + config.TOKEN_TTL_SECONDS)),
+        )
+    except ValueError as exc:
+        if str(exc) == "too_many_open_challenges":
+            return JSONResponse(status_code=429, content={"ok": False, "error": "too_many_open_challenges"})
+        return JSONResponse(status_code=500, content={"ok": False, "error": "db_error"})
+    except Exception:  # noqa: BLE001
+        return JSONResponse(status_code=500, content={"ok": False, "error": "db_error"})
+
+    www_auth = www_authenticate_header(macaroon=macaroon, invoice=inv.invoice)
 
     return JSONResponse(
         status_code=402,
@@ -1062,7 +1346,7 @@ def get_ticket(authorization: str | None = Header(default=None)):
     )
 
 
-@app.get("/dev/mock/pay/{payment_hash}")
+@app.get("/dev/mock/pay/{payment_hash}", include_in_schema=config.dev_endpoints_enabled())
 def dev_mock_pay(payment_hash: str):
     """DEV ONLY: if the wallet backend is mock, return the preimage for payment_hash."""
     if not config.dev_endpoints_enabled():
