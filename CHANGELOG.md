@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-17
+
+### Added
+- `X-Satsgate-Buyer-Ip` on `POST /v1/paywall/challenge`. A trusted proxy (the TCP peer is in `SATSGATE_TRUSTED_PROXIES`, the same rule as `X-Forwarded-For`) can name the end buyer. Any other peer can send the header and it is ignored, so existing callers are unchanged. The response says `buyer_ip_accepted`.
+- Per-buyer limits inside one client: `SATSGATE_BUYER_CHALLENGE_MAX` (default 10 per `SATSGATE_RL_WINDOW_SECONDS`) and `SATSGATE_BUYER_MAX_OPEN_CHALLENGES` (default 5 unpaid challenges still inside the claim window). `0` disables that limit. HTTP 429 `buyer_rate_limited` or `too_many_open_challenges_for_buyer`, with `Retry-After`. The account cap remains `too_many_open_challenges` and now also sends `Retry-After`.
+- `SATSGATE_BUYER_LIMIT_SCOPE=client` (default) shares a buyer's budget across the account's keys. `key` gives each restricted key its own budget. The account key is its own bucket in that mode.
+- `SATSGATE_CHALLENGE_REUSE_SECONDS` (default 30, `0` disables). An identical unpaid challenge for the same buyer, resource, amount, usage policy, payee, and key returns the same invoice (`reused: true`) instead of minting another one. The macaroon is signed again for that invoice. Retries do not call the LNURL provider.
+- Python SDK `0.6.0`: `paywall_challenge(..., buyer_ip=)`.
+
+### Security
+- The buyer address is not stored. The challenge row keeps HMAC-SHA256 of the truncated address (IPv4 /24, IPv6 /64), keyed by the macaroon secret. The digest is removed with the row, on the existing challenge cleanup. A /24 or /64 shares one bucket.
+- The header cannot move a buyer into a bucket unless the connection comes from a configured trusted proxy. The shipped Caddyfile deletes `X-Satsgate-Buyer-Ip` on public requests, because Caddy is that trusted peer. Forward the header only from the paywall proxy.
+
+### Changed
+- `GET /health` reports `0.7.0`.
+- Caps are checked before the LNURL call, and again in the insert transaction, so a buyer at the limit does not ask the payee's provider for an invoice. Two concurrent inserts cannot both take the last unpaid slot.
+
+### Migration
+Restart the process to serve 0.7.0. Startup adds nullable `paywall_challenges.buyer_ip_hash` and an index on `(client_id, buyer_ip_hash, created_at)`. Existing rows stay unlimited. Copy the SQLite file first if you want a rollback point. No environment variable is required. Leave the new settings unset to keep the defaults above.
+
 ## [0.6.0] - 2026-10-17
 
 ### Added

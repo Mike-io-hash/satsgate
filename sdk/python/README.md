@@ -59,6 +59,10 @@ print(sg.ledger(limit=50))
 # sg.revoke_api_key(created["key"]["id"])
 ```
 
+## Buyer IP
+
+`paywall_challenge(..., buyer_ip="203.0.113.10")` sends `X-Satsgate-Buyer-Ip`. The server applies per-buyer challenge limits and may reuse a pending invoice only when the TCP peer is a trusted proxy. `buyer_ip_accepted` on the result says whether it did. `reused` is true when the response is an invoice that buyer already has.
+
 ## Usage policy
 
 `paywall_challenge(..., max_uses=1)` or `access_seconds=3600` records what that payment buys. One credit is still one settled payment. Pass `consume=True` to `paywall_verify` or `poll_paywall` on every buyer request. Each call takes one use, including a retry. The server returns `uses_remaining` and `access_until`. HTTP 401 `token_used_up` or `token_expired` means create a new challenge. The SDK does not cache a challenge that has a policy.

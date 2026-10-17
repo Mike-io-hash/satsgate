@@ -10,10 +10,12 @@ Concepts:
 - The account key (``sg_``) manages the account. ``create_api_key`` mints a restricted
   key (``sgr_``) for a proxy or MCP server that should only run the paywall.
 - ``max_uses`` / ``access_seconds`` on a challenge, with ``consume=True``, say what one payment buys.
+- ``paywall_challenge(..., buyer_ip=)`` sends the end buyer's address. The server
+  uses it only when the TCP peer is a trusted proxy.
 """
 
 from .client import SatsgateClient, SatsgateError
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = ["SatsgateClient", "SatsgateError"]

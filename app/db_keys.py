@@ -9,10 +9,10 @@ the payee, manage keys, or read the ledger and other account data.
 start with the prefix. The comparison is the same case-sensitive
 ``startswith`` check the paywall uses for resource names.
 
-Per-challenge usage policies (max uses, access window, consume) and per-buyer
-IP limits are not stored on the key. They belong on the challenge. ``api_key_id``
-on ``paywall_challenges`` and on ledger debits is the attribution those
-features can use later.
+Per-challenge usage policies live on the challenge row. Per-buyer IP limits
+do too: the stored value is a truncated HMAC, and ``api_key_id`` is how a
+limit can be scoped to one restricted key. Neither policy is a column on
+``api_keys``.
 """
 
 from __future__ import annotations

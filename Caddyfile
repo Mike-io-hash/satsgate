@@ -2,9 +2,15 @@
   encode zstd gzip
 
   # Replace any client-supplied forwarded headers with the real peer.
+  # Caddy is the app's trusted proxy, so a public client could set
+  # X-Satsgate-Buyer-Ip and pick any buyer bucket. Drop it here.
+  # When the paywall proxy should pass the end buyer's IP, give that proxy
+  # its own reverse_proxy block (matched on remote_ip) that does not delete
+  # the header, and keep this block for everyone else.
   reverse_proxy satsgate:8000 {
     header_up X-Forwarded-For {remote_host}
     header_up X-Forwarded-Proto {scheme}
     header_up X-Real-IP {remote_host}
+    header_up -X-Satsgate-Buyer-Ip
   }
 }

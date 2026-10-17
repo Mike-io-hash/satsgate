@@ -19,7 +19,7 @@ from . import db_verify
 from . import ssrf
 from . import wallet_lnaddr
 from .admin import router as admin_router
-from .client_ip import resolve_client_ip
+from .client_ip import buyer_ip_from_trusted_proxy, hash_buyer_ip, resolve_client_ip
 from .invoices import InvoiceValidationError, bolt11_expiry_unix
 from .l402 import (
     L402Error,
@@ -1198,10 +1198,158 @@ def _get_payee_wallet(lightning_address: str) -> LightningAddressWallet:
     return w
 
 
+def _challenge_limited(exc: db.ChallengeLimit) -> JSONResponse:
+    detail = {
+        "buyer_rate_limited": "This buyer has created too many challenges in the current window. Wait for Retry-After.",
+        "too_many_open_challenges_for_buyer": (
+            "This buyer has too many unpaid challenges. Pay one, or wait until an unpaid invoice leaves the window."
+        ),
+        "too_many_open_challenges": (
+            "This account has too many open challenges. Wait for Retry-After."
+        ),
+    }.get(exc.code, "Try again later.")
+    retry_after = max(1, int(exc.retry_after))
+    return JSONResponse(
+        status_code=429,
+        headers={"Retry-After": str(retry_after)},
+        content={
+            "ok": False,
+            "error": exc.code,
+            "retry_after_seconds": retry_after,
+            "detail": detail,
+        },
+    )
+
+
+def _challenge_body(
+    *,
+    resource: str,
+    amount_sats: int,
+    payee: str | None,
+    payee_saved: bool,
+    macaroon: str,
+    invoice: str,
+    payment_hash: str,
+    claim_until: int,
+    invoice_expires_at: int,
+    max_uses: int | None,
+    access_seconds: int | None,
+    uses_consumed: int,
+    access_until: int | None,
+    settled_at: int | None,
+    reused: bool,
+    buyer_ip_accepted: bool,
+) -> dict:
+    www_auth = www_authenticate_header(macaroon=macaroon, invoice=invoice)
+    payee_note = None
+    if payee_saved:
+        payee_note = (
+            "Saved payee_lightning_address as this client's payee. "
+            "Later challenges use it. Change it with POST /v1/client/payee."
+        )
+    note = _challenge_expiry_note(invoice_expires_at=invoice_expires_at, claim_until=claim_until)
+    if max_uses is not None or access_seconds is not None:
+        note += (
+            " This challenge has a usage policy. Pass consume=true on verify or status to take one use."
+            " access_until is set when the payment first settles."
+            " HTTP 401 token_used_up or token_expired means the buyer needs a new challenge."
+        )
+    if reused:
+        note += " This is an unpaid challenge from a moment ago, returned so a retry does not mint another invoice."
+    remaining = None if max_uses is None else max(0, int(max_uses) - int(uses_consumed))
+    return {
+        "ok": True,
+        "resource": resource,
+        "amount_sats": int(amount_sats),
+        "payee_lightning_address": payee,
+        "payee_saved": payee_saved,
+        "payee_note": payee_note,
+        "macaroon": macaroon,
+        "invoice": invoice,
+        "payment_hash": payment_hash,
+        "valid_until": claim_until,
+        "claim_until": claim_until,
+        "invoice_expires_at": invoice_expires_at,
+        "cache_until": claim_until,
+        "max_uses": int(max_uses) if max_uses is not None else None,
+        "access_seconds": int(access_seconds) if access_seconds is not None else None,
+        "uses_consumed": int(uses_consumed),
+        "uses_remaining": remaining,
+        "access_until": int(access_until) if access_until is not None else None,
+        "settled_at": int(settled_at) if settled_at is not None else None,
+        "reused": bool(reused),
+        "buyer_ip_accepted": bool(buyer_ip_accepted),
+        "www_authenticate": www_auth,
+        "token_version": TOKEN_VERSION,
+        "note": note,
+    }
+
+
+def _challenge_from_row(row, *, payee_saved: bool, reused: bool, buyer_ip_accepted: bool) -> dict:
+    created_at = int(row["created_at"])
+    invoice_expires_at = int(row["expires_at"])
+    claim_until = _paywall_macaroon_exp(expires_at=invoice_expires_at, created_at=created_at)
+    macaroon = make_macaroon(
+        secret=config.MACAROON_SECRET,
+        kid=config.MACAROON_KEY_ID,
+        purpose=PURPOSE_PAYWALL,
+        payment_hash=str(row["payment_hash"]),
+        resource=str(row["resource"]),
+        amount_sats=int(row["amount_sats"]),
+        invoice=str(row["invoice"]),
+        ttl_seconds=max(1, claim_until - created_at),
+        exp=claim_until,
+        client_id=int(row["client_id"]),
+        payee=row["payee"],
+    )
+    return _challenge_body(
+        resource=str(row["resource"]),
+        amount_sats=int(row["amount_sats"]),
+        payee=row["payee"],
+        payee_saved=payee_saved,
+        macaroon=macaroon,
+        invoice=str(row["invoice"]),
+        payment_hash=str(row["payment_hash"]),
+        claim_until=claim_until,
+        invoice_expires_at=invoice_expires_at,
+        max_uses=row["max_uses"],
+        access_seconds=row["access_seconds"],
+        uses_consumed=int(row["uses_consumed"] or 0),
+        access_until=row["access_until"],
+        settled_at=row["settled_at"],
+        reused=reused,
+        buyer_ip_accepted=buyer_ip_accepted,
+    )
+
+
+def _capacity_kwargs(
+    *,
+    client_id: int,
+    api_key_id: int | None,
+    buyer_ip_hash: str | None,
+    now: int,
+) -> dict:
+    return {
+        "client_id": int(client_id),
+        "now": int(now),
+        "claim_grace_seconds": config.PAYWALL_CLAIM_GRACE_SECONDS,
+        "claim_cap_seconds": config.PAYWALL_TOKEN_TTL_CAP_SECONDS,
+        "max_open_per_client": config.MAX_OPEN_CHALLENGES_PER_CLIENT,
+        "buyer_ip_hash": buyer_ip_hash,
+        "buyer_rate_max": config.BUYER_CHALLENGE_MAX,
+        "buyer_rate_window_seconds": config.RL_WINDOW_SECONDS,
+        "buyer_max_open": config.BUYER_MAX_OPEN_CHALLENGES,
+        "buyer_limit_scope": config.BUYER_LIMIT_SCOPE,
+        "api_key_id": api_key_id,
+    }
+
+
 @app.post("/v1/paywall/challenge")
 def v1_paywall_challenge(
     body: PaywallChallengeIn,
+    request: Request,
     x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+    x_satsgate_buyer_ip: str | None = Header(default=None, alias="X-Satsgate-Buyer-Ip"),
 ):
     """Generate an L402 challenge for a resource.
 
@@ -1214,6 +1362,10 @@ def v1_paywall_challenge(
     Passing `payee_lightning_address` on the first challenge saves it. Change
     the saved payee with POST /v1/client/payee. A restricted key cannot save or
     change the payee.
+
+    A trusted proxy may send `X-Satsgate-Buyer-Ip` with the end buyer's address.
+    The header is ignored unless the TCP peer is in `SATSGATE_TRUSTED_PROXIES`.
+    Without it, limits stay per client, as before.
     """
 
     auth = _paywall_principal(x_api_key, body.resource)
@@ -1287,6 +1439,58 @@ def v1_paywall_challenge(
                 },
             )
 
+    peer = request.client.host if request.client else None
+    try:
+        buyer_ip = buyer_ip_from_trusted_proxy(
+            peer=peer,
+            header=x_satsgate_buyer_ip,
+            trusted_proxies=config.TRUSTED_PROXIES,
+        )
+    except ValueError as exc:
+        if str(exc) == "invalid_buyer_ip":
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_buyer_ip",
+                    "detail": "X-Satsgate-Buyer-Ip must be a single IP address.",
+                },
+            )
+        raise
+    buyer_hash = hash_buyer_ip(buyer_ip, secret=config.MACAROON_SECRET) if buyer_ip else None
+    buyer_accepted = buyer_hash is not None
+    created_at = int(time.time())
+
+    if buyer_hash and config.CHALLENGE_REUSE_SECONDS > 0:
+        existing = db.find_reusable_paywall_challenge(
+            config.DB_PATH,
+            client_id=client.id,
+            buyer_ip_hash=buyer_hash,
+            resource=body.resource,
+            amount_sats=int(body.amount_sats),
+            payee=payee,
+            max_uses=body.max_uses,
+            access_seconds=body.access_seconds,
+            api_key_id=auth.api_key_id,
+            reuse_seconds=config.CHALLENGE_REUSE_SECONDS,
+            now=created_at,
+        )
+        if existing is not None:
+            return _challenge_from_row(existing, payee_saved=False, reused=True, buyer_ip_accepted=True)
+
+    try:
+        db.preview_challenge_capacity(
+            config.DB_PATH,
+            **_capacity_kwargs(
+                client_id=client.id,
+                api_key_id=auth.api_key_id,
+                buyer_ip_hash=buyer_hash,
+                now=created_at,
+            ),
+        )
+    except db.ChallengeLimit as exc:
+        return _challenge_limited(exc)
+
     # Generate invoice. min_expiry rejects an invoice that dies too soon. It does
     # not shorten a longer invoice from the payee's provider.
     try:
@@ -1343,57 +1547,39 @@ def v1_paywall_challenge(
             api_key_id=auth.api_key_id,
             max_uses=body.max_uses,
             access_seconds=body.access_seconds,
+            buyer_ip_hash=buyer_hash,
             max_open_per_client=config.MAX_OPEN_CHALLENGES_PER_CLIENT,
+            buyer_rate_max=config.BUYER_CHALLENGE_MAX,
+            buyer_rate_window_seconds=config.RL_WINDOW_SECONDS,
+            buyer_max_open=config.BUYER_MAX_OPEN_CHALLENGES,
+            buyer_limit_scope=config.BUYER_LIMIT_SCOPE,
             now=created_at,
             claim_grace_seconds=config.PAYWALL_CLAIM_GRACE_SECONDS,
             claim_cap_seconds=config.PAYWALL_TOKEN_TTL_CAP_SECONDS,
         )
-    except ValueError as exc:
-        if str(exc) == "too_many_open_challenges":
-            return JSONResponse(status_code=429, content={"ok": False, "error": "too_many_open_challenges"})
-        return JSONResponse(status_code=500, content={"ok": False, "error": "db_error"})
+    except db.ChallengeLimit as exc:
+        return _challenge_limited(exc)
     except Exception:  # noqa: BLE001
         return JSONResponse(status_code=500, content={"ok": False, "error": "db_error"})
 
-    www_auth = www_authenticate_header(macaroon=macaroon, invoice=inv.invoice)
-    payee_note = None
-    if payee_saved:
-        payee_note = (
-            "Saved payee_lightning_address as this client's payee. "
-            "Later challenges use it. Change it with POST /v1/client/payee."
-        )
-    note = _challenge_expiry_note(invoice_expires_at=invoice_expires_at, claim_until=claim_until)
-    if body.max_uses is not None or body.access_seconds is not None:
-        note += (
-            " This challenge has a usage policy. Pass consume=true on verify or status to take one use."
-            " access_until is set when the payment first settles."
-            " HTTP 401 token_used_up or token_expired means the buyer needs a new challenge."
-        )
-
-    return {
-        "ok": True,
-        "resource": body.resource,
-        "amount_sats": int(body.amount_sats),
-        "payee_lightning_address": payee,
-        "payee_saved": payee_saved,
-        "payee_note": payee_note,
-        "macaroon": macaroon,
-        "invoice": inv.invoice,
-        "payment_hash": inv.payment_hash,
-        "valid_until": claim_until,
-        "claim_until": claim_until,
-        "invoice_expires_at": invoice_expires_at,
-        "cache_until": claim_until,
-        "max_uses": body.max_uses,
-        "access_seconds": body.access_seconds,
-        "uses_consumed": 0,
-        "uses_remaining": body.max_uses,
-        "access_until": None,
-        "settled_at": None,
-        "www_authenticate": www_auth,
-        "token_version": TOKEN_VERSION,
-        "note": note,
-    }
+    return _challenge_body(
+        resource=body.resource,
+        amount_sats=int(body.amount_sats),
+        payee=payee,
+        payee_saved=payee_saved,
+        macaroon=macaroon,
+        invoice=inv.invoice,
+        payment_hash=inv.payment_hash,
+        claim_until=claim_until,
+        invoice_expires_at=invoice_expires_at,
+        max_uses=body.max_uses,
+        access_seconds=body.access_seconds,
+        uses_consumed=0,
+        access_until=None,
+        settled_at=None,
+        reused=False,
+        buyer_ip_accepted=buyer_accepted,
+    )
 
 
 def _paywall_lud21(*, verify_url: str, payment_hash: str, preimage_hex: str | None) -> str | JSONResponse:
