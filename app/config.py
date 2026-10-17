@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 # Load env vars from .env if present. Existing process env wins.
 load_dotenv()
 
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 
 # production is the safe default. Local mock/dev only runs when this is explicit.
 SATSGATE_ENV = os.environ.get("SATSGATE_ENV", "production").strip().lower() or "production"
@@ -82,6 +82,19 @@ PAYWALL_CLAIM_GRACE_SECONDS = _optional_int(
 )
 if PAYWALL_CLAIM_GRACE_SECONDS > PAYWALL_TOKEN_TTL_CAP_SECONDS:
     raise RuntimeError("SATSGATE_PAYWALL_CLAIM_GRACE_SECONDS cannot exceed SATSGATE_PAYWALL_TOKEN_TTL_CAP_SECONDS")
+
+# Longest access window a challenge may grant, measured from settlement.
+# Also the longest a max_uses bundle is honored when access_seconds is omitted.
+# Optional. Lower it to shorten passes. It cannot be raised past 7 days.
+_DEFAULT_PAYWALL_ACCESS_CAP_SECONDS = 7 * 24 * 60 * 60
+_MAX_PAYWALL_ACCESS_CAP_SECONDS = 7 * 24 * 60 * 60
+PAYWALL_ACCESS_CAP_SECONDS = _optional_int(
+    "SATSGATE_PAYWALL_ACCESS_CAP_SECONDS",
+    _DEFAULT_PAYWALL_ACCESS_CAP_SECONDS,
+    minimum=60,
+    maximum=_MAX_PAYWALL_ACCESS_CAP_SECONDS,
+)
+MAX_PAYWALL_USES = 100_000
 
 # Wallet backend
 # - mock: simulated wallet (local testing only)

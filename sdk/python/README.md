@@ -59,6 +59,10 @@ print(sg.ledger(limit=50))
 # sg.revoke_api_key(created["key"]["id"])
 ```
 
+## Usage policy
+
+`paywall_challenge(..., max_uses=1)` or `access_seconds=3600` records what that payment buys. One credit is still one settled payment. Pass `consume=True` to `paywall_verify` or `poll_paywall` on every buyer request. Each call takes one use, including a retry. The server returns `uses_remaining` and `access_until`. HTTP 401 `token_used_up` or `token_expired` means create a new challenge. The SDK does not cache a challenge that has a policy.
+
 ## Restricted keys
 
 `create_api_key`, `list_api_keys`, and `revoke_api_key` talk to `/v1/api-keys` with the account key (`sg_...`).

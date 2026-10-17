@@ -16,7 +16,8 @@ class Client:
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
+    # timeout: concurrent paywall consumes from more than one process wait for the writer.
+    conn = sqlite3.connect(db_path, timeout=30.0)
     conn.row_factory = sqlite3.Row
     # Enable foreign keys in SQLite
     conn.execute("PRAGMA foreign_keys = ON")
@@ -119,6 +120,18 @@ def init_db(db_path: str) -> None:
         challenge_cols = [r["name"] for r in conn.execute("PRAGMA table_info(paywall_challenges)").fetchall()]
         if "api_key_id" not in challenge_cols:
             conn.execute("ALTER TABLE paywall_challenges ADD COLUMN api_key_id INTEGER")
+        # Usage policy. NULL max_uses and access_seconds means the pre-0.6.0 grant:
+        # re-verify does not consume a unit. uses_consumed stays 0 until a policy exists.
+        if "max_uses" not in challenge_cols:
+            conn.execute("ALTER TABLE paywall_challenges ADD COLUMN max_uses INTEGER")
+        if "access_seconds" not in challenge_cols:
+            conn.execute("ALTER TABLE paywall_challenges ADD COLUMN access_seconds INTEGER")
+        if "uses_consumed" not in challenge_cols:
+            conn.execute("ALTER TABLE paywall_challenges ADD COLUMN uses_consumed INTEGER NOT NULL DEFAULT 0")
+        if "settled_at" not in challenge_cols:
+            conn.execute("ALTER TABLE paywall_challenges ADD COLUMN settled_at INTEGER")
+        if "access_until" not in challenge_cols:
+            conn.execute("ALTER TABLE paywall_challenges ADD COLUMN access_until INTEGER")
 
         # Restricted keys. The account key stays on clients.api_key_hash.
         conn.execute(
@@ -445,6 +458,8 @@ def add_paywall_challenge(
     verify_url: str | None,
     expires_at: int,
     api_key_id: int | None = None,
+    max_uses: int | None = None,
+    access_seconds: int | None = None,
     max_open_per_client: int = 100,
     now: int | None = None,
     claim_grace_seconds: int = 0,
@@ -461,9 +476,22 @@ def add_paywall_challenge(
     cap_cutoff = now - int(claim_cap_seconds)
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        # Keep a settled usage grant until a day after access_until so a late
+        # consume still returns token_used_up / token_expired. Grants with no
+        # policy follow the invoice claim cleanup, as before.
+        retain_after = now - 86_400
         conn.execute(
-            "DELETE FROM paywall_challenges WHERE expires_at < ? OR created_at < ?",
-            (invoice_cutoff, cap_cutoff),
+            """
+            DELETE FROM paywall_challenges
+            WHERE (expires_at < ? OR created_at < ?)
+              AND NOT (
+                settled_at IS NOT NULL
+                AND (max_uses IS NOT NULL OR access_seconds IS NOT NULL)
+                AND access_until IS NOT NULL
+                AND access_until >= ?
+              )
+            """,
+            (invoice_cutoff, cap_cutoff, retain_after),
         )
         open_rows = conn.execute(
             """
@@ -479,9 +507,9 @@ def add_paywall_challenge(
             """
             INSERT INTO paywall_challenges(
               payment_hash, client_id, invoice, amount_sats, payee, resource, verify_url, created_at, expires_at,
-              api_key_id
+              api_key_id, max_uses, access_seconds, uses_consumed
             )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
             """,
             (
                 payment_hash,
@@ -494,6 +522,8 @@ def add_paywall_challenge(
                 now,
                 int(expires_at),
                 int(api_key_id) if api_key_id is not None else None,
+                int(max_uses) if max_uses is not None else None,
+                int(access_seconds) if access_seconds is not None else None,
             ),
         )
         conn.execute("COMMIT")

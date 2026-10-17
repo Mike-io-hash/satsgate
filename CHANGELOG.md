@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-17
+
+### Added
+- Per-challenge usage policy. `POST /v1/paywall/challenge` accepts optional `max_uses` (1 to 100000) and `access_seconds` (1 to the server cap). Omit both and the payment behaves as before: a settled token can be verified again without consuming a unit.
+- `consume=true` on `POST /v1/paywall/verify` and `GET /v1/paywall/status/{payment_hash}` atomically takes one use and returns `uses_remaining`, `uses_consumed`, `access_until`, `settled_at`, and `consumed`. The check is one SQLite transaction, so two callers cannot both take the last use. Omit `consume` to read that state without changing it. Each `consume=true` is one use, including a retry after a lost response.
+- `access_seconds` starts at the first settled unlock. A `max_uses` bundle that omits `access_seconds` still ends at the server cap (default 7 days) and that deadline is stored in `access_until`. Responses name it so a proxy can see when the grant dies.
+- Exhausted and expired consumes return HTTP 401 `token_used_up` or `token_expired`, with `uses_remaining` and `access_until`, so the client can mint a new challenge. A non-consuming check of that same payment still returns HTTP 200.
+- Python SDK `0.5.0`: `paywall_challenge(..., max_uses=, access_seconds=)`, `paywall_verify(..., consume=)`, `poll_paywall(..., consume=)`. A policy grant is not stored in the SDK cache.
+
+### Changed
+- Credits are still charged once per `payment_hash`, on the first settled unlock, including when that call also consumes a use. Later uses and the 401s above charge 0.
+- `GET /health` reports `0.6.0`.
+- Optional `SATSGATE_PAYWALL_ACCESS_CAP_SECONDS` (default `604800`, minimum `60`, maximum `604800`) shortens the longest pass. Leave it unset to keep 7 days.
+
+### Security
+- A settled macaroon is no longer an unlimited replay for the whole claim window when the merchant set a policy. The counter and `access_until` live in SQLite, shared by every replica that uses that database file. Writers wait up to 30 seconds for the lock.
+- Restricted keys can create these challenges and consume uses. `resource_prefix` still applies. A restricted key still cannot change the payee or top up.
+
+### Migration
+Restart the process to serve 0.6.0. Startup adds nullable `paywall_challenges.max_uses`, `access_seconds`, `settled_at`, and `access_until`, plus `uses_consumed` (default 0). Existing rows stay unlimited. Copy the SQLite file first if you want a rollback point. No environment variable is required.
+
 ## [0.5.0] - 2026-10-17
 
 ### Added

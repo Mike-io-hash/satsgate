@@ -33,6 +33,12 @@ class Challenge:
     invoice_expires_at: int | None = None
     cache_until: int | None = None
     payee_saved: bool = False
+    max_uses: int | None = None
+    access_seconds: int | None = None
+    uses_consumed: int | None = None
+    uses_remaining: int | None = None
+    access_until: int | None = None
+    settled_at: int | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +55,13 @@ class VerifyResult:
     claim_until: int | None = None
     invoice_expires_at: int | None = None
     cache_until: int | None = None
+    max_uses: int | None = None
+    access_seconds: int | None = None
+    uses_consumed: int | None = None
+    uses_remaining: int | None = None
+    access_until: int | None = None
+    settled_at: int | None = None
+    consumed: bool = False
 
 
 def _decode_token_bytes(token: str) -> bytes:
@@ -132,6 +145,11 @@ def _optional_int(data: dict, key: str) -> int | None:
     if raw is None or raw == "":
         return None
     return int(raw)
+
+
+def _policy_limited(data: dict) -> bool:
+    """A usage policy must be enforced by the server on every buyer request."""
+    return data.get("max_uses") is not None or data.get("access_seconds") is not None
 
 
 def _cache_deadline(data: dict) -> int:
@@ -306,6 +324,8 @@ class SatsgateClient:
         amount_sats: int,
         memo: str | None = None,
         ttl_seconds: int | None = None,
+        max_uses: int | None = None,
+        access_seconds: int | None = None,
     ) -> Challenge:
         body: dict[str, Any] = {
             "resource": resource,
@@ -315,6 +335,10 @@ class SatsgateClient:
             body["memo"] = memo
         if ttl_seconds is not None:
             body["ttl_seconds"] = int(ttl_seconds)
+        if max_uses is not None:
+            body["max_uses"] = int(max_uses)
+        if access_seconds is not None:
+            body["access_seconds"] = int(access_seconds)
 
         r = self._http.post(
             f"{self.base_url}/v1/paywall/challenge",
@@ -336,6 +360,12 @@ class SatsgateClient:
             invoice_expires_at=_optional_int(data, "invoice_expires_at"),
             cache_until=_optional_int(data, "cache_until"),
             payee_saved=bool(data.get("payee_saved")),
+            max_uses=_optional_int(data, "max_uses"),
+            access_seconds=_optional_int(data, "access_seconds"),
+            uses_consumed=_optional_int(data, "uses_consumed"),
+            uses_remaining=_optional_int(data, "uses_remaining"),
+            access_until=_optional_int(data, "access_until"),
+            settled_at=_optional_int(data, "settled_at"),
         )
 
     def paywall_verify(
@@ -345,6 +375,7 @@ class SatsgateClient:
         expected_resource: str,
         cost_credits: int = 1,
         use_cache: bool = True,
+        consume: bool = False,
     ) -> VerifyResult:
         """Verify payment and spend credits.
 
@@ -352,7 +383,9 @@ class SatsgateClient:
         Tokens are v2 and are bound to the satsgate client that minted them.
         `use_cache=True` remembers a successful unlock until `cache_until` (or
         `valid_until` on older servers). That avoids calling verify on every request.
-        It is not a content-access window; the merchant decides how long the buyer may use the product.
+        It is not a content-access window. A challenge with max_uses or access_seconds
+        is never cached: pass consume=True on each buyer request so the server can
+        take one use. consume=True also skips the cache.
         The server, not this client, decides whether a macaroon whose `exp` has passed
         can still be unlocked inside the invoice claim window.
         """
@@ -375,8 +408,9 @@ class SatsgateClient:
             raise SatsgateError("preimage does not match payment_hash")
 
         now = int(time.time())
+        remember = use_cache and not consume
 
-        if use_cache:
+        if remember:
             cached_until = self._verified.get(payment_hash)
             if cached_until and now <= cached_until:
                 return VerifyResult(
@@ -396,13 +430,17 @@ class SatsgateClient:
                 "Content-Type": "application/json",
                 "Authorization": authorization_header,
             },
-            json={"expected_resource": expected_resource, "cost_credits": int(cost_credits)},
+            json={
+                "expected_resource": expected_resource,
+                "cost_credits": int(cost_credits),
+                "consume": bool(consume),
+            },
         )
         data = self._ok_or_raise(r)
 
         vu = int(data.get("valid_until") or 0)
         cache_until = _cache_deadline(data)
-        if cache_until:
+        if remember and cache_until and not _policy_limited(data):
             self._verified[payment_hash] = cache_until
 
         return VerifyResult(
@@ -418,6 +456,13 @@ class SatsgateClient:
             claim_until=_optional_int(data, "claim_until"),
             invoice_expires_at=_optional_int(data, "invoice_expires_at"),
             cache_until=cache_until or None,
+            max_uses=_optional_int(data, "max_uses"),
+            access_seconds=_optional_int(data, "access_seconds"),
+            uses_consumed=_optional_int(data, "uses_consumed"),
+            uses_remaining=_optional_int(data, "uses_remaining"),
+            access_until=_optional_int(data, "access_until"),
+            settled_at=_optional_int(data, "settled_at"),
+            consumed=bool(data.get("consumed")),
         )
 
     def _poll(self, send, *, interval_seconds: float, timeout_seconds: float) -> dict:
@@ -476,6 +521,7 @@ class SatsgateClient:
         payment_hash: str,
         expected_resource: str,
         cost_credits: int = 1,
+        consume: bool = False,
         interval_seconds: float = 2.0,
         timeout_seconds: float = 180.0,
     ) -> VerifyResult:
@@ -493,13 +539,17 @@ class SatsgateClient:
             return self._http.get(
                 f"{self.base_url}/v1/paywall/status/{payment_hash}",
                 headers={**self._headers(), "Authorization": f"L402 {macaroon}"},
-                params={"expected_resource": expected_resource, "cost_credits": int(cost_credits)},
+                params={
+                    "expected_resource": expected_resource,
+                    "cost_credits": int(cost_credits),
+                    "consume": bool(consume),
+                },
             )
 
         data = self._poll(_send, interval_seconds=interval_seconds, timeout_seconds=timeout_seconds)
         vu = int(data.get("valid_until") or 0)
         cache_until = _cache_deadline(data)
-        if cache_until:
+        if cache_until and not consume and not _policy_limited(data):
             self._verified[str(data["payment_hash"])] = cache_until
         return VerifyResult(
             ok=True,
@@ -514,4 +564,11 @@ class SatsgateClient:
             claim_until=_optional_int(data, "claim_until"),
             invoice_expires_at=_optional_int(data, "invoice_expires_at"),
             cache_until=cache_until or None,
+            max_uses=_optional_int(data, "max_uses"),
+            access_seconds=_optional_int(data, "access_seconds"),
+            uses_consumed=_optional_int(data, "uses_consumed"),
+            uses_remaining=_optional_int(data, "uses_remaining"),
+            access_until=_optional_int(data, "access_until"),
+            settled_at=_optional_int(data, "settled_at"),
+            consumed=bool(data.get("consumed")),
         )
