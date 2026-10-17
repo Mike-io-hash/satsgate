@@ -698,6 +698,104 @@ def test_wallet_rejects_bad_invoices_and_private_callbacks():
     assert plain.verify_url is None
 
 
+def test_lnurl_callback_omits_comment_by_default():
+    """Alby copies a LUD-12 comment into the BOLT11 description. Do not send one."""
+    from app.wallet_lnaddr import LightningAddressWallet
+
+    metadata = _metadata()
+    seen: dict = {}
+
+    def fetch(url, params=None):
+        if "/.well-known/" in url:
+            payreq = _payreq("https://cb.example/lnurl", metadata)
+            payreq["commentAllowed"] = 255
+            return payreq
+        seen["params"] = dict(params or {})
+        return {"pr": _bolt11(amount_sats=1, metadata=metadata), "routes": []}
+
+    wallet = LightningAddressWallet(
+        "satsgate@getalby.com",
+        fetch_json=fetch,
+        resolver=_resolver({"getalby.com": "1.1.1.1", "cb.example": "8.8.8.8"}),
+        network="mainnet",
+    )
+    issued = wallet.create_invoice(amount_sats=1, memo="satsgate paywall", min_expiry_seconds=60)
+    assert seen["params"] == {"amount": 1000}
+    assert "comment" not in seen["params"]
+    assert issued.amount_sats == 1
+
+
+def test_lnurl_description_hash_mismatch_still_rejected():
+    """A comment must not relax description_hash = SHA256(metadata)."""
+    from app.invoices import InvoiceValidationError
+    from app.wallet_lnaddr import LightningAddressWallet
+
+    metadata = _metadata()
+    seen: dict = {}
+
+    def fetch(url, params=None):
+        if "/.well-known/" in url:
+            payreq = _payreq("https://cb.example/lnurl", metadata)
+            payreq["commentAllowed"] = 255
+            return payreq
+        seen["params"] = dict(params or {})
+        return {
+            "pr": _bolt11(amount_sats=1, metadata=metadata, description_hash="12" * 32),
+            "routes": [],
+        }
+
+    wallet = LightningAddressWallet(
+        "merchant@pay.example",
+        fetch_json=fetch,
+        resolver=_resolver({"pay.example": "1.1.1.1", "cb.example": "8.8.8.8"}),
+        network="mainnet",
+        send_comment=True,
+    )
+    with pytest.raises(InvoiceValidationError) as caught:
+        wallet.create_invoice(amount_sats=1, memo="satsgate topup trial", min_expiry_seconds=60)
+    assert caught.value.code == "description_hash_mismatch"
+    assert seen["params"]["comment"] == "satsgate topup trial"
+    assert seen["params"]["amount"] == 1000
+
+
+def test_lnurl_comment_sent_only_when_enabled_and_allowed():
+    from app.wallet_lnaddr import LightningAddressWallet
+
+    metadata = _metadata()
+    public = {"pay.example": "1.1.1.1", "cb.example": "8.8.8.8"}
+
+    def _fetch(comment_allowed: int, seen: list[dict]):
+        def fetch(url, params=None):
+            if "/.well-known/" in url:
+                payreq = _payreq("https://cb.example/lnurl", metadata)
+                payreq["commentAllowed"] = comment_allowed
+                return payreq
+            seen.append(dict(params or {}))
+            return {"pr": _bolt11(amount_sats=1, metadata=metadata), "routes": []}
+
+        return fetch
+
+    allowed: list[dict] = []
+    LightningAddressWallet(
+        "merchant@pay.example",
+        fetch_json=_fetch(8, allowed),
+        resolver=_resolver(public),
+        network="mainnet",
+        send_comment=True,
+    ).create_invoice(amount_sats=1, memo="satsgate paywall", min_expiry_seconds=60)
+    assert allowed[-1]["comment"] == "satsgate"
+
+    blocked: list[dict] = []
+    LightningAddressWallet(
+        "other@pay.example",
+        fetch_json=_fetch(0, blocked),
+        resolver=_resolver(public),
+        network="mainnet",
+        send_comment=True,
+    ).create_invoice(amount_sats=1, memo="satsgate paywall", min_expiry_seconds=60)
+    assert "comment" not in blocked[-1]
+
+
 def test_ssrf_blocks_private_targets_redirects_and_oversized_bodies():
     from app.ssrf import SSRFError, guard_url, is_public_ip, safe_get_json
 

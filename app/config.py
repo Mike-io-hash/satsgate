@@ -32,6 +32,10 @@ LIGHTNING_ADDRESS = os.environ.get("SATSGATE_LIGHTNING_ADDRESS", "").strip()
 # BOLT11 network expected from LNURL-pay providers. mainnet unless a self-hoster opts out.
 LN_NETWORK = os.environ.get("SATSGATE_LN_NETWORK", "mainnet").strip().lower() or "mainnet"
 
+# LUD-12 comment on the LNURL-pay callback. Off by default: some providers (Alby)
+# put the comment in the BOLT11 description and drop description_hash = SHA256(metadata).
+LNURL_SEND_COMMENT = os.environ.get("SATSGATE_LNURL_SEND_COMMENT", "0").strip() == "1"
+
 # Database
 DB_PATH = os.environ.get(
     "SATSGATE_DB_PATH",

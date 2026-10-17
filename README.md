@@ -149,7 +149,7 @@ cp .env.example .env
 - `SATSGATE_LIGHTNING_ADDRESS=user@domain`
 - `SATSGATE_DEV_MODE=0`
 
-The stack pins Caddy at `172.28.0.2` and only trusts forwarded headers from that address. Do not set `SATSGATE_TRUSTED_PROXIES=*` or uvicorn `--forwarded-allow-ips *`.
+The stack pins Caddy at `172.28.0.2` and the app at `172.28.0.3`, and only trusts forwarded headers from Caddy. Do not set `SATSGATE_TRUSTED_PROXIES=*` or uvicorn `--forwarded-allow-ips *`.
 
 3) Start:
 
