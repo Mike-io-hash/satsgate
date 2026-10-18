@@ -2,7 +2,7 @@
 
 A reverse proxy a merchant runs beside an existing HTTP API. The buyer hits the proxy. The proxy sells the request through [satsgate](https://api.satsgate.org) and forwards only a paid request to the origin. The merchant does not write paywall code.
 
-The proxy is version **0.8.0**. It talks to the satsgate core paywall (challenge, verify, status, usage policy, buyer IP). Core is **0.10.0**. Those paywall calls are unchanged.
+The proxy is version **0.8.0**. It talks to the satsgate core paywall (challenge, verify, status, usage policy, buyer IP). Core is **0.11.0**. Those paywall calls are unchanged. The hosted gate is a separate program.
 
 ## Run it
 

@@ -1,18 +1,44 @@
 {$SATSGATE_HOSTNAME} {
-  encode zstd gzip
+	encode zstd gzip
 
-  # Replace any client-supplied forwarded headers with the real peer.
-  # Caddy is the app's trusted proxy, so a public client could set
-  # X-Satsgate-Buyer-Ip and pick any buyer bucket. Drop it here.
-  # When satsgate-proxy should pass the end buyer's IP, give that proxy
-  # its own reverse_proxy block (matched on remote_ip) that does not delete
-  # the header, and keep this block for everyone else. See proxy/README.md.
-  # Hosted api.satsgate.org ignores X-Satsgate-Buyer-Ip unless the proxy's
-  # egress IP is in SATSGATE_TRUSTED_PROXIES.
-  reverse_proxy satsgate:8000 {
-    header_up X-Forwarded-For {remote_host}
-    header_up X-Forwarded-Proto {scheme}
-    header_up X-Real-IP {remote_host}
-    header_up -X-Satsgate-Buyer-Ip
-  }
+	# The gate calls core on the docker network (http://satsgate:8000).
+	# These routes must not be reachable on the public API host.
+	handle /internal/* {
+		header Content-Type application/json
+		respond `{"ok":false,"error":"not_found"}` 404
+	}
+
+	# Replace any client-supplied forwarded headers with the real peer.
+	# Caddy is the app's trusted proxy, so a public client could set
+	# X-Satsgate-Buyer-Ip and pick any buyer bucket. Drop it here.
+	# When satsgate-proxy should pass the end buyer's IP, give that proxy
+	# its own reverse_proxy block (matched on remote_ip) that does not delete
+	# the header, and keep this block for everyone else. See proxy/README.md.
+	# Hosted api.satsgate.org ignores X-Satsgate-Buyer-Ip unless the proxy's
+	# egress IP is in SATSGATE_TRUSTED_PROXIES. The gate container is a
+	# trusted peer on the docker network only. It is not this public host.
+	handle {
+		reverse_proxy satsgate:8000 {
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+			header_up -X-Satsgate-Buyer-Ip
+		}
+	}
 }
+
+# gate.satsgate.org is not active. Uncomment this block only after the DNS
+# record exists and Caddy can obtain a certificate. The gate container has
+# no published port. This block is the only public path to it.
+# Buyer-IP is stripped here too. The gate reads X-Forwarded-For from Caddy
+# and sends X-Satsgate-Buyer-Ip to core itself.
+#
+# gate.satsgate.org {
+# 	encode zstd gzip
+# 	reverse_proxy gate:8000 {
+# 		header_up X-Forwarded-For {remote_host}
+# 		header_up X-Forwarded-Proto {scheme}
+# 		header_up X-Real-IP {remote_host}
+# 		header_up -X-Satsgate-Buyer-Ip
+# 	}
+# }

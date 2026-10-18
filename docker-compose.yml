@@ -9,8 +9,11 @@ services:
       SATSGATE_MACAROON_KEY_ID: ${SATSGATE_MACAROON_KEY_ID:-1}
       SATSGATE_MACAROON_PREVIOUS_KEYS: ${SATSGATE_MACAROON_PREVIOUS_KEYS:-}
       SATSGATE_LN_NETWORK: ${SATSGATE_LN_NETWORK:-mainnet}
-      # Caddy is pinned to 172.28.0.2 on the internal network.
-      SATSGATE_TRUSTED_PROXIES: ${SATSGATE_TRUSTED_PROXIES:-172.28.0.2}
+      # Caddy is 172.28.0.2. The gate container is 172.28.0.4.
+      # Both are trusted for X-Satsgate-Buyer-Ip. Caddy strips that header on
+      # public requests, so a buyer cannot spoof it. The gate sets it itself.
+      # Uvicorn still trusts X-Forwarded-For only from Caddy (the next line).
+      SATSGATE_TRUSTED_PROXIES: ${SATSGATE_TRUSTED_PROXIES:-172.28.0.2,172.28.0.4}
       SATSGATE_FORWARDED_ALLOW_IPS: ${SATSGATE_FORWARDED_ALLOW_IPS:-172.28.0.2}
 
       # Wallet (for topups)
@@ -33,8 +36,20 @@ services:
       SATSGATE_RL_MAX_TOPUP: ${SATSGATE_RL_MAX_TOPUP:-10}
       SATSGATE_RL_MAX_KEYS: ${SATSGATE_RL_MAX_KEYS:-10000}
 
-      # Operator/admin token (optional)
+      # Operator/admin token (optional). Approves sites. Not the gate token.
       SATSGATE_ADMIN_TOKEN: ${SATSGATE_ADMIN_TOKEN:-}
+
+      # Sites registry. Unset keeps current clients working. The secret key is
+      # required before the first site is created (openssl rand -hex 32).
+      SATSGATE_SITE_SECRET_KEY: ${SATSGATE_SITE_SECRET_KEY:-}
+      SATSGATE_SITES_AUTO_APPROVE: ${SATSGATE_SITES_AUTO_APPROVE:-0}
+      SATSGATE_SITES_MAX_PER_ACCOUNT: ${SATSGATE_SITES_MAX_PER_ACCOUNT:-3}
+      SATSGATE_SITES_MAX_ROUTES: ${SATSGATE_SITES_MAX_ROUTES:-20}
+      SATSGATE_GATE_PUBLIC_BASE: ${SATSGATE_GATE_PUBLIC_BASE:-https://gate.satsgate.org}
+      # Shared with the gate service. Unset hides /internal/gate/*.
+      SATSGATE_GATE_TOKEN: ${SATSGATE_GATE_TOKEN:-}
+      # Only the gate container may present that token. Empty would allow any peer.
+      SATSGATE_GATE_PEERS: ${SATSGATE_GATE_PEERS:-172.28.0.4}
 
       # Disable dev endpoints in production
       SATSGATE_DEV_MODE: ${SATSGATE_DEV_MODE:-0}
@@ -56,6 +71,43 @@ services:
       internal:
         # Caddy owns 172.28.0.2. Without a pin the app can claim it first.
         ipv4_address: 172.28.0.3
+
+  gate:
+    build:
+      context: ./gate
+    restart: unless-stopped
+    depends_on:
+      satsgate:
+        condition: service_healthy
+    environment:
+      SATSGATE_GATE_CORE_URL: http://satsgate:8000
+      SATSGATE_GATE_TOKEN: ${SATSGATE_GATE_TOKEN:-}
+      # Caddy is the only public peer. It strips X-Satsgate-Buyer-Ip.
+      SATSGATE_GATE_TRUSTED_PROXIES: ${SATSGATE_GATE_TRUSTED_PROXIES:-172.28.0.2}
+      SATSGATE_GATE_CACHE_SECONDS: ${SATSGATE_GATE_CACHE_SECONDS:-5}
+      SATSGATE_GATE_CORE_TIMEOUT: ${SATSGATE_GATE_CORE_TIMEOUT:-10}
+      SATSGATE_GATE_UPSTREAM_TIMEOUT: ${SATSGATE_GATE_UPSTREAM_TIMEOUT:-15}
+      SATSGATE_GATE_MAX_REQUEST_BYTES: ${SATSGATE_GATE_MAX_REQUEST_BYTES:-1048576}
+      SATSGATE_GATE_MAX_RESPONSE_BYTES: ${SATSGATE_GATE_MAX_RESPONSE_BYTES:-10485760}
+      SATSGATE_GATE_RL_WINDOW_SECONDS: ${SATSGATE_GATE_RL_WINDOW_SECONDS:-60}
+      SATSGATE_GATE_RL_PER_SITE: ${SATSGATE_GATE_RL_PER_SITE:-600}
+      SATSGATE_GATE_RL_PER_BUYER: ${SATSGATE_GATE_RL_PER_BUYER:-60}
+      SATSGATE_GATE_PENDING_RETRY_AFTER: ${SATSGATE_GATE_PENDING_RETRY_AFTER:-2}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      internal:
+        ipv4_address: 172.28.0.4
 
   caddy:
     image: caddy:2

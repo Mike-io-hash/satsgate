@@ -261,6 +261,21 @@ def create_client(db_path: str) -> tuple[str, Client]:
     return api_key, Client(id=client_id, credits=0, payee_lightning_address=None)
 
 
+def get_client_by_id(db_path: str, client_id: int) -> Client | None:
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT id, credits, payee_lightning_address FROM clients WHERE id = ?",
+            (int(client_id),),
+        ).fetchone()
+        if not row:
+            return None
+        return Client(
+            id=int(row["id"]),
+            credits=int(row["credits"]),
+            payee_lightning_address=row["payee_lightning_address"],
+        )
+
+
 def get_client_by_api_key(db_path: str, api_key: str) -> Client | None:
     if not api_key:
         return None
