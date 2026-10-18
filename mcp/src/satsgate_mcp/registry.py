@@ -1,8 +1,12 @@
-"""Site directory: a local JSON file, or GET /v1/sites from satsgate core.
+"""Site directory.
+
+The default is ``GET {SATSGATE_MCP_CORE_URL}/v1/sites`` (approved sites that
+opted in). ``SATSGATE_MCP_REGISTRY``, when set, replaces that with a JSON file
+or another http(s) URL.
 
 A file is ``{"sites": [{"name", "url", "description"}]}``.
 The core directory is the same ``sites`` array plus ``hosted_registry: true``,
-``slug``, ``routes``, and ``next_cursor``. This reader keeps both.
+``slug``, ``url`` (the public gate URL), ``routes``, and ``next_cursor``.
 """
 
 from __future__ import annotations
@@ -19,6 +23,15 @@ from satsgate_mcp.urls import UrlError, validate_url
 
 _CURSOR = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$")
 _MAX_PAGES = 5
+_REGISTRY_TIMEOUT = 5.0
+_PUBLIC_DETAIL = (
+    "Approved, listed sites from the public Satsgate directory. "
+    "Unlisted and unapproved sites are not included."
+)
+_OVERRIDE_DETAIL = (
+    "This list comes from SATSGATE_MCP_REGISTRY. "
+    "Unset it to read the public directory."
+)
 
 
 class RegistryError(ValueError):
@@ -28,8 +41,22 @@ class RegistryError(ValueError):
         self.message = message
 
 
+def _hidden(item: dict) -> bool:
+    """Drop a row the public directory must not show.
+
+    ``GET /v1/sites`` already omits these. A row that still carries ``status``
+    other than ``approved``, or ``listed`` other than true, is skipped. A
+    local file that does not set either field is unchanged.
+    """
+    if "status" in item and item.get("status") != "approved":
+        return True
+    if "listed" in item and item.get("listed") not in (True, 1):
+        return True
+    return False
+
+
 def _one_site(item: object, allowlist: tuple[str, ...]) -> dict | None:
-    if not isinstance(item, dict):
+    if not isinstance(item, dict) or _hidden(item):
         return None
     name = item.get("name")
     if not isinstance(name, str) or not name.strip():
@@ -75,7 +102,7 @@ def _one_site(item: object, allowlist: tuple[str, ...]) -> dict | None:
     return entry
 
 
-def _sites(payload: object, allowlist: tuple[str, ...]) -> dict:
+def _sites(payload: object, allowlist: tuple[str, ...], *, override: bool) -> dict:
     if not isinstance(payload, dict) or not isinstance(payload.get("sites"), list):
         raise RegistryError("invalid_registry", "Registry JSON needs an object with a sites array.")
     hosted = payload.get("hosted_registry") is True
@@ -87,10 +114,7 @@ def _sites(payload: object, allowlist: tuple[str, ...]) -> dict:
             skipped += 1
             continue
         sites.append(parsed)
-    if hosted:
-        detail = "Approved sites that opted into the public Satsgate directory."
-    else:
-        detail = "This is a local file or URL. Set SATSGATE_MCP_REGISTRY to https://api.satsgate.org/v1/sites for the hosted directory."
+    detail = _OVERRIDE_DETAIL if override and not hosted else _PUBLIC_DETAIL
     return {
         "ok": True,
         "hosted_registry": hosted,
@@ -107,54 +131,75 @@ def _with_cursor(url: str, cursor: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
 
 
-def load_registry_text(text: str, allowlist: tuple[str, ...]) -> dict:
+def load_registry_text(text: str, allowlist: tuple[str, ...], *, override: bool) -> dict:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
         raise RegistryError("invalid_registry", "Registry file is not JSON.") from exc
-    return _sites(payload, allowlist)
+    return _sites(payload, allowlist, override=override)
+
+
+def _registry_timeout(settings: Settings) -> float:
+    return min(float(settings.timeout), _REGISTRY_TIMEOUT)
+
+
+def _response_text(response: httpx.Response) -> str:
+    try:
+        return response.content[: 256 * 1024].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RegistryError("invalid_registry", "The site directory response was not UTF-8 JSON.") from exc
+
+
+def _next_cursor(text: str) -> str:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return ""
+    if isinstance(payload, dict) and isinstance(payload.get("next_cursor"), str):
+        if _CURSOR.fullmatch(payload["next_cursor"]):
+            return payload["next_cursor"]
+    return ""
+
+
+async def _fetch_text(client: httpx.AsyncClient, url: str, timeout: float) -> str:
+    try:
+        response = await client.get(url, timeout=timeout)
+    except httpx.TimeoutException as exc:
+        raise RegistryError("registry_unavailable", "The site directory did not respond in time.") from exc
+    except httpx.HTTPError as exc:
+        raise RegistryError("registry_unavailable", "The site directory could not be reached.") from exc
+    if response.status_code != 200:
+        raise RegistryError(
+            "registry_unavailable",
+            f"The site directory returned HTTP {response.status_code}.",
+        )
+    return _response_text(response)
 
 
 async def load_registry(settings: Settings, client: httpx.AsyncClient) -> dict:
-    raw = settings.registry
-    if not raw:
-        return {
-            "ok": False,
-            "error": "registry_not_configured",
-            "hosted_registry": False,
-            "detail": (
-                "SATSGATE_MCP_REGISTRY is unset. Point it at a JSON file or an http(s) URL. "
-                "A hosted Satsgate registry is not available yet."
-            ),
-            "sites": [],
-        }
+    raw = settings.registry.strip()
+    override = bool(raw)
+    if not override:
+        raw = settings.core_url.rstrip("/") + "/v1/sites"
     if raw.startswith("http://") or raw.startswith("https://"):
         url = validate_url(raw, settings.allowlist)
+        timeout = _registry_timeout(settings)
         collected: list[dict] = []
         skipped = 0
         hosted = False
         cursor = ""
         for _page in range(_MAX_PAGES):
             target = _with_cursor(url, cursor) if cursor else url
-            response = await client.get(target)
-            if response.status_code != 200:
-                raise RegistryError("registry_unavailable", f"Registry URL returned HTTP {response.status_code}.")
-            page = load_registry_text(response.content[: 256 * 1024].decode("utf-8"), settings.allowlist)
+            text = await _fetch_text(client, target, timeout)
+            page = load_registry_text(text, settings.allowlist, override=override)
             hosted = hosted or bool(page["hosted_registry"])
             collected.extend(page["sites"])
             skipped += int(page["skipped"])
-            nxt = ""
-            try:
-                payload = json.loads(response.content[: 256 * 1024].decode("utf-8"))
-            except json.JSONDecodeError:
-                payload = None
-            if isinstance(payload, dict) and isinstance(payload.get("next_cursor"), str):
-                if _CURSOR.fullmatch(payload["next_cursor"]):
-                    nxt = payload["next_cursor"]
+            nxt = _next_cursor(text)
             if not nxt or nxt == cursor:
                 break
             cursor = nxt
-        detail = page["detail"]
+        detail = _OVERRIDE_DETAIL if override and not hosted else _PUBLIC_DETAIL
         return {
             "ok": True,
             "hosted_registry": hosted,
@@ -167,5 +212,8 @@ async def load_registry(settings: Settings, client: httpx.AsyncClient) -> dict:
     path = Path(raw).expanduser()
     if not path.is_file():
         raise RegistryError("invalid_registry", "SATSGATE_MCP_REGISTRY is not a file.")
-    text = path.read_text(encoding="utf-8")[: 256 * 1024]
-    return load_registry_text(text, settings.allowlist)
+    try:
+        text = path.read_text(encoding="utf-8")[: 256 * 1024]
+    except OSError as exc:
+        raise RegistryError("invalid_registry", "SATSGATE_MCP_REGISTRY could not be read.") from exc
+    return load_registry_text(text, settings.allowlist, override=True)

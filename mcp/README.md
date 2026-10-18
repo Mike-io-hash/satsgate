@@ -2,9 +2,9 @@
 
 A buyer-side MCP server. An agent (Claude Desktop, Cursor, or any stdio MCP client) can see the price of a Satsgate-paywalled URL, pay it, and read the response.
 
-This package is version **0.9.1**. It talks to whatever URL returned the 402. Core is **0.11.0**. The self-hosted proxy stays **0.8.0**. The hosted gate speaks the same 402.
+This package is version **0.10.0**. It talks to whatever URL returned the 402. Core is **0.11.0**. The self-hosted proxy stays **0.8.0**. The hosted gate speaks the same 402.
 
-`list_sites` reads `SATSGATE_MCP_REGISTRY` when set. That can be a JSON file or `GET /v1/sites` on core (approved sites that opted in).
+`list_sites` reads `GET /v1/sites` on `SATSGATE_MCP_CORE_URL` (default `https://api.satsgate.org`). That is the public directory: approved sites that opted in. Set `SATSGATE_MCP_REGISTRY` only to replace it with a JSON file or another URL.
 
 ## Run it
 
@@ -49,7 +49,7 @@ Put `SATSGATE_MCP_NWC_URI` in that env block when you want the agent to pay. Do 
 | `check_payment` | One poll of a human payment. `payment_pending` means call it again after `retry_after_seconds`. On settlement it fetches the URL with `Authorization: L402 <macaroon>` and no preimage. |
 | `credits_balance` | `GET /v1/balance` with the optional restricted key. Core answers 403 `insufficient_scope` for an `sgr_` key. Nothing is written. |
 | `challenge_status` | `GET /v1/paywall/status/{payment_hash}?consume=false`. The macaroon is the one stored locally. It is not a tool argument. |
-| `list_sites` | Reads `SATSGATE_MCP_REGISTRY`: a JSON file, or core `GET /v1/sites`. |
+| `list_sites` | Approved, listed sites from `GET /v1/sites`. A file or other URL in `SATSGATE_MCP_REGISTRY` replaces that. |
 
 A token that still has uses, or whose pass has not ended, is sent again and is not paid again. The macaroon stays in the local sqlite file. It is not returned to the model.
 
@@ -87,7 +87,7 @@ If the payee wallet does not advertise LUD-21 (Wallet of Satoshi), core returns 
 | `SATSGATE_MCP_URL_ALLOWLIST` | Comma-separated hosts. `*.example.com` allows subdomains. Empty allows any http(s) host. |
 | `SATSGATE_MCP_HTTP_TIMEOUT` | Seconds, default 20. |
 | `SATSGATE_MCP_MAX_BODY_BYTES` | Response cap, default 1000000. |
-| `SATSGATE_MCP_REGISTRY` | JSON file or http(s) URL. See `registry.example.json`. |
+| `SATSGATE_MCP_REGISTRY` | Optional. A JSON file or http(s) URL that replaces the public directory. Unset uses `{SATSGATE_MCP_CORE_URL}/v1/sites`. |
 
 Only `http` and `https` URLs are requested. Userinfo is rejected. Redirects are not followed. Requests time out.
 
@@ -101,7 +101,11 @@ Only `http` and `https` URLs are requested. Userinfo is rejected. Redirects are 
 }
 ```
 
-A file stays a local list. For the hosted directory, set `SATSGATE_MCP_REGISTRY` to `https://api.satsgate.org/v1/sites`. That response uses `hosted_registry: true`, `slug`, `routes`, and `next_cursor`. `list_sites` follows up to five pages. The gate host itself is not serving traffic yet.
+Leave `SATSGATE_MCP_REGISTRY` unset to use the public directory. The response uses `hosted_registry: true`, `slug`, `url` (the gate URL, `https://gate.satsgate.org/<slug>/` when that is the configured public base), `description`, and `routes` with `price_sats`, `max_uses`, and `access_seconds`. `list_sites` follows up to five pages. Each request waits at most 5 seconds, and never longer than `SATSGATE_MCP_HTTP_TIMEOUT`. A timeout, a connection failure, or a non-200 body returns `ok: false` and an empty `sites` list. It does not raise.
+
+A row that includes `status` other than `approved`, or `listed` other than true, is skipped. The public endpoint does not return those rows. A local file that omits both fields is your own list.
+
+If `SATSGATE_MCP_URL_ALLOWLIST` is set, the directory host has to be on it. The default host is the host of `SATSGATE_MCP_CORE_URL`.
 
 ## Mainnet check from your machine
 
