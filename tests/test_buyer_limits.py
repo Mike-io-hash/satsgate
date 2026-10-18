@@ -613,7 +613,7 @@ def test_migration_adds_the_hash_column_and_leaves_old_rows_unlimited(tmp_path):
     assert "idx_challenges_buyer" in indexes
 
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.7.0"
+        assert http.get("/health").json()["version"] == "0.10.0"
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})
         assert balance.status_code == 200
         assert balance.json()["credits"] == 7

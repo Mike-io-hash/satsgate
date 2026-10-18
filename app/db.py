@@ -191,6 +191,47 @@ def init_db(db_path: str) -> None:
             """
         )
 
+        # Hosted-proxy registry. New tables only. Existing tables are not altered here.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sites (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              client_id INTEGER NOT NULL,
+              slug TEXT NOT NULL UNIQUE,
+              display_name TEXT NOT NULL,
+              description TEXT,
+              origin_url TEXT NOT NULL,
+              status TEXT NOT NULL,
+              listed INTEGER NOT NULL DEFAULT 0,
+              origin_secret_ciphertext TEXT NOT NULL,
+              secret_fingerprint TEXT NOT NULL,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL,
+              approved_at INTEGER,
+              FOREIGN KEY(client_id) REFERENCES clients(id)
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS site_routes (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              site_id INTEGER NOT NULL,
+              path_pattern TEXT NOT NULL,
+              price_sats INTEGER NOT NULL,
+              max_uses INTEGER,
+              access_seconds INTEGER,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL,
+              UNIQUE(site_id, path_pattern),
+              FOREIGN KEY(site_id) REFERENCES sites(id) ON DELETE CASCADE
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sites_client ON sites(client_id, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sites_public ON sites(status, listed, slug)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_site_routes_site ON site_routes(site_id, id)")
+
 
 def hash_api_key(api_key: str) -> str:
     return hashlib.sha256(api_key.encode("utf-8")).hexdigest()

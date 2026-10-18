@@ -123,6 +123,10 @@ FastAPI examples:
 - Minimal: `sdk/python/examples/fastapi_demo/main.py`
 - Reference integration: `sdk/python/examples/fastapi_reference/`
 
+## Hosted gate, not live yet
+
+Core 0.10.0 can store a site (slug, origin, price, usage policy) for a later hosted proxy at `https://gate.satsgate.org/<slug>/...`. That proxy is not running. Registering a site does not change challenge, verify, or status. Leave it alone until you are in the closed beta. Details are in the README section "Hosted sites (closed beta)".
+
 ## Usage & automation
 
 - Forecast + recommended purchase + top-up trigger:
