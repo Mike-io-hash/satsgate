@@ -116,6 +116,8 @@ def _load_app(tmp_path: Path, **env: str):
         "SATSGATE_ADMIN_TOKEN": "test-admin-token",
         "SATSGATE_TRUSTED_PROXIES": "",
         "SATSGATE_LN_NETWORK": "mainnet",
+        "SATSGATE_GATE_TOKEN": "",
+        "SATSGATE_GATE_PEERS": "",
     }
     base.update(env)
     for key, value in base.items():
@@ -730,7 +732,7 @@ def test_migration_from_a_v05_database_keeps_unlimited_grants(tmp_path):
     assert debits == 1
 
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.10.0"
+        assert http.get("/health").json()["version"] == "0.11.0"
         assert _balance(http, legacy_key) == 9
         fresh = _challenge(http, legacy_key, resource="old/new")
         assert fresh["max_uses"] is None

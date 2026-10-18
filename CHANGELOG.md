@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-18
+
+### Added
+- `satsgate-gate` 0.11.0, a separate container that serves `https://gate.satsgate.org/<slug>/<path>` for an approved site. It reads that site from core over an internal HTTP API (`SATSGATE_GATE_TOKEN`), not by opening the sqlite file. The response for one approved site includes that site's decrypted origin secret. Pending, disabled, and unknown slugs are the same HTTP 404. The gate caches the site for a few seconds (`SATSGATE_GATE_CACHE_SECONDS`, default 5) and checks status on every request, so a disable takes effect on the next request.
+- Charging uses the existing challenge, status, and verify functions on the site owner's account. Credits come from the owner. The invoice is paid to the owner's Lightning Address. The route's price and usage policy are copied onto the challenge. The resource is `gate:<slug>:<path>`. The buyer sees the same L402 402 as the self-hosted proxy, including the no-preimage poll and a fresh 402 when the grant is used up. `X-Satsgate-Buyer-Ip` is sent by the gate. Core honors it only from the gate container.
+- Forwarding signs `X-Satsgate-Signature` with the same HMAC scheme as satsgate-proxy 0.8.0. L402 `Authorization`, hop-by-hop headers, and client `X-Satsgate-*` headers are removed. The origin is https only. Redirects are not followed, including same-origin redirects. The body is read in chunks up to a cap and is not stored. Responses set `Cache-Control: no-store`. Each forward resolves DNS again and connects to that public IP, so a later private answer (DNS rebinding) is not used. Private, loopback, link-local, CGNAT, and metadata addresses are rejected.
+- Docker Compose passes `SATSGATE_SITE_SECRET_KEY`, `SATSGATE_SITES_AUTO_APPROVE`, `SATSGATE_SITES_MAX_PER_ACCOUNT`, `SATSGATE_SITES_MAX_ROUTES`, and `SATSGATE_GATE_PUBLIC_BASE` into the core service. A local override file is no longer required for those five. The `gate` service has no published port. The Caddyfile rejects `/internal/*` on the API host and includes a commented site block for `gate.satsgate.org`. Both blocks strip `X-Satsgate-Buyer-Ip`.
+
+`GET /health` reports `0.11.0`. `GET /healthz` on the gate reports `0.11.0`. The self-hosted proxy stays 0.8.0. satsgate-mcp stays 0.9.1. The public paywall, top-up, and site registry routes behave as in 0.10.0. Internal routes answer 404 until `SATSGATE_GATE_TOKEN` is set. The gate hostname is not served until its Caddy block is uncommented.
+
+No database migration. Startup does not alter existing tables.
+
 ## [0.10.0] - 2026-10-18
 
 ### Added

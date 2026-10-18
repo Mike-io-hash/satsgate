@@ -49,6 +49,8 @@ def _load_app(tmp_path: Path, **env: str):
         "SATSGATE_RL_MAX_CHALLENGE": "30",
         "SATSGATE_RL_MAX_TOPUP": "10",
         "SATSGATE_RL_MAX_KEYS": "10000",
+        "SATSGATE_GATE_TOKEN": "",
+        "SATSGATE_GATE_PEERS": "",
     }
     base.update(env)
     for key, value in base.items():
@@ -320,7 +322,7 @@ def test_health_does_not_leak_internals(client):
     body = response.json()
     assert set(body) == {"ok", "version"}
     assert body["ok"] is True
-    assert body["version"] == "0.10.0"
+    assert body["version"] == "0.11.0"
     serialized = json.dumps(body).lower()
     assert "sqlite" not in serialized
     assert "db_path" not in serialized
@@ -997,6 +999,17 @@ def _run_config(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
                 "SATSGATE_TRUSTED_PROXIES": "*",
             },
             "TRUSTED_PROXIES",
+        ),
+        (
+            {
+                "SATSGATE_ENV": "production",
+                "SATSGATE_MACAROON_SECRET": "ab" * 32,
+                "SATSGATE_DEV_MODE": "0",
+                "SATSGATE_WALLET_MODE": "lnaddr",
+                "SATSGATE_LIGHTNING_ADDRESS": "ops@example.com",
+                "SATSGATE_GATE_TOKEN": "too-short",
+            },
+            "SATSGATE_GATE_TOKEN",
         ),
     ],
 )
@@ -2202,6 +2215,8 @@ def test_public_openapi_hides_dev_and_admin_routes(tmp_path):
         assert "/v1/tickets" not in paths
         assert "/v1/spend" not in paths
         assert "/dev/mock/pay/{payment_hash}" not in paths
+        assert "/internal/gate/sites/{slug}" not in paths
+        assert "/internal/gate/challenge" not in paths
         # The admin route still answers; it is only absent from the public document.
         hidden = http.get("/v1/admin/overview", headers={"X-Admin-Token": "prod-admin-token"})
         assert hidden.status_code == 200

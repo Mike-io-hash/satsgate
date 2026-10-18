@@ -114,6 +114,8 @@ def _load_app(tmp_path: Path, **env: str):
         "SATSGATE_ADMIN_TOKEN": "test-admin-token",
         "SATSGATE_TRUSTED_PROXIES": "",
         "SATSGATE_LN_NETWORK": "mainnet",
+        "SATSGATE_GATE_TOKEN": "",
+        "SATSGATE_GATE_PEERS": "",
     }
     base.update(env)
     for key, value in base.items():
@@ -528,7 +530,7 @@ def test_migration_on_an_existing_database(tmp_path):
     assert old_challenge == ("old/resource", None)
 
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.10.0"
+        assert http.get("/health").json()["version"] == "0.11.0"
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})
         assert balance.status_code == 200
         assert balance.json()["credits"] == 42

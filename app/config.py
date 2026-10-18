@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 # Load env vars from .env if present. Existing process env wins.
 load_dotenv()
 
-APP_VERSION = "0.10.0"
+APP_VERSION = "0.11.0"
 
 # production is the safe default. Local mock/dev only runs when this is explicit.
 SATSGATE_ENV = os.environ.get("SATSGATE_ENV", "production").strip().lower() or "production"
@@ -179,6 +179,14 @@ def _gate_public_base() -> str:
 
 GATE_PUBLIC_BASE = _gate_public_base()
 
+# Shared secret for the hosted gate process. Unset means the internal routes
+# answer 404, so a deploy that has not turned the gate on does not expose them.
+# SATSGATE_GATE_PEERS, when set, also requires the TCP peer to be that address.
+# Empty means the token alone is enough (tests, and a core that is not on the
+# compose network). Compose pins this to the gate container.
+GATE_TOKEN = os.environ.get("SATSGATE_GATE_TOKEN", "").strip()
+GATE_PEERS = os.environ.get("SATSGATE_GATE_PEERS", "").strip()
+
 
 def site_secret_key() -> bytes | None:
     """32-byte key for origin-secret ciphertext. None when the env var is unset."""
@@ -262,8 +270,16 @@ def validate_startup() -> None:
         raise RuntimeError(
             "SATSGATE_TRUSTED_PROXIES must list specific proxy IPs or CIDRs, not '*' or the whole internet"
         )
+    if any(part.strip() in _FORBIDDEN_PROXY_VALUES for part in GATE_PEERS.split(",") if part.strip()):
+        raise RuntimeError("SATSGATE_GATE_PEERS must list specific proxy IPs or CIDRs, not '*' or the whole internet")
     # A malformed key fails boot. An unset key does not: current clients keep working.
     site_secret_key()
+    if GATE_TOKEN and not is_local_env():
+        why = _secret_is_weak(GATE_TOKEN)
+        if why:
+            raise RuntimeError(
+                f"Refusing to start: SATSGATE_GATE_TOKEN is {why}. Generate one with: openssl rand -hex 32"
+            )
 
     keys = signing_keys()
     if is_local_env():

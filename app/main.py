@@ -20,6 +20,7 @@ from . import db_verify
 from . import ssrf
 from . import wallet_lnaddr
 from .admin import router as admin_router
+from .internal_gate import router as internal_gate_router
 from .client_ip import buyer_ip_from_trusted_proxy, hash_buyer_ip, resolve_client_ip
 from .invoices import InvoiceValidationError, bolt11_expiry_unix
 from .l402 import (
@@ -52,6 +53,7 @@ async def _lifespan(_app: FastAPI):
 app = FastAPI(title="satsgate", version=config.APP_VERSION, lifespan=_lifespan)
 
 app.include_router(admin_router)
+app.include_router(internal_gate_router)
 
 
 def _get_wallet() -> Any:
@@ -1645,6 +1647,20 @@ def v1_paywall_challenge(
     auth = _paywall_principal(x_api_key, body.resource)
     if isinstance(auth, JSONResponse):
         return auth
+    return _issue_paywall_challenge(body, request, auth, x_satsgate_buyer_ip)
+
+
+def _issue_paywall_challenge(
+    body: PaywallChallengeIn,
+    request: Request,
+    auth: db_keys.Principal,
+    x_satsgate_buyer_ip: str | None,
+):
+    """Create a challenge for a principal the caller already authenticated.
+
+    The public route checks the API key. The internal gate builds an account
+    principal for the site owner, with no payee override, and calls this.
+    """
     if body.access_seconds is not None and int(body.access_seconds) > int(config.PAYWALL_ACCESS_CAP_SECONDS):
         return JSONResponse(
             status_code=400,

@@ -114,6 +114,8 @@ def _load_app(tmp_path: Path, **env: str):
         "SATSGATE_ADMIN_TOKEN": "test-admin-token",
         "SATSGATE_TRUSTED_PROXIES": "",
         "SATSGATE_LN_NETWORK": "mainnet",
+        "SATSGATE_GATE_TOKEN": "",
+        "SATSGATE_GATE_PEERS": "",
         "SATSGATE_BUYER_CHALLENGE_MAX": "10",
         "SATSGATE_BUYER_MAX_OPEN_CHALLENGES": "5",
         "SATSGATE_CHALLENGE_REUSE_SECONDS": "30",
@@ -613,7 +615,7 @@ def test_migration_adds_the_hash_column_and_leaves_old_rows_unlimited(tmp_path):
     assert "idx_challenges_buyer" in indexes
 
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.10.0"
+        assert http.get("/health").json()["version"] == "0.11.0"
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})
         assert balance.status_code == 200
         assert balance.json()["credits"] == 7

@@ -1,8 +1,8 @@
 """Sites and routes for the hosted proxy beta.
 
 Registration checks the origin once. A name can be pointed at a private
-address later (DNS rebinding). The proxy in step 2 must run this same check
-again on every forward and connect to the public address it just resolved.
+address later (DNS rebinding). The gate resolves again on every forward and
+connects to the public address from that lookup.
 """
 
 from __future__ import annotations
@@ -209,7 +209,7 @@ def _ip_trick(host: str) -> bool:
 def validate_origin_url(url: str, *, resolver=None) -> str:
     """https origin with a public address. Query, fragment, and userinfo are rejected.
 
-    DNS is resolved now. Step 2 must resolve again at request time.
+    DNS is resolved now. The gate resolves again on every forward.
     """
     raw = (url or "").strip()
     if not raw or _has_controls(raw) or any(ch in raw for ch in " \t"):
@@ -264,8 +264,23 @@ def _new_origin_secret() -> tuple[str, str, str]:
     return secret, blob, fingerprint_origin_secret(secret)
 
 
+def get_site_by_slug(db_path: str, slug: str) -> dict | None:
+    """Site row plus routes. Includes client_id. Does not include the origin secret."""
+    try:
+        slug = clean_slug(slug)
+    except ValueError:
+        return None
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT * FROM sites WHERE slug = ?", (slug,)).fetchone()
+        if row is None:
+            return None
+        public = _site_owner(row, _routes_for(conn, int(row["id"])))
+        public["client_id"] = int(row["client_id"])
+    return public
+
+
 def load_origin_secret(db_path: str, *, site_id: int) -> str:
-    """In-process read for the future proxy. No HTTP route calls this."""
+    """Decrypt one site's origin secret. The internal gate route is the HTTP caller."""
     key = config.site_secret_key()
     if key is None:
         raise ValueError("site_secret_key_unconfigured")
