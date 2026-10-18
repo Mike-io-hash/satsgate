@@ -465,6 +465,85 @@ def test_macaroon_only_poll_then_forwards(tmp_path, monkeypatch):
             _close(core_client, origin_client)
 
 
+@pytest.mark.parametrize(
+    ("max_uses", "access_seconds", "reason", "expire"),
+    [
+        (1, None, "token_used_up", False),
+        (None, 60, "token_expired", True),
+    ],
+)
+def test_macaroon_only_spent_grant_is_a_fresh_402(
+    tmp_path, monkeypatch, max_uses, access_seconds, reason, expire
+):
+    """A second ``L402 <macaroon>`` (no preimage) is a new 402, not another forward.
+
+    Core status for that macaroon is HTTP 401 with ``settled: true`` and
+    ``error`` ``token_used_up`` or ``token_expired``. The buyer body keeps
+    ``error`` ``payment_required``, the same field the proxy uses, and copies
+    the core code into ``reason`` with a new invoice.
+    """
+    module = _load_app(tmp_path)
+    _patch_dns(monkeypatch, module)
+    from app.invoices import InvoiceValidationError
+
+    state = {"settled": False}
+
+    def confirm_lud21(**_kwargs):
+        if not state["settled"]:
+            raise InvoiceValidationError("lud21_not_settled")
+
+    monkeypatch.setattr(module.wallet_lnaddr, "confirm_lud21", confirm_lud21)
+    origin = Origin()
+    settings = _settings()
+    with TestClient(module.app) as core:
+        _prepare(core, max_uses=max_uses, access_seconds=access_seconds)
+        gate, core_client, origin_client = _open_gate(module.app, settings, origin)
+        try:
+            with gate as http:
+                challenge = http.get("/my-shop/blog/post")
+                assert challenge.status_code == 402, challenge.text
+                body = challenge.json()
+                assert body["max_uses"] == max_uses
+                assert body["access_seconds"] == access_seconds
+                with sqlite3.connect(os.environ["SATSGATE_DB_PATH"]) as conn:
+                    conn.execute(
+                        "UPDATE paywall_challenges SET verify_url = ? WHERE payment_hash = ?",
+                        ("https://verify.example/v", body["payment_hash"]),
+                    )
+                state["settled"] = True
+                paid = http.get("/my-shop/blog/post", headers=_auth(body["macaroon"]))
+                assert paid.status_code == 200, paid.text
+                assert len(origin.requests) == 1
+                if expire:
+                    with sqlite3.connect(os.environ["SATSGATE_DB_PATH"]) as conn:
+                        conn.execute(
+                            "UPDATE paywall_challenges SET access_until = ? WHERE payment_hash = ?",
+                            (1, body["payment_hash"]),
+                        )
+                core_status = core.get(
+                    f"/internal/gate/status/{body['payment_hash']}",
+                    params={"slug": "my-shop", "path": "/blog/post", "consume": "true"},
+                    headers={"X-Satsgate-Gate-Token": _GATE_TOKEN, **_auth(body["macaroon"])},
+                )
+                assert core_status.status_code == 401, core_status.text
+                assert core_status.json()["error"] == reason
+                assert core_status.json()["settled"] is True
+                again = http.get("/my-shop/blog/post", headers=_auth(body["macaroon"]))
+                assert again.status_code == 402, again.text
+                quoted = again.json()
+                assert quoted["error"] == "payment_required"
+                assert quoted["reason"] == reason
+                assert quoted["invoice"]
+                assert quoted["invoice"] != body["invoice"]
+                assert quoted["payment_hash"] != body["payment_hash"]
+                assert quoted["macaroon"] != body["macaroon"]
+                assert quoted["invoice"] in again.headers["www-authenticate"]
+                assert again.headers["www-authenticate"].startswith('L402 macaroon="')
+                assert len(origin.requests) == 1
+        finally:
+            _close(core_client, origin_client)
+
+
 def test_owner_without_credits_does_not_call_the_origin(tmp_path, monkeypatch):
     module = _load_app(tmp_path)
     _patch_dns(monkeypatch, module)
