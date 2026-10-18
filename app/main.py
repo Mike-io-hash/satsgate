@@ -15,6 +15,7 @@ from . import db
 from . import db_clients
 from . import db_keys
 from . import db_reports
+from . import db_sites
 from . import db_verify
 from . import ssrf
 from . import wallet_lnaddr
@@ -110,14 +111,17 @@ def _authenticate(x_api_key: str | None) -> db_keys.Principal | JSONResponse:
 
 
 def _insufficient_scope(scope: str) -> JSONResponse:
+    if scope == db_keys.SCOPE_PAYWALL:
+        detail = "This API key can only create paywall challenges, check their status, and verify them."
+    elif scope == db_keys.SCOPE_SITES_READ:
+        detail = "This API key can only read this account's sites."
+    elif scope == db_keys.SCOPE_SITES_WRITE:
+        detail = "This API key can manage this account's sites, not the paywall or the account."
+    else:
+        detail = "This API key does not allow that call."
     return JSONResponse(
         status_code=403,
-        content={
-            "ok": False,
-            "error": "insufficient_scope",
-            "scope": scope,
-            "detail": "This API key can only create paywall challenges, check their status, and verify them.",
-        },
+        content={"ok": False, "error": "insufficient_scope", "scope": scope, "detail": detail},
     )
 
 
@@ -136,6 +140,8 @@ def _paywall_principal(x_api_key: str | None, resource: str) -> db_keys.Principa
     auth = _authenticate(x_api_key)
     if isinstance(auth, JSONResponse):
         return auth
+    if auth.scope not in {db_keys.SCOPE_ACCOUNT, db_keys.SCOPE_PAYWALL}:
+        return _insufficient_scope(auth.scope)
     prefix = auth.resource_prefix
     if prefix and not resource.startswith(prefix):
         return JSONResponse(
@@ -306,6 +312,14 @@ def well_known_satsgate(request: Request) -> dict:
                 "api_keys_create": {"method": "POST", "path": "/v1/api-keys"},
                 "api_keys_list": {"method": "GET", "path": "/v1/api-keys"},
                 "api_keys_revoke": {"method": "POST", "path": "/v1/api-keys/{key_id}/revoke"},
+                "sites_public": {"method": "GET", "path": "/v1/sites"},
+                "sites_create": {"method": "POST", "path": "/v1/sites"},
+                "sites_mine": {"method": "GET", "path": "/v1/sites/mine"},
+                "sites_get": {"method": "GET", "path": "/v1/sites/{slug}"},
+                "sites_update": {"method": "PATCH", "path": "/v1/sites/{slug}"},
+                "sites_delete": {"method": "DELETE", "path": "/v1/sites/{slug}"},
+                "sites_rotate_secret": {"method": "POST", "path": "/v1/sites/{slug}/rotate-secret"},
+                "site_routes_create": {"method": "POST", "path": "/v1/sites/{slug}/routes"},
                 "paywall_challenge": {"method": "POST", "path": "/v1/paywall/challenge"},
                 "paywall_verify": {"method": "POST", "path": "/v1/paywall/verify"},
                 "paywall_status": {"method": "GET", "path": "/v1/paywall/status/{payment_hash}"},
@@ -604,6 +618,11 @@ def v1_client_set_payee(
 
 class ApiKeyCreateIn(BaseModel):
     label: str = Field(..., min_length=1, max_length=64)
+    scope: str = Field(
+        default=db_keys.SCOPE_PAYWALL,
+        max_length=32,
+        description="paywall (default), sites:read, or sites:write. Omit it to keep a paywall key.",
+    )
     resource_prefix: str | None = Field(
         default=None,
         max_length=200,
@@ -629,6 +648,7 @@ def v1_api_keys_create(
             client_id=client.id,
             label=body.label,
             resource_prefix=body.resource_prefix,
+            scope=body.scope,
         )
     except ValueError as exc:
         code = str(exc)
@@ -673,6 +693,260 @@ def v1_api_keys_revoke(
     if revoked is None:
         return JSONResponse(status_code=404, content={"ok": False, "error": "api_key_not_found"})
     return {"ok": True, "key": revoked}
+
+
+def _sites_caller(x_api_key: str | None, *, write: bool) -> db_keys.Principal | JSONResponse:
+    auth = _authenticate(x_api_key)
+    if isinstance(auth, JSONResponse):
+        return auth
+    allowed = {db_keys.SCOPE_ACCOUNT, db_keys.SCOPE_SITES_WRITE}
+    if not write:
+        allowed.add(db_keys.SCOPE_SITES_READ)
+    if auth.scope not in allowed:
+        return _insufficient_scope(auth.scope)
+    return auth
+
+
+def _sites_error(exc: Exception) -> JSONResponse:
+    code = getattr(exc, "code", None) or str(exc)
+    if code in {"slug_taken", "route_exists", "site_limit", "route_limit"}:
+        status = 409
+    elif code == "site_secret_key_unconfigured":
+        status = 503
+    else:
+        status = 400
+    return JSONResponse(status_code=status, content={"ok": False, "error": code})
+
+
+class SiteCreateIn(BaseModel):
+    slug: str = Field(..., min_length=3, max_length=40)
+    display_name: str = Field(..., min_length=1, max_length=80)
+    description: str | None = Field(default=None, max_length=300)
+    origin_url: str = Field(..., min_length=8, max_length=300)
+    listed: bool = False
+
+
+class SiteUpdateIn(BaseModel):
+    display_name: str | None = Field(default=None, max_length=80)
+    description: str | None = Field(default=None, max_length=300)
+    origin_url: str | None = Field(default=None, max_length=300)
+    listed: bool | None = None
+
+
+class RouteCreateIn(BaseModel):
+    path: str = Field(..., min_length=1, max_length=200)
+    price_sats: int = Field(..., ge=1, le=10_000_000)
+    max_uses: int | None = Field(default=None, ge=1, le=config.MAX_PAYWALL_USES)
+    access_seconds: int | None = Field(default=None, ge=1, le=config._MAX_PAYWALL_ACCESS_CAP_SECONDS)
+
+
+class RouteUpdateIn(BaseModel):
+    path: str | None = Field(default=None, max_length=200)
+    price_sats: int | None = Field(default=None, ge=1, le=10_000_000)
+    max_uses: int | None = Field(default=None, ge=1, le=config.MAX_PAYWALL_USES)
+    access_seconds: int | None = Field(default=None, ge=1, le=config._MAX_PAYWALL_ACCESS_CAP_SECONDS)
+
+
+def _without_secret(site: dict) -> dict:
+    view = dict(site)
+    view.pop("origin_secret", None)
+    return view
+
+
+@app.get("/v1/sites")
+def v1_sites_public(limit: int = 20, cursor: str | None = None):
+    """Approved sites that opted in. No owner, origin, or secret."""
+    try:
+        return db_sites.list_public_sites(config.DB_PATH, limit=int(limit), cursor=cursor)
+    except ValueError as exc:
+        return _sites_error(exc)
+
+
+@app.get("/v1/sites/mine")
+def v1_sites_mine(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
+    auth = _sites_caller(x_api_key, write=False)
+    if isinstance(auth, JSONResponse):
+        return auth
+    sites = db_sites.list_sites_for_client(config.DB_PATH, client_id=auth.client.id)
+    return {"ok": True, "sites": [_without_secret(site) for site in sites]}
+
+
+@app.post("/v1/sites")
+def v1_sites_create(
+    body: SiteCreateIn,
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+):
+    """Register a site. The origin HMAC secret is returned once. New sites start pending."""
+    auth = _sites_caller(x_api_key, write=True)
+    if isinstance(auth, JSONResponse):
+        return auth
+    try:
+        created = db_sites.create_site(
+            config.DB_PATH,
+            client_id=auth.client.id,
+            slug=body.slug,
+            display_name=body.display_name,
+            description=body.description,
+            origin_url=body.origin_url,
+            listed=body.listed,
+            max_sites=config.SITES_MAX_PER_ACCOUNT,
+        )
+    except (ValueError, db_sites.OriginError) as exc:
+        return _sites_error(exc)
+    secret = created.pop("origin_secret")
+    return {
+        "ok": True,
+        "origin_secret": secret,
+        "site": created,
+        "note": (
+            "Save this origin secret. We will not show it again. "
+            "The hosted proxy will sign X-Satsgate-Signature with it. "
+            "New sites stay pending until an operator approves them."
+        ),
+    }
+
+
+@app.get("/v1/sites/{slug}")
+def v1_sites_get(slug: str, x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
+    auth = _sites_caller(x_api_key, write=False)
+    if isinstance(auth, JSONResponse):
+        return auth
+    site = db_sites.get_site_for_client(config.DB_PATH, client_id=auth.client.id, slug=slug)
+    if site is None:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "site_not_found"})
+    return {"ok": True, "site": _without_secret(site)}
+
+
+@app.patch("/v1/sites/{slug}")
+def v1_sites_update(
+    slug: str,
+    body: SiteUpdateIn,
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+):
+    auth = _sites_caller(x_api_key, write=True)
+    if isinstance(auth, JSONResponse):
+        return auth
+    fields = body.model_fields_set
+    try:
+        updated = db_sites.update_site(
+            config.DB_PATH,
+            client_id=auth.client.id,
+            slug=slug,
+            display_name=body.display_name if "display_name" in fields else None,
+            description=body.description,
+            origin_url=body.origin_url if "origin_url" in fields else None,
+            listed=body.listed if "listed" in fields else None,
+            set_description="description" in fields,
+        )
+    except (ValueError, db_sites.OriginError) as exc:
+        return _sites_error(exc)
+    if updated is None:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "site_not_found"})
+    return {"ok": True, "site": _without_secret(updated)}
+
+
+@app.delete("/v1/sites/{slug}")
+def v1_sites_delete(slug: str, x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
+    auth = _sites_caller(x_api_key, write=True)
+    if isinstance(auth, JSONResponse):
+        return auth
+    if not db_sites.delete_site(config.DB_PATH, client_id=auth.client.id, slug=slug):
+        return JSONResponse(status_code=404, content={"ok": False, "error": "site_not_found"})
+    return {"ok": True}
+
+
+@app.post("/v1/sites/{slug}/rotate-secret")
+def v1_sites_rotate_secret(slug: str, x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
+    auth = _sites_caller(x_api_key, write=True)
+    if isinstance(auth, JSONResponse):
+        return auth
+    try:
+        rotated = db_sites.rotate_site_secret(config.DB_PATH, client_id=auth.client.id, slug=slug)
+    except ValueError as exc:
+        return _sites_error(exc)
+    if rotated is None:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "site_not_found"})
+    secret = rotated.pop("origin_secret")
+    return {
+        "ok": True,
+        "origin_secret": secret,
+        "site": rotated,
+        "note": "Save this origin secret. We will not show it again. The previous secret no longer matches.",
+    }
+
+
+@app.post("/v1/sites/{slug}/routes")
+def v1_site_routes_create(
+    slug: str,
+    body: RouteCreateIn,
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+):
+    auth = _sites_caller(x_api_key, write=True)
+    if isinstance(auth, JSONResponse):
+        return auth
+    try:
+        route = db_sites.add_route(
+            config.DB_PATH,
+            client_id=auth.client.id,
+            slug=slug,
+            path_pattern=body.path,
+            price_sats=body.price_sats,
+            max_uses=body.max_uses,
+            access_seconds=body.access_seconds,
+            max_routes=config.SITES_MAX_ROUTES,
+        )
+    except ValueError as exc:
+        code = str(exc)
+        status = 404 if code == "site_not_found" else None
+        if status == 404:
+            return JSONResponse(status_code=404, content={"ok": False, "error": code})
+        return _sites_error(exc)
+    return {"ok": True, "route": route}
+
+
+@app.patch("/v1/sites/{slug}/routes/{route_id}")
+def v1_site_routes_update(
+    slug: str,
+    route_id: int,
+    body: RouteUpdateIn,
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+):
+    auth = _sites_caller(x_api_key, write=True)
+    if isinstance(auth, JSONResponse):
+        return auth
+    fields = body.model_fields_set
+    try:
+        route = db_sites.update_route(
+            config.DB_PATH,
+            client_id=auth.client.id,
+            slug=slug,
+            route_id=route_id,
+            path_pattern=body.path if "path" in fields else None,
+            price_sats=body.price_sats if "price_sats" in fields else None,
+            max_uses=body.max_uses,
+            access_seconds=body.access_seconds,
+            set_max_uses="max_uses" in fields,
+            set_access_seconds="access_seconds" in fields,
+        )
+    except ValueError as exc:
+        return _sites_error(exc)
+    if route is None:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "route_not_found"})
+    return {"ok": True, "route": route}
+
+
+@app.delete("/v1/sites/{slug}/routes/{route_id}")
+def v1_site_routes_delete(
+    slug: str,
+    route_id: int,
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+):
+    auth = _sites_caller(x_api_key, write=True)
+    if isinstance(auth, JSONResponse):
+        return auth
+    if not db_sites.delete_route(config.DB_PATH, client_id=auth.client.id, slug=slug, route_id=route_id):
+        return JSONResponse(status_code=404, content={"ok": False, "error": "route_not_found"})
+    return {"ok": True}
 
 
 @app.post("/v1/spend", include_in_schema=config.dev_endpoints_enabled())

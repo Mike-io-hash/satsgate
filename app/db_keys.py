@@ -1,9 +1,11 @@
 """Restricted API keys (prefix ``sgr_``).
 
 The account key stays on ``clients.api_key_hash`` (prefix ``sg_``) and is the
-only credential that can manage the account. A restricted key can create a
-paywall challenge, check its status, and verify it. It cannot top up, change
-the payee, manage keys, or read the ledger and other account data.
+only credential that can manage the account. A restricted key has one scope.
+``paywall`` (the default) can create a paywall challenge, check its status,
+and verify it. ``sites:read`` and ``sites:write`` manage the hosted-proxy
+site registry. A restricted key cannot top up, change the payee, manage keys,
+or read the ledger and other account data.
 
 ``resource_prefix``, when set, limits those three calls to resources that
 start with the prefix. The comparison is the same case-sensitive
@@ -29,6 +31,9 @@ ACCOUNT_KEY_PREFIX = "sg_"
 RESTRICTED_KEY_PREFIX = "sgr_"
 SCOPE_ACCOUNT = "account"
 SCOPE_PAYWALL = "paywall"
+SCOPE_SITES_READ = "sites:read"
+SCOPE_SITES_WRITE = "sites:write"
+RESTRICTED_SCOPES = frozenset({SCOPE_PAYWALL, SCOPE_SITES_READ, SCOPE_SITES_WRITE})
 MAX_ACTIVE_RESTRICTED_KEYS = 50
 _LABEL_MAX = 64
 _PREFIX_MAX = 200
@@ -114,7 +119,7 @@ def _principal_from_restricted(row) -> Principal:
             payee_lightning_address=row["payee_lightning_address"],
         ),
         api_key_id=int(row["id"]),
-        scope=SCOPE_PAYWALL,
+        scope=str(row["scope"]),
         resource_prefix=row["resource_prefix"],
         label=row["label"],
     )
@@ -124,7 +129,7 @@ def _lookup_restricted(conn, key_hash: str):
     return conn.execute(
         """
         SELECT
-          k.id, k.client_id, k.label, k.resource_prefix, k.revoked_at, k.last_used_at,
+          k.id, k.client_id, k.label, k.scope, k.resource_prefix, k.revoked_at, k.last_used_at,
           c.credits, c.payee_lightning_address
         FROM api_keys k
         JOIN clients c ON c.id = k.client_id
@@ -214,10 +219,15 @@ def create_restricted_key(
     client_id: int,
     label: str,
     resource_prefix: str | None,
+    scope: str = SCOPE_PAYWALL,
 ) -> dict:
     """Insert a restricted key. The plaintext ``api_key`` is returned only from here."""
+    if scope not in RESTRICTED_SCOPES:
+        raise ValueError("invalid_scope")
     label = clean_label(label)
     resource_prefix = clean_resource_prefix(resource_prefix)
+    if scope != SCOPE_PAYWALL and resource_prefix:
+        raise ValueError("resource_prefix_not_allowed")
     api_key = new_restricted_api_key()
     now = int(time.time())
     with _connect(db_path) as conn:
@@ -245,7 +255,7 @@ def create_restricted_key(
                 hash_api_key(api_key),
                 api_key[:_DISPLAY_PREFIX_LEN],
                 label,
-                SCOPE_PAYWALL,
+                scope,
                 resource_prefix,
                 now,
             ),

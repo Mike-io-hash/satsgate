@@ -2,9 +2,9 @@
 
 A buyer-side MCP server. An agent (Claude Desktop, Cursor, or any stdio MCP client) can see the price of a Satsgate-paywalled URL, pay it, and read the response.
 
-This package is version **0.9.1**. It talks to whatever URL returned the 402. It does not change satsgate core. Core stays **0.7.0**. The proxy stays **0.8.0**.
+This package is version **0.9.1**. It talks to whatever URL returned the 402. Core is **0.10.0**. The self-hosted proxy stays **0.8.0**.
 
-A hosted directory of sites is not part of this release. `list_sites` reads a JSON file or URL only when you set `SATSGATE_MCP_REGISTRY`.
+`list_sites` reads `SATSGATE_MCP_REGISTRY` when set. That can be a JSON file or `GET /v1/sites` on core (approved sites that opted in).
 
 ## Run it
 
@@ -49,7 +49,7 @@ Put `SATSGATE_MCP_NWC_URI` in that env block when you want the agent to pay. Do 
 | `check_payment` | One poll of a human payment. `payment_pending` means call it again after `retry_after_seconds`. On settlement it fetches the URL with `Authorization: L402 <macaroon>` and no preimage. |
 | `credits_balance` | `GET /v1/balance` with the optional restricted key. Core answers 403 `insufficient_scope` for an `sgr_` key. Nothing is written. |
 | `challenge_status` | `GET /v1/paywall/status/{payment_hash}?consume=false`. The macaroon is the one stored locally. It is not a tool argument. |
-| `list_sites` | Reads `SATSGATE_MCP_REGISTRY` when set. |
+| `list_sites` | Reads `SATSGATE_MCP_REGISTRY`: a JSON file, or core `GET /v1/sites`. |
 
 A token that still has uses, or whose pass has not ended, is sent again and is not paid again. The macaroon stays in the local sqlite file. It is not returned to the model.
 
@@ -101,7 +101,7 @@ Only `http` and `https` URLs are requested. Userinfo is rejected. Redirects are 
 }
 ```
 
-This is a stand-in. There is no hosted Satsgate registry yet.
+A file stays a local list. For the hosted directory, set `SATSGATE_MCP_REGISTRY` to `https://api.satsgate.org/v1/sites`. That response uses `hosted_registry: true`, `slug`, `routes`, and `next_cursor`. `list_sites` follows up to five pages. The gate host itself is not serving traffic yet.
 
 ## Mainnet check from your machine
 

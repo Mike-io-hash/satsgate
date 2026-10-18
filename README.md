@@ -69,7 +69,7 @@ Configured via env vars:
   - checks the BOLT11 amount, network, `description_hash` (LUD-06), expiry, and payment hash before issuing a challenge
   - if the provider advertises LUD-21 `verify`, settlement is confirmed there too, including without the payer returning a preimage. Providers that omit it (Wallet of Satoshi) stay preimage-only
 
-`GET /health` returns `{"ok": true, "version": "0.7.0"}` and nothing else.
+`GET /health` returns `{"ok": true, "version": "0.10.0"}` and nothing else.
 
 ## Prepaid payment verifications (credits)
 
@@ -90,6 +90,15 @@ Restricted keys (account key only):
 - `POST /v1/api-keys` with `X-Api-Key: sg_...` → create a restricted key (`sgr_...`, shown once)
 - `GET /v1/api-keys` → list restricted keys (no secrets). `include_revoked=true` includes revoked rows
 - `POST /v1/api-keys/{key_id}/revoke` → revoke a restricted key
+
+Hosted sites (closed beta, registry only):
+
+- `POST /v1/sites` → register a site. The origin HMAC secret is returned once
+- `GET /v1/sites/mine`, `GET /v1/sites/{slug}`, `PATCH /v1/sites/{slug}`, `DELETE /v1/sites/{slug}`
+- `POST /v1/sites/{slug}/rotate-secret` → replace the origin secret, shown once
+- `POST /v1/sites/{slug}/routes`, `PATCH` and `DELETE /v1/sites/{slug}/routes/{route_id}`
+- `GET /v1/sites` → public directory of approved sites that opted in. No owner, origin, or secret
+- `POST /v1/admin/sites/{slug}/approve` and `/disable` with `X-Admin-Token`
 
 Reporting:
 
@@ -233,7 +242,7 @@ curl -s -X POST https://api.satsgate.org/v1/api-keys \
 
 `resource_prefix` is optional. When it is set, challenge, status, and verify accept only resources that start with it (case-sensitive, same rule as `expected_resource`). Use a trailing slash (`blog/`) when you want a path boundary. `blog` also matches `blogger`.
 
-| Call | Account key `sg_` | Restricted key `sgr_` |
+| Call | Account key `sg_` | Paywall key `sgr_` (default) |
 | --- | --- | --- |
 | `POST /v1/paywall/challenge` | yes | yes, and it cannot save or change the payee |
 | `POST /v1/paywall/verify` and `GET /v1/paywall/status/{payment_hash}` | yes | yes |
@@ -241,9 +250,40 @@ curl -s -X POST https://api.satsgate.org/v1/api-keys \
 | Resource outside the key's prefix | yes | HTTP 403 `resource_not_allowed` |
 | After revoke | — | HTTP 401 `api_key_revoked` |
 
+Omit `scope` and the key stays `paywall`, which is the row above. `{"scope":"sites:read"}` or `{"scope":"sites:write"}` is for the hosted site registry below. Those keys cannot create challenges, and `resource_prefix` is rejected on them.
+
 A restricted key is still the same client. It spends that client's credits, and a challenge minted by one key can be unlocked by another key of that client when the resource is allowed. The paywall debit records which key did it.
 
 Set the payee with the account key before the proxy creates challenges. There is nothing new to configure. Restarting on 0.5.0 applies the migration.
+
+## Hosted sites (closed beta)
+
+Step 1 is a registry in core. Merchants register a site and, once an operator approves it, a later proxy will serve `https://gate.satsgate.org/<slug>/<path>`. This release does not forward traffic. Money still goes to the merchant's Lightning Address. One credit is still one unlock. The gate host is not live yet.
+
+```bash
+curl -s -X POST https://api.satsgate.org/v1/sites \
+  -H 'Content-Type: application/json' \
+  -H 'X-Api-Key: sg_...ACCOUNT_KEY...' \
+  -d '{"slug":"my-shop","display_name":"My Shop","origin_url":"https://origin.example","listed":false}'
+```
+
+The response includes `origin_secret` once. It is the HMAC key the hosted proxy will use for `X-Satsgate-Signature`. Store it on the origin. Core keeps ciphertext in sqlite, encrypted with `SATSGATE_SITE_SECRET_KEY` (`openssl rand -hex 32`). A hash would not be enough, because the proxy has to sign. There is no later API that returns the secret. `POST /v1/sites/{slug}/rotate-secret` replaces it.
+
+`origin_url` must be https, with no userinfo, query, or fragment. Hostnames are resolved at registration. Private, loopback, link-local, CGNAT (`100.64.0.0/10`), and metadata addresses are rejected, including when any DNS answer is in those ranges. That check is not enough on its own: a name can be pointed at a private address later (DNS rebinding). The proxy in step 2 must resolve again on every forward and connect to the public address from that lookup.
+
+Routes use the same usage policy as 0.6.0: `price_sats`, optional `max_uses`, optional `access_seconds`. Omit both policy fields and the grant stays open, as a challenge does today. Slugs are lowercase `[a-z0-9-]`, 3 to 40 characters, and a reserved-word list blocks names such as `admin` and `api`.
+
+New sites start `pending`. `GET /v1/sites` lists only `approved` sites with `listed: true`. It returns `name`, `slug`, `url` (the gate URL), `description`, and `routes`. It does not return the owner, the origin, or the secret. `list_sites` in satsgate-mcp accepts this JSON and still accepts a local file. Approve and disable with `X-Admin-Token` when `SATSGATE_ADMIN_TOKEN` is set. Without that env var those admin routes answer 404.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SATSGATE_SITE_SECRET_KEY` | unset | 64 hex characters. Required to create or rotate a site secret. Unset does not stop the process. |
+| `SATSGATE_SITES_AUTO_APPROVE` | off | `1` marks new sites approved. Leave it off for the closed beta. |
+| `SATSGATE_SITES_MAX_PER_ACCOUNT` | 3 | Sites per account, including disabled ones. |
+| `SATSGATE_SITES_MAX_ROUTES` | 20 | Routes per site. |
+| `SATSGATE_GATE_PUBLIC_BASE` | `https://gate.satsgate.org` | https origin used in public `url` values. No path. |
+
+Restart to serve 0.10.0. Startup creates empty `sites` and `site_routes` tables. It does not alter existing tables. Copy `satsgate.sqlite3` first if you want a rollback point. Current API keys, credits, and challenges keep working if you do not set the new variables. Set `SATSGATE_SITE_SECRET_KEY` before the first site is created, and keep that value. Losing it makes stored secrets unreadable. Rotation still works and issues a new secret.
 
 ## No-code proxy
 
@@ -251,7 +291,7 @@ Set the payee with the account key before the proxy creates challenges. There is
 
 An unpaid request is **402** with `WWW-Authenticate: L402 macaroon="...", invoice="..."` (macaroon before invoice, standard base64), which lnget and Alby `fetch402` already parse. The JSON body carries `amount_sats`, `payment_hash`, `invoice_expires_at`, and a hint for wallets that do not return a preimage. `Authorization: L402 <macaroon>:<preimage>` verifies with `consume=true`. `Authorization: L402 <macaroon>` polls status with `consume=true`. Pending stays on that invoice (`402 payment_pending`, `Retry-After`). A used, expired, or wrong-route token is a fresh 402, not 401.
 
-The core API is still 0.7.0. `GET /health` on the core reports `0.7.0`. `GET /healthz` on the proxy reports `0.8.0`.
+The self-hosted proxy stays 0.8.0. `GET /healthz` on the proxy reports `0.8.0`. Core health is `0.10.0`. The proxy's paywall calls are unchanged.
 
 Config is YAML: upstream base URL, routes (`per_request`, `uses:N`, `pass:<seconds>`, scope `route` or `site`), free paths, body limits, and an origin secret from the environment. A `per_request` price below about 10 times the plan's sats-per-credit logs a warning at startup. The trial plan is about 5 sats per credit, so that line is 50 sats. Cheap calls should be bundles or passes.
 
@@ -273,9 +313,9 @@ Full steps, the signature, and a mainnet checklist are in [`proxy/README.md`](./
 
 `discover` and `quote` request a URL and read the 402: price in sats, `max_uses`, `access_seconds`, and expiry. `pay_and_fetch` with mode `human` returns the invoice and a QR. `check_payment` polls settlement without a preimage, then retries the URL with the macaroon. Mode `nwc` pays from `SATSGATE_MCP_NWC_URI` in the environment, never from a tool argument, and only inside `SATSGATE_MCP_MAX_PAYMENT_SATS` and `SATSGATE_MCP_DAILY_MAX_SATS`. A token with uses or time left is reused. `token_used_up` comes back as a new quote unless `SATSGATE_MCP_AUTO_PAY` is on and the new invoice is inside the budget.
 
-An optional `sgr_` key enables read-only `challenge_status` and `credits_balance`. The key cannot top up or change the payee. `list_sites` reads a JSON file or URL you configure. A hosted registry is not in this release.
+An optional `sgr_` key enables read-only `challenge_status` and `credits_balance`. The key cannot top up or change the payee. `list_sites` reads a JSON file or a URL. Point `SATSGATE_MCP_REGISTRY` at `https://api.satsgate.org/v1/sites` for the public directory (`name`, `url`, `slug`, `routes`). A local file of `{name, url, description}` still works.
 
-The core API is still 0.7.0. `GET /health` reports `0.7.0`.
+Core health is `0.10.0`. `GET /health` reports `0.10.0`. The MCP package stays 0.9.1.
 
 ```bash
 pip install -r mcp/requirements.txt

@@ -239,7 +239,7 @@ def test_example_config_loads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 def test_versions() -> None:
     assert __version__ == "0.8.0"
-    assert 'APP_VERSION = "0.7.0"' in (ROOT / "app" / "config.py").read_text(encoding="utf-8")
+    assert 'APP_VERSION = "0.10.0"' in (ROOT / "app" / "config.py").read_text(encoding="utf-8")
 
 
 def test_globs() -> None:

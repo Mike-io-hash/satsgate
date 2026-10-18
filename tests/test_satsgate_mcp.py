@@ -530,6 +530,58 @@ def test_registry_balance_and_status_are_read_only(tmp_path: Path) -> None:
     assert missing["hosted_registry"] is False
 
 
+def test_list_sites_reads_the_core_directory(tmp_path: Path) -> None:
+    pages = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host != "directory.example":
+            return _challenge()
+        assert request.method == "GET"
+        pages["n"] += 1
+        if pages["n"] == 1:
+            assert "cursor" not in request.url.query.decode()
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "hosted_registry": True,
+                    "next_cursor": "shop",
+                    "sites": [
+                        {
+                            "name": "Shop",
+                            "slug": "shop",
+                            "url": "https://gate.satsgate.org/shop/",
+                            "description": "A stand",
+                            "routes": [{"path": "/post", "price_sats": 21, "max_uses": 1, "access_seconds": None}],
+                            "client_id": 9,
+                            "origin_url": "https://origin.example",
+                        }
+                    ],
+                },
+            )
+        assert request.url.params["cursor"] == "shop"
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "hosted_registry": True,
+                "next_cursor": None,
+                "sites": [{"name": "Press", "slug": "press", "url": "https://gate.satsgate.org/press/"}],
+            },
+        )
+
+    buyer, _http, _wallet = _buyer(tmp_path, handler, registry="https://directory.example/v1/sites")
+    sites = asyncio.run(buyer.list_sites())
+    assert sites["hosted_registry"] is True
+    assert [item["slug"] for item in sites["sites"]] == ["shop", "press"]
+    assert sites["sites"][0]["routes"] == [
+        {"path": "/post", "price_sats": 21, "max_uses": 1, "access_seconds": None}
+    ]
+    assert "client_id" not in sites["sites"][0]
+    assert "origin_url" not in sites["sites"][0]
+    assert pages["n"] == 2
+
+
 def test_discover_then_human_pay_reuses_the_quote(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if _auth(request):

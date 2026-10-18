@@ -528,7 +528,7 @@ def test_migration_on_an_existing_database(tmp_path):
     assert old_challenge == ("old/resource", None)
 
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.7.0"
+        assert http.get("/health").json()["version"] == "0.10.0"
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})
         assert balance.status_code == 200
         assert balance.json()["credits"] == 42

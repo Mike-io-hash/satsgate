@@ -1,12 +1,13 @@
 import json
 import os
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
 # Load env vars from .env if present. Existing process env wins.
 load_dotenv()
 
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.10.0"
 
 # production is the safe default. Local mock/dev only runs when this is explicit.
 SATSGATE_ENV = os.environ.get("SATSGATE_ENV", "production").strip().lower() or "production"
@@ -149,6 +150,44 @@ if BUYER_LIMIT_SCOPE not in _BUYER_LIMIT_SCOPES:
 # When set, enables /v1/admin/* endpoints (protected via X-Admin-Token header).
 ADMIN_TOKEN = os.environ.get("SATSGATE_ADMIN_TOKEN", "").strip()
 
+# Hosted-proxy sites registry. Unset limits keep the closed-beta defaults.
+# The secret key is optional at boot so a restart without it still serves
+# current clients. Creating or rotating a site secret requires it.
+SITES_MAX_PER_ACCOUNT = _optional_int("SATSGATE_SITES_MAX_PER_ACCOUNT", 3, minimum=1, maximum=100)
+SITES_MAX_ROUTES = _optional_int("SATSGATE_SITES_MAX_ROUTES", 20, minimum=1, maximum=200)
+SITES_AUTO_APPROVE = os.environ.get("SATSGATE_SITES_AUTO_APPROVE", "0").strip().lower() in {"1", "true", "yes", "on"}
+_SITE_SECRET_RAW = os.environ.get("SATSGATE_SITE_SECRET_KEY", "").strip()
+
+
+def _gate_public_base() -> str:
+    raw = os.environ.get("SATSGATE_GATE_PUBLIC_BASE", "https://gate.satsgate.org").strip().rstrip("/")
+    parsed = urlsplit(raw)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise RuntimeError(
+            "SATSGATE_GATE_PUBLIC_BASE must be an https origin without userinfo, a path, a query, or a fragment"
+        )
+    return raw
+
+
+GATE_PUBLIC_BASE = _gate_public_base()
+
+
+def site_secret_key() -> bytes | None:
+    """32-byte key for origin-secret ciphertext. None when the env var is unset."""
+    if not _SITE_SECRET_RAW:
+        return None
+    if len(_SITE_SECRET_RAW) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in _SITE_SECRET_RAW):
+        raise RuntimeError("SATSGATE_SITE_SECRET_KEY must be 64 hex characters (openssl rand -hex 32)")
+    return bytes.fromhex(_SITE_SECRET_RAW)
+
 # Dev mode enables /dev/* plus the demo /v1/tickets and /v1/spend routes.
 # Ignored unless SATSGATE_ENV is an explicit local environment.
 DEV_MODE = os.environ.get("SATSGATE_DEV_MODE", "0") == "1"
@@ -223,6 +262,8 @@ def validate_startup() -> None:
         raise RuntimeError(
             "SATSGATE_TRUSTED_PROXIES must list specific proxy IPs or CIDRs, not '*' or the whole internet"
         )
+    # A malformed key fails boot. An unset key does not: current clients keep working.
+    site_secret_key()
 
     keys = signing_keys()
     if is_local_env():
