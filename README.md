@@ -269,7 +269,7 @@ Full steps, the signature, and a mainnet checklist are in [`proxy/README.md`](./
 
 ## Buyer MCP
 
-`satsgate-mcp` (version 0.9.0, in [`mcp/`](./mcp/README.md)) is a separate process an agent runs over stdio. It is a client. It does not change the core.
+`satsgate-mcp` (version 0.9.1, in [`mcp/`](./mcp/README.md)) is a separate process an agent runs over stdio. It is a client. It does not change the core.
 
 `discover` and `quote` request a URL and read the 402: price in sats, `max_uses`, `access_seconds`, and expiry. `pay_and_fetch` with mode `human` returns the invoice and a QR. `check_payment` polls settlement without a preimage, then retries the URL with the macaroon. Mode `nwc` pays from `SATSGATE_MCP_NWC_URI` in the environment, never from a tool argument, and only inside `SATSGATE_MCP_MAX_PAYMENT_SATS` and `SATSGATE_MCP_DAILY_MAX_SATS`. A token with uses or time left is reused. `token_used_up` comes back as a new quote unless `SATSGATE_MCP_AUTO_PAY` is on and the new invoice is inside the budget.
 

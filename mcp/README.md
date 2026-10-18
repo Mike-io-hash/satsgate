@@ -2,7 +2,7 @@
 
 A buyer-side MCP server. An agent (Claude Desktop, Cursor, or any stdio MCP client) can see the price of a Satsgate-paywalled URL, pay it, and read the response.
 
-This package is version **0.9.0**. It talks to whatever URL returned the 402. It does not change satsgate core. Core stays **0.7.0**. The proxy stays **0.8.0**.
+This package is version **0.9.1**. It talks to whatever URL returned the 402. It does not change satsgate core. Core stays **0.7.0**. The proxy stays **0.8.0**.
 
 A hosted directory of sites is not part of this release. `list_sites` reads a JSON file or URL only when you set `SATSGATE_MCP_REGISTRY`.
 

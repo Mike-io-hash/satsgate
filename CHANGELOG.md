@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-18
+
+### Fixed
+- `satsgate-mcp` 0.9.1 reads a BOLT11 amount from the human-readable part before the last `1`. That `1` is the bech32 separator. 0.9.0 split on the first `1`, so an amount whose digits contain `1` was wrong: `lnbc210n` (21 sats) was read as 2 BTC, and the budget check refused the invoice. The same misread hit 1, 10, 100, 1000, and 10000 sats. A `p`-suffix millisatoshi amount and an invoice with no amount are unchanged in meaning. The proxy does not decode BOLT11 amounts. Core still uses the `bolt11` library. `GET /health` stays `0.7.0`.
+
 ## [0.9.0] - 2026-10-17
 
 ### Added

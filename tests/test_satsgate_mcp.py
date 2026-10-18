@@ -138,11 +138,73 @@ def _auth(request: httpx.Request) -> str:
     return request.headers.get("authorization", "")
 
 
+def _signed_invoice(amount_msat: int | None) -> str:
+    """A real BOLT11 invoice. Amount digits that contain 1 sit before the separator."""
+    from bolt11 import Bolt11, MilliSatoshi, Tags, encode
+    from bolt11.models.tags import TagChar
+
+    tags = Tags()
+    tags.add(TagChar.payment_hash, PAYMENT)
+    tags.add(TagChar.payment_secret, PREIMAGE)
+    tags.add(TagChar.description, "satsgate")
+    tags.add(TagChar.expire_time, 3600)
+    invoice = Bolt11(
+        currency="bc",
+        amount_msat=None if amount_msat is None else MilliSatoshi(amount_msat),
+        date=NOW,
+        tags=tags,
+    )
+    return encode(invoice, private_key="11" * 32)
+
+
+def _hrp(invoice: str) -> str:
+    return invoice.lower()[: invoice.lower().rfind("1")]
+
+
 def test_version_and_bolt11_amount() -> None:
-    assert __version__ == "0.9.0"
+    assert __version__ == "0.9.1"
     assert amount_sats(SPEC_INVOICE) == 250_000
     assert expires_at(SPEC_INVOICE) == 1_496_314_718
     assert amount_sats("lnbc200n1ignored") == 20
+
+
+def test_bolt11_amounts_whose_digits_contain_one() -> None:
+    expected = {
+        1: "lnbc10n",
+        10: "lnbc100n",
+        21: "lnbc210n",
+        100: "lnbc1u",
+        1000: "lnbc10u",
+        10000: "lnbc100u",
+    }
+    for sats, hrp in expected.items():
+        invoice = _signed_invoice(sats * 1000)
+        assert _hrp(invoice) == hrp
+        assert "1" in hrp
+        assert amount_sats(invoice) == sats
+    # 1 millisatoshi is 10 pico-btc. The p suffix is sub-sat and rounds up to 1 sat.
+    millis = _signed_invoice(1)
+    assert _hrp(millis) == "lnbc10p"
+    assert amount_sats(millis) == 1
+    bare = _signed_invoice(None)
+    assert _hrp(bare) == "lnbc"
+    assert amount_sats(bare) is None
+
+
+def test_twenty_one_sat_invoice_passes_the_budget_check(tmp_path: Path) -> None:
+    invoice = _signed_invoice(21 * 1000)
+    assert amount_sats(invoice) == 21
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if _auth(request):
+            return _paid()
+        return _challenge(amount=21, invoice=invoice)
+
+    buyer, _http, wallet = _buyer(tmp_path, handler, nwc_uri=NWC, max_payment_sats=50, daily_max_sats=50)
+    paid = asyncio.run(buyer.pay_and_fetch("https://shop.example/a", "nwc"))
+    assert paid.payload["body"] == "hello"
+    assert paid.payload["paid_sats"] == 21
+    assert wallet.invoices == [invoice]
 
 
 def test_discover_reads_policy_and_hides_the_macaroon(tmp_path: Path) -> None:
