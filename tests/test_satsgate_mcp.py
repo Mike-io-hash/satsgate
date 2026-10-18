@@ -172,7 +172,7 @@ def _hrp(invoice: str) -> str:
 
 
 def test_version_and_bolt11_amount() -> None:
-    assert __version__ == "0.9.1"
+    assert __version__ == "0.10.0"
     assert amount_sats(SPEC_INVOICE) == 250_000
     assert expires_at(SPEC_INVOICE) == 1_496_314_718
     assert amount_sats("lnbc200n1ignored") == 20
@@ -524,10 +524,13 @@ def test_registry_balance_and_status_are_read_only(tmp_path: Path) -> None:
     assert status["settled"] is False
     assert all(call.method == "GET" for call in http.calls)
 
-    bare, _http2, _wallet2 = _buyer(tmp_path / "other", handler)
+    bare, bare_http, _wallet2 = _buyer(tmp_path / "other", handler)
     missing = asyncio.run(bare.list_sites())
-    assert missing["error"] == "registry_not_configured"
-    assert missing["hosted_registry"] is False
+    assert missing["ok"] is False
+    assert missing["error"] == "registry_unavailable"
+    assert missing["sites"] == []
+    assert bare_http.calls[0].url.path == "/v1/sites"
+    assert not any(call.url.path == "/v1/sites" for call in http.calls)
 
 
 def test_list_sites_reads_the_core_directory(tmp_path: Path) -> None:
@@ -580,6 +583,104 @@ def test_list_sites_reads_the_core_directory(tmp_path: Path) -> None:
     assert "client_id" not in sites["sites"][0]
     assert "origin_url" not in sites["sites"][0]
     assert pages["n"] == 2
+
+
+def test_list_sites_defaults_to_the_public_directory(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/v1/sites"
+        timeout = request.extensions.get("timeout")
+        assert isinstance(timeout, dict)
+        assert max(timeout[key] for key in ("connect", "read", "write", "pool")) <= 5
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "hosted_registry": True,
+                "sites": [
+                    {
+                        "name": "Shop",
+                        "slug": "shop",
+                        "url": "https://gate.satsgate.org/shop/",
+                        "description": "A stand",
+                        "routes": [
+                            {"path": "/hello", "price_sats": 21, "max_uses": 1, "access_seconds": None},
+                            {"path": "/hour", "price_sats": 50, "max_uses": None, "access_seconds": 3600},
+                        ],
+                    },
+                    {
+                        "name": "Pending",
+                        "slug": "pending-shop",
+                        "url": "https://gate.satsgate.org/pending-shop/",
+                        "status": "pending",
+                        "listed": False,
+                    },
+                    {
+                        "name": "Disabled",
+                        "slug": "disabled-shop",
+                        "url": "https://gate.satsgate.org/disabled-shop/",
+                        "status": "disabled",
+                        "listed": True,
+                    },
+                    {
+                        "name": "Quiet",
+                        "slug": "quiet-shop",
+                        "url": "https://gate.satsgate.org/quiet-shop/",
+                        "status": "approved",
+                        "listed": False,
+                    },
+                ],
+            },
+        )
+
+    buyer, http, _wallet = _buyer(tmp_path, handler)
+    sites = asyncio.run(buyer.list_sites())
+    assert sites["ok"] is True
+    assert sites["hosted_registry"] is True
+    assert sites["skipped"] == 3
+    assert sites["sites"] == [
+        {
+            "name": "Shop",
+            "slug": "shop",
+            "url": "https://gate.satsgate.org/shop/",
+            "description": "A stand",
+            "routes": [
+                {"path": "/hello", "price_sats": 21, "max_uses": 1, "access_seconds": None},
+                {"path": "/hour", "price_sats": 50, "max_uses": None, "access_seconds": 3600},
+            ],
+        }
+    ]
+    assert http.calls[0].url == "http://core.test/v1/sites"
+    assert "unapproved" in sites["detail"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "error"),
+    [
+        ("timeout", "registry_unavailable"),
+        ("connect", "registry_unavailable"),
+        ("http", "registry_unavailable"),
+        ("json", "invalid_registry"),
+    ],
+)
+def test_list_sites_registry_errors_do_not_raise(tmp_path: Path, mode: str, error: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if mode == "timeout":
+            raise httpx.ReadTimeout("slow")
+        if mode == "connect":
+            raise httpx.ConnectError("down")
+        if mode == "http":
+            return httpx.Response(503, text="upstream")
+        return httpx.Response(200, content=b"not-json")
+
+    buyer, _http, _wallet = _buyer(tmp_path, handler)
+    sites = asyncio.run(buyer.list_sites())
+    assert sites["ok"] is False
+    assert sites["error"] == error
+    assert sites["sites"] == []
+    assert sites["detail"]
+    assert "Traceback" not in sites["detail"]
+    assert "upstream" not in sites["detail"]
 
 
 def test_discover_then_human_pay_reuses_the_quote(tmp_path: Path) -> None:

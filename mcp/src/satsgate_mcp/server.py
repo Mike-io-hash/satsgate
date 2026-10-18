@@ -124,9 +124,11 @@ def build_server(buyer: Buyer | None = None, settings: Settings | None = None) -
 
     @mcp.tool(annotations=_READ, structured_output=False)
     async def list_sites() -> dict:
-        """Read SATSGATE_MCP_REGISTRY. A JSON file, or GET /v1/sites on satsgate core.
+        """List approved, listed sites from the public directory.
 
-        The core directory lists approved sites that opted in. A local file still works.
+        The default is GET /v1/sites on SATSGATE_MCP_CORE_URL. Each row has a name,
+        slug, gate URL, and routes (price in sats, max_uses, access_seconds).
+        SATSGATE_MCP_REGISTRY, when set, replaces that with a JSON file or another URL.
         """
         try:
             return await buyer.list_sites()
