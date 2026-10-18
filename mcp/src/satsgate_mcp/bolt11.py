@@ -26,17 +26,32 @@ def _hrp_expand(hrp: str) -> list[int]:
     return [ord(char) >> 5 for char in hrp] + [0] + [ord(char) & 31 for char in hrp]
 
 
-def _bech32_payload(invoice: str) -> tuple[str, list[int]] | None:
+def _bech32_parts(invoice: str) -> tuple[str, str] | None:
+    """Split on the bech32 separator, which is the last ``1``.
+
+    Amount digits sit in the human-readable part and may themselves contain
+    ``1`` (``lnbc210n`` is 21 sats). Splitting on the first ``1`` reads that
+    invoice as 2 BTC.
+    """
     compact = invoice.strip()
-    if compact.lower() != compact and compact.upper() != compact:
+    if not compact or (compact.lower() != compact and compact.upper() != compact):
         return None
     compact = compact.lower()
     split_at = compact.rfind("1")
-    if split_at < 1 or split_at + 7 > len(compact):
+    if split_at < 1:
         return None
-    hrp = compact[:split_at]
+    return compact[:split_at], compact[split_at + 1 :]
+
+
+def _bech32_payload(invoice: str) -> tuple[str, list[int]] | None:
+    parts = _bech32_parts(invoice)
+    if parts is None:
+        return None
+    hrp, data_chars = parts
+    if len(data_chars) < 6:
+        return None
     data: list[int] = []
-    for char in compact[split_at + 1 :]:
+    for char in data_chars:
         index = _CHARSET.find(char)
         if index == -1:
             return None
@@ -48,7 +63,10 @@ def _bech32_payload(invoice: str) -> tuple[str, list[int]] | None:
 
 def amount_sats(invoice: str) -> int | None:
     """Whole sats, rounded up when the invoice is a fraction of a sat."""
-    hrp = invoice.strip().lower().split("1", 1)[0]
+    parts = _bech32_parts(invoice)
+    if parts is None:
+        return None
+    hrp, _data = parts
     match = _HRP.fullmatch(hrp)
     if match is None or not match.group(1):
         return None

@@ -2,7 +2,7 @@
 
 A buyer-side MCP server. An agent (Claude Desktop, Cursor, or any stdio MCP client) can see the price of a Satsgate-paywalled URL, pay it, and read the response.
 
-This package is version **0.9.0**. It talks to whatever URL returned the 402. It does not change satsgate core. Core stays **0.7.0**. The proxy stays **0.8.0**.
+This package is version **0.9.1**. It talks to whatever URL returned the 402. It does not change satsgate core. Core stays **0.7.0**. The proxy stays **0.8.0**.
 
 A hosted directory of sites is not part of this release. `list_sites` reads a JSON file or URL only when you set `SATSGATE_MCP_REGISTRY`.
 
@@ -115,9 +115,15 @@ export SATSGATE_MCP_DATA_DIR="$HOME/.local/share/satsgate-mcp"
 PYTHONPATH=mcp/src python -m satsgate_mcp.manual 'https://YOUR-PROXY/blog/post'
 ```
 
-The process prints the amount, the invoice, a text QR, and the path of a PNG under the data dir. Pay that invoice. It polls `check_payment` until the origin body is printed or the attempt stops. No NWC URI is required. The macaroon is not printed.
+The process prints the amount, the invoice, a text QR, and the path of a PNG under the data dir. Pay that invoice. It keeps polling until the invoice expires. The wait starts at 2 seconds and grows toward 15 seconds. `--polls N` and `--timeout SECONDS` are optional caps. Status lines start with a UTC timestamp. No NWC URI is required. The macaroon is not printed.
 
-If it stays on `payment_pending`, the invoice is unpaid or the payee has no LUD-21 `verify` URL. Wallet of Satoshi needs the NWC path below.
+If it stops before the origin body is printed, it prints a command you can paste. That command resumes the same `payment_hash` from the data dir and does not mint a new invoice:
+
+```bash
+SATSGATE_MCP_DATA_DIR="$HOME/.local/share/satsgate-mcp" python -m satsgate_mcp.manual --resume PAYMENT_HASH
+```
+
+If it stays on `payment_pending` until expiry, the invoice was unpaid or the payee has no LUD-21 `verify` URL. Wallet of Satoshi needs the NWC path below.
 
 ### NWC, optional
 

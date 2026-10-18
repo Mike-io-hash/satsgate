@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 
 import httpx
@@ -16,6 +17,14 @@ from satsgate_mcp.bolt11 import amount_sats, expires_at
 from satsgate_mcp.buyer import Buyer, BuyerError
 from satsgate_mcp.clients import parse_fetch402, parse_lnget
 from satsgate_mcp.config import ConfigError, Settings, load_settings
+from satsgate_mcp.manual import (
+    configure_manual_logging,
+    format_log_line,
+    poll_until,
+    poll_wait_seconds,
+    resume_command,
+    _run,
+)
 from satsgate_mcp.nwc import NwcError
 from satsgate_mcp.server import build_server
 from satsgate_mcp.store import Store
@@ -111,6 +120,7 @@ def _challenge(
     invoice: str = INVOICE,
     reason: str | None = None,
     macaroon: str = MAC,
+    expires: int = NOW + 3600,
 ) -> httpx.Response:
     body: dict[str, object] = {
         "ok": False,
@@ -118,7 +128,7 @@ def _challenge(
         "amount_sats": amount,
         "payment_hash": payment,
         "invoice": invoice,
-        "invoice_expires_at": NOW + 3600,
+        "invoice_expires_at": expires,
         "macaroon": macaroon,
         "resource": "route:article",
         "max_uses": max_uses,
@@ -138,11 +148,73 @@ def _auth(request: httpx.Request) -> str:
     return request.headers.get("authorization", "")
 
 
+def _signed_invoice(amount_msat: int | None) -> str:
+    """A real BOLT11 invoice. Amount digits that contain 1 sit before the separator."""
+    from bolt11 import Bolt11, MilliSatoshi, Tags, encode
+    from bolt11.models.tags import TagChar
+
+    tags = Tags()
+    tags.add(TagChar.payment_hash, PAYMENT)
+    tags.add(TagChar.payment_secret, PREIMAGE)
+    tags.add(TagChar.description, "satsgate")
+    tags.add(TagChar.expire_time, 3600)
+    invoice = Bolt11(
+        currency="bc",
+        amount_msat=None if amount_msat is None else MilliSatoshi(amount_msat),
+        date=NOW,
+        tags=tags,
+    )
+    return encode(invoice, private_key="11" * 32)
+
+
+def _hrp(invoice: str) -> str:
+    return invoice.lower()[: invoice.lower().rfind("1")]
+
+
 def test_version_and_bolt11_amount() -> None:
-    assert __version__ == "0.9.0"
+    assert __version__ == "0.9.1"
     assert amount_sats(SPEC_INVOICE) == 250_000
     assert expires_at(SPEC_INVOICE) == 1_496_314_718
     assert amount_sats("lnbc200n1ignored") == 20
+
+
+def test_bolt11_amounts_whose_digits_contain_one() -> None:
+    expected = {
+        1: "lnbc10n",
+        10: "lnbc100n",
+        21: "lnbc210n",
+        100: "lnbc1u",
+        1000: "lnbc10u",
+        10000: "lnbc100u",
+    }
+    for sats, hrp in expected.items():
+        invoice = _signed_invoice(sats * 1000)
+        assert _hrp(invoice) == hrp
+        assert "1" in hrp
+        assert amount_sats(invoice) == sats
+    # 1 millisatoshi is 10 pico-btc. The p suffix is sub-sat and rounds up to 1 sat.
+    millis = _signed_invoice(1)
+    assert _hrp(millis) == "lnbc10p"
+    assert amount_sats(millis) == 1
+    bare = _signed_invoice(None)
+    assert _hrp(bare) == "lnbc"
+    assert amount_sats(bare) is None
+
+
+def test_twenty_one_sat_invoice_passes_the_budget_check(tmp_path: Path) -> None:
+    invoice = _signed_invoice(21 * 1000)
+    assert amount_sats(invoice) == 21
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if _auth(request):
+            return _paid()
+        return _challenge(amount=21, invoice=invoice)
+
+    buyer, _http, wallet = _buyer(tmp_path, handler, nwc_uri=NWC, max_payment_sats=50, daily_max_sats=50)
+    paid = asyncio.run(buyer.pay_and_fetch("https://shop.example/a", "nwc"))
+    assert paid.payload["body"] == "hello"
+    assert paid.payload["paid_sats"] == 21
+    assert wallet.invoices == [invoice]
 
 
 def test_discover_reads_policy_and_hides_the_macaroon(tmp_path: Path) -> None:
@@ -493,3 +565,230 @@ def test_server_registers_tools_and_returns_a_qr_image(tmp_path: Path) -> None:
     assert result[0]["invoice"] == INVOICE
     assert result[1].to_image_content().mime_type == "image/png"
     assert wallet.invoices == []
+
+
+_STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z ")
+
+
+def test_poll_wait_grows_from_two_seconds_toward_fifteen() -> None:
+    waits = [poll_wait_seconds(attempt, 2) for attempt in range(20)]
+    assert waits[:4] == [2, 3, 4, 5]
+    assert waits[-1] == 15
+    assert all(item <= 15 for item in waits)
+    assert poll_wait_seconds(0, 30) == 15
+    assert poll_wait_seconds(0, 1) == 2
+
+
+def test_poll_until_invoice_expiry_is_not_capped_at_forty_rounds() -> None:
+    clock = Clock()
+    expires = NOW + 3600
+    waits: list[int] = []
+
+    async def sleep(seconds: int) -> None:
+        waits.append(seconds)
+        clock.now += seconds
+
+    async def check() -> dict:
+        if clock.now >= expires:
+            return {"ok": True, "payment_required": False, "status": 200, "body": "late"}
+        return {"ok": False, "error": "payment_pending", "retry_after_seconds": 2}
+
+    result = asyncio.run(
+        poll_until(
+            check,
+            expires_at=expires,
+            polls=None,
+            timeout=None,
+            now=clock,
+            sleep=sleep,
+            log=lambda _message: None,
+        )
+    )
+    assert result.status == "paid"
+    assert result.reason == "paid"
+    assert result.checks > 40
+    assert waits[:13] == list(range(2, 15))
+    assert waits[13] == 15
+    assert all(item == 15 for item in waits[13:-1])
+    assert waits[-1] <= 15
+    assert clock.now >= expires
+
+
+def test_poll_until_stops_at_expiry_when_still_unpaid() -> None:
+    clock = Clock()
+    expires = NOW + 30
+    seen: list[int] = []
+
+    async def sleep(seconds: int) -> None:
+        clock.now += seconds
+
+    async def check() -> dict:
+        seen.append(clock.now)
+        return {"ok": False, "error": "payment_pending", "retry_after_seconds": 2}
+
+    result = asyncio.run(
+        poll_until(
+            check,
+            expires_at=expires,
+            polls=None,
+            timeout=None,
+            now=clock,
+            sleep=sleep,
+            log=lambda _message: None,
+        )
+    )
+    assert result.reason == "expired"
+    assert result.checks == len(seen)
+    assert result.checks < 40
+    assert seen[-1] >= expires
+    assert seen[0] == NOW
+
+
+def test_polls_and_timeout_still_cap_the_loop() -> None:
+    clock = Clock()
+
+    async def sleep(seconds: int) -> None:
+        clock.now += seconds
+
+    async def check() -> dict:
+        return {"ok": False, "error": "payment_pending", "retry_after_seconds": 2}
+
+    capped = asyncio.run(
+        poll_until(
+            check,
+            expires_at=NOW + 3600,
+            polls=3,
+            timeout=None,
+            now=clock,
+            sleep=sleep,
+            log=lambda _message: None,
+        )
+    )
+    assert capped.reason == "polls"
+    assert capped.checks == 3
+    assert capped.waits == (2, 3)
+
+    clock.now = NOW
+    timed = asyncio.run(
+        poll_until(
+            check,
+            expires_at=NOW + 3600,
+            polls=None,
+            timeout=5,
+            now=clock,
+            sleep=sleep,
+            log=lambda _message: None,
+        )
+    )
+    assert timed.reason == "timeout"
+    assert timed.checks < 40
+    assert clock.now >= NOW + 5
+    assert sum(timed.waits) == 5
+
+
+def test_manual_resume_from_a_stored_quote(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    clock = Clock()
+    paid = {"value": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if not _auth(request):
+            return _challenge(expires=NOW + 3600)
+        assert ":" not in _auth(request).split(" ", 1)[1]
+        if paid["value"]:
+            return _paid("article")
+        return httpx.Response(402, json={"ok": False, "error": "payment_pending", "payment_hash": PAYMENT})
+
+    buyer, _http, wallet = _buyer(tmp_path, handler)
+    buyer._now = clock
+    offer = asyncio.run(buyer.pay_and_fetch("https://shop.example/a", "human"))
+    assert offer.payload["payment_hash"] == PAYMENT
+    assert wallet.invoices == []
+
+    async def sleep(seconds: int) -> None:
+        clock.now += seconds
+
+    missing = asyncio.run(_run(["--resume", "ff" * 32], buyer=buyer, now=clock, sleep=sleep))
+    assert missing == 1
+    missed = capsys.readouterr()
+    assert "No stored invoice" in missed.err
+    assert "SATSGATE_MCP_DATA_DIR" in missed.err
+    assert MAC not in missed.err + missed.out
+
+    paid["value"] = True
+    code = asyncio.run(_run(["--resume", PAYMENT], buyer=buyer, now=clock, sleep=sleep))
+    assert code == 0
+    captured = capsys.readouterr()
+    assert "article" in captured.out
+    assert MAC not in captured.out + captured.err
+    assert _STAMP.match(captured.out.splitlines()[0])
+    assert wallet.invoices == []
+
+
+def test_manual_give_up_prints_the_resume_command(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    clock = Clock()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if not _auth(request):
+            return _challenge(expires=NOW + 10)
+        return httpx.Response(
+            402,
+            json={"ok": False, "error": "payment_pending", "payment_hash": PAYMENT, "retry_after_seconds": 2},
+        )
+
+    buyer, _http, _wallet = _buyer(tmp_path, handler)
+    buyer._now = clock
+
+    async def sleep(seconds: int) -> None:
+        clock.now += seconds
+
+    code = asyncio.run(_run(["https://shop.example/a"], buyer=buyer, now=clock, sleep=sleep))
+    assert code == 1
+    captured = capsys.readouterr()
+    command = resume_command(tmp_path, PAYMENT)
+    assert command in captured.err
+    assert "Stopped (expired)." in captured.err
+    assert MAC not in captured.out + captured.err
+    pending = [line for line in captured.out.splitlines() if "pending, retrying in " in line]
+    assert pending
+    assert len(pending) < 40
+    assert all(_STAMP.match(line) for line in pending)
+    assert "retrying in 2s" in pending[0]
+    assert "retrying in 3s" in pending[1]
+    assert format_log_line("pending, retrying in 2s", now=lambda: NOW).startswith("2023-11-14T22:13:20Z ")
+
+
+def test_manual_polls_timeout_and_resume_flags(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert asyncio.run(_run(["--polls", "0", "https://shop.example/a"])) == 2
+    assert asyncio.run(_run(["--timeout", "0", "https://shop.example/a"])) == 2
+    assert asyncio.run(_run(["--nwc", "--resume", PAYMENT])) == 2
+    assert asyncio.run(_run(["--resume", PAYMENT, "https://shop.example/a"])) == 2
+    assert asyncio.run(_run([])) == 2
+    capsys.readouterr()
+
+    clock = Clock()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if not _auth(request):
+            return _challenge()
+        return httpx.Response(402, json={"ok": False, "error": "payment_pending", "payment_hash": PAYMENT})
+
+    buyer, _http, _wallet = _buyer(tmp_path, handler)
+    buyer._now = clock
+
+    async def sleep(seconds: int) -> None:
+        clock.now += seconds
+
+    code = asyncio.run(
+        _run(["--polls", "2", "--timeout", "100", "https://shop.example/a"], buyer=buyer, now=clock, sleep=sleep)
+    )
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "Stopped (polls)." in captured.err
+    assert captured.out.count("pending, retrying in ") == 1
+
+    configure_manual_logging()
+    logger = logging.getLogger("satsgate_mcp")
+    record = logger.makeRecord(logger.name, logging.INFO, __file__, 1, "pending", (), None)
+    formatted = next(handler.format(record) for handler in logger.handlers if handler.formatter is not None)
+    assert _STAMP.match(formatted)
+    assert formatted.endswith("INFO pending")

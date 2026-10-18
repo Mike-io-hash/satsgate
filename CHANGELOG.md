@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-18
+
+### Fixed
+- `satsgate-mcp` 0.9.1 reads a BOLT11 amount from the human-readable part before the last `1`. That `1` is the bech32 separator. 0.9.0 split on the first `1`, so an amount whose digits contain `1` was wrong: `lnbc210n` (21 sats) was read as 2 BTC, and the budget check refused the invoice. The same misread hit 1, 10, 100, 1000, and 10000 sats. A `p`-suffix millisatoshi amount and an invoice with no amount are unchanged in meaning. The proxy does not decode BOLT11 amounts. Core still uses the `bolt11` library. `GET /health` stays `0.7.0`.
+- `python -m satsgate_mcp.manual` polls until the invoice expires. The wait starts at 2 seconds and grows to 15. `--polls` and `--timeout` are optional caps. `--resume PAYMENT_HASH` continues a quote or token already stored in `SATSGATE_MCP_DATA_DIR`. If polling stops, the process prints that resume command. Status lines carry a UTC timestamp. 0.9.0 stopped after 40 polls (about four minutes), which was before a person scanning the QR had paid.
+
 ## [0.9.0] - 2026-10-17
 
 ### Added
