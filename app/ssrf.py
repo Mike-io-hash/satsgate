@@ -230,6 +230,55 @@ def safe_get_bytes(
         _local.pinned_host = None
 
 
+def safe_post_json(
+    url: str,
+    payload: dict,
+    *,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    resolver: Callable | None = None,
+) -> tuple[int, dict | None]:
+    """POST JSON and return status plus a dict body. Redirects are rejected.
+
+    A non-JSON body comes back as None. The caller decides what a non-200 means.
+    """
+    guarded = guard_url(url, resolver=resolver)
+    raw = json.dumps(payload).encode("utf-8")
+    if len(raw) > MAX_RESPONSE_BYTES:
+        raise SSRFError("request_too_large")
+    http = _shared_client()
+    _local.pinned_ip = guarded.ip
+    _local.pinned_host = guarded.host
+    try:
+        response = http.post(
+            guarded.url,
+            content=raw,
+            headers={"content-type": "application/json"},
+            timeout=timeout,
+            follow_redirects=False,
+        )
+        if 300 <= response.status_code < 400:
+            raise SSRFError("redirects_not_allowed")
+        body = response.content
+        if len(body) > MAX_RESPONSE_BYTES:
+            raise SSRFError("response_too_large")
+        if not body:
+            return response.status_code, None
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            return response.status_code, None
+        if not isinstance(data, dict):
+            return response.status_code, None
+        return response.status_code, data
+    except SSRFError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise SSRFError("fetch_failed") from exc
+    finally:
+        _local.pinned_ip = None
+        _local.pinned_host = None
+
+
 def safe_get_json(
     url: str,
     *,

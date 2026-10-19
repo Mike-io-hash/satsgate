@@ -253,21 +253,39 @@ def test_migration_adds_tables_and_leaves_a_realistic_database(tmp_path, monkeyp
         after = {table: _columns(conn, table) for table in _OLD_TABLES}
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         credits, payee = conn.execute("SELECT credits, payee_lightning_address FROM clients").fetchone()
+        evm = conn.execute(
+            """
+            SELECT payee_evm_address, payee_evm_verified_at, payee_evm_message, payee_evm_signature,
+                   payee_evm_pending_message, payee_evm_pending_expires
+            FROM clients
+            """
+        ).fetchone()
         challenge = conn.execute(
             "SELECT resource, max_uses, uses_consumed, buyer_ip_hash FROM paywall_challenges"
         ).fetchone()
         key_row = conn.execute("SELECT label, scope, resource_prefix FROM api_keys").fetchone()
         site_count = conn.execute("SELECT COUNT(*) FROM sites").fetchone()[0]
-    assert after == before
-    assert {"sites", "site_routes"} <= tables
+    payee_columns = [
+        "payee_evm_address",
+        "payee_evm_verified_at",
+        "payee_evm_message",
+        "payee_evm_signature",
+        "payee_evm_pending_message",
+        "payee_evm_pending_expires",
+    ]
+    expected = dict(before)
+    expected["clients"] = before["clients"] + payee_columns
+    assert after == expected
+    assert {"sites", "site_routes", "payment_offers", "x402_authorizations"} <= tables
     assert credits == 42
     assert payee == "kept@pay.example"
+    assert evm == (None, None, None, None, None, None)
     assert challenge == ("blog/post", 1, 0, "digest")
     assert key_row == ("proxy", "paywall", "blog/")
     assert site_count == 0
 
     with TestClient(module.app) as http:
-        assert http.get("/health").json() == {"ok": True, "version": "0.11.0"}
+        assert http.get("/health").json() == {"ok": True, "version": "0.12.0"}
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})
         assert balance.status_code == 200
         assert balance.json()["credits"] == 42
@@ -563,14 +581,14 @@ def test_admin_routes_hide_when_the_token_is_unset(tmp_path, monkeypatch):
     with TestClient(module.app) as http:
         assert http.post("/v1/admin/sites/my-shop/approve").status_code == 404
         assert http.get("/v1/admin/sites").status_code == 404
-        assert http.get("/health").json()["version"] == "0.11.0"
+        assert http.get("/health").json()["version"] == "0.12.0"
 
 
 def test_missing_site_secret_key_refuses_create_and_boots(tmp_path, monkeypatch):
     module = _load_app(tmp_path, SATSGATE_SITE_SECRET_KEY="")
     _patch_dns(monkeypatch, module)
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.11.0"
+        assert http.get("/health").json()["version"] == "0.12.0"
         account = _buy(http)
         response = http.post(
             "/v1/sites",

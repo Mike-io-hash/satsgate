@@ -121,7 +121,7 @@ def test_internal_routes_are_hidden_without_a_token(tmp_path, monkeypatch):
     module = _load_app(tmp_path, SATSGATE_GATE_TOKEN="")
     _patch_dns(monkeypatch, module)
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.11.0"
+        assert http.get("/health").json()["version"] == "0.12.0"
         hidden = http.get("/internal/gate/sites/my-shop/status", headers={"X-Satsgate-Gate-Token": _GATE_TOKEN})
         assert hidden.status_code == 404
         assert hidden.json()["error"] == "not_found"

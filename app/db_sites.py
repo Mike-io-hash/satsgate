@@ -174,6 +174,21 @@ def clean_price(price_sats: int) -> int:
     return price_sats
 
 
+def clean_usd(amount: int) -> int:
+    if isinstance(amount, bool) or not isinstance(amount, int):
+        raise ValueError("invalid_price")
+    if amount < 1 or amount > int(config.X402_MAX_USD_ATOMIC):
+        raise ValueError("invalid_price")
+    return amount
+
+
+def clean_currency(value: str | None) -> str:
+    text = (value or "sats").strip().lower()
+    if text not in {"sats", "usd"}:
+        raise ValueError("invalid_price")
+    return text
+
+
 def clean_usage(max_uses: int | None, access_seconds: int | None) -> tuple[int | None, int | None]:
     """Same bounds as a paywall challenge. Both omitted means the 0.6.0 open grant."""
     if max_uses is not None:
@@ -298,10 +313,13 @@ def load_origin_secret(db_path: str, *, site_id: int) -> str:
 
 
 def _route_public(row) -> dict:
+    currency = row["price_currency"] if row["price_currency"] else "sats"
     return {
         "id": int(row["id"]),
         "path": row["path_pattern"],
-        "price_sats": int(row["price_sats"]),
+        "price_currency": currency,
+        "price_sats": None if row["price_sats"] is None else int(row["price_sats"]),
+        "price_usd_atomic": None if row["price_usd_atomic"] is None else int(row["price_usd_atomic"]),
         "max_uses": None if row["max_uses"] is None else int(row["max_uses"]),
         "access_seconds": None if row["access_seconds"] is None else int(row["access_seconds"]),
     }
@@ -321,6 +339,8 @@ def _site_owner(row, routes: list[dict]) -> dict:
         "created_at": int(row["created_at"]),
         "updated_at": int(row["updated_at"]),
         "approved_at": None if row["approved_at"] is None else int(row["approved_at"]),
+        "rail_lightning": bool(int(row["rail_lightning"])),
+        "rail_x402": bool(int(row["rail_x402"])),
         "routes": routes,
     }
 
@@ -331,18 +351,25 @@ def _site_public(row, routes: list[dict]) -> dict:
         "name": row["display_name"],
         "slug": row["slug"],
         "url": gate_url(row["slug"]),
-        "routes": [
-            {
-                "path": route["path"],
-                "price_sats": route["price_sats"],
-                "max_uses": route["max_uses"],
-                "access_seconds": route["access_seconds"],
-            }
-            for route in routes
-        ],
+        "routes": [_public_route(route) for route in routes],
     }
     if isinstance(description, str) and description:
         item["description"] = description
+    return item
+
+
+def _public_route(route: dict) -> dict:
+    """Directory row. A USD route does not advertise a sats figure. payTo stays off."""
+    item = {
+        "path": route["path"],
+        "price_currency": route.get("price_currency") or "sats",
+        "max_uses": route["max_uses"],
+        "access_seconds": route["access_seconds"],
+    }
+    if item["price_currency"] == "usd":
+        item["price_usd_atomic"] = route["price_usd_atomic"]
+    else:
+        item["price_sats"] = route["price_sats"]
     return item
 
 
@@ -456,10 +483,19 @@ def update_site(
     origin_url: str | None = None,
     listed: bool | None = None,
     set_description: bool = False,
+    rail_lightning: bool | None = None,
+    rail_x402: bool | None = None,
     resolver=None,
 ) -> dict | None:
     slug = clean_slug(slug)
-    if display_name is None and not set_description and origin_url is None and listed is None:
+    if (
+        display_name is None
+        and not set_description
+        and origin_url is None
+        and listed is None
+        and rail_lightning is None
+        and rail_x402 is None
+    ):
         raise ValueError("empty_update")
     new_name = None if display_name is None else clean_display_name(display_name)
     new_description = clean_description(description) if set_description else None
@@ -471,10 +507,24 @@ def update_site(
         if row is None:
             conn.execute("ROLLBACK")
             return None
+        next_lightning = int(row["rail_lightning"]) if rail_lightning is None else (1 if rail_lightning else 0)
+        next_x402 = int(row["rail_x402"]) if rail_x402 is None else (1 if rail_x402 else 0)
+        if next_lightning == 0 and next_x402 == 0:
+            conn.execute("ROLLBACK")
+            raise ValueError("rails_required")
+        if next_x402 == 1 and int(row["rail_x402"]) != 1:
+            payee = conn.execute(
+                "SELECT payee_evm_verified_at FROM clients WHERE id = ?",
+                (int(client_id),),
+            ).fetchone()
+            if payee is None or payee["payee_evm_verified_at"] is None:
+                conn.execute("ROLLBACK")
+                raise ValueError("payee_evm_not_verified")
         conn.execute(
             """
             UPDATE sites
-            SET display_name = ?, description = ?, origin_url = ?, listed = ?, updated_at = ?
+            SET display_name = ?, description = ?, origin_url = ?, listed = ?,
+                rail_lightning = ?, rail_x402 = ?, updated_at = ?
             WHERE slug = ? AND client_id = ?
             """,
             (
@@ -482,6 +532,8 @@ def update_site(
                 new_description if set_description else row["description"],
                 row["origin_url"] if new_origin is None else new_origin,
                 row["listed"] if listed is None else (1 if listed else 0),
+                next_lightning,
+                next_x402,
                 now,
                 slug,
                 int(client_id),
@@ -534,20 +586,33 @@ def rotate_site_secret(db_path: str, *, client_id: int, slug: str) -> dict | Non
     return public
 
 
+def _priced(currency: str, price_sats: int | None, price_usd_atomic: int | None) -> tuple[str, int | None, int | None]:
+    kind = clean_currency(currency)
+    if kind == "sats":
+        if price_usd_atomic is not None:
+            raise ValueError("price_conflict")
+        return kind, clean_price(price_sats), None
+    if price_sats is not None:
+        raise ValueError("price_conflict")
+    return kind, None, clean_usd(price_usd_atomic)
+
+
 def add_route(
     db_path: str,
     *,
     client_id: int,
     slug: str,
     path_pattern: str,
-    price_sats: int,
+    price_sats: int | None = None,
     max_uses: int | None,
     access_seconds: int | None,
     max_routes: int,
+    price_currency: str = "sats",
+    price_usd_atomic: int | None = None,
 ) -> dict:
     slug = clean_slug(slug)
     path = clean_path(path_pattern)
-    price = clean_price(price_sats)
+    currency, price, usd = _priced(price_currency, price_sats, price_usd_atomic)
     uses, access = clean_usage(max_uses, access_seconds)
     now = int(time.time())
     with _connect(db_path) as conn:
@@ -566,11 +631,12 @@ def add_route(
         try:
             cur = conn.execute(
                 """
-                INSERT INTO site_routes(
-                  site_id, path_pattern, price_sats, max_uses, access_seconds, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?)
-                """,
-                (int(site["id"]), path, price, uses, access, now, now),
+            INSERT INTO site_routes(
+              site_id, path_pattern, price_sats, price_currency, price_usd_atomic,
+              max_uses, access_seconds, created_at, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                (int(site["id"]), path, price, currency, usd, uses, access, now, now),
             )
         except Exception as exc:  # noqa: BLE001
             conn.execute("ROLLBACK")
@@ -597,9 +663,18 @@ def update_route(
     access_seconds: int | None = None,
     set_max_uses: bool = False,
     set_access_seconds: bool = False,
+    price_currency: str | None = None,
+    price_usd_atomic: int | None = None,
+    set_price: bool = False,
 ) -> dict | None:
     slug = clean_slug(slug)
-    if path_pattern is None and price_sats is None and not set_max_uses and not set_access_seconds:
+    if (
+        path_pattern is None
+        and price_sats is None
+        and not set_max_uses
+        and not set_access_seconds
+        and not set_price
+    ):
         raise ValueError("empty_update")
     new_path = None if path_pattern is None else clean_path(path_pattern)
     new_price = None if price_sats is None else clean_price(price_sats)
@@ -621,16 +696,31 @@ def update_route(
         if row is None:
             conn.execute("ROLLBACK")
             return None
+        currency = row["price_currency"] or "sats"
+        sats_price = row["price_sats"] if new_price is None else new_price
+        usd_price = row["price_usd_atomic"]
+        if set_price:
+            currency, sats_price, usd_price = _priced(
+                price_currency or currency,
+                price_sats,
+                price_usd_atomic,
+            )
+        elif new_price is not None and currency == "usd":
+            conn.execute("ROLLBACK")
+            raise ValueError("price_conflict")
         try:
             conn.execute(
                 """
                 UPDATE site_routes
-                SET path_pattern = ?, price_sats = ?, max_uses = ?, access_seconds = ?, updated_at = ?
+                SET path_pattern = ?, price_sats = ?, price_currency = ?, price_usd_atomic = ?,
+                    max_uses = ?, access_seconds = ?, updated_at = ?
                 WHERE id = ? AND site_id = ?
                 """,
                 (
                     row["path_pattern"] if new_path is None else new_path,
-                    row["price_sats"] if new_price is None else new_price,
+                    sats_price,
+                    currency,
+                    usd_price,
                     max_uses if set_max_uses else row["max_uses"],
                     access_seconds if set_access_seconds else row["access_seconds"],
                     now,

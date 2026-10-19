@@ -8,11 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `docs/x402-design.md`, a design for adding x402 v2 (USDC on Base) later. No server, schema, or response change in this change.
-- `satsgate-mcp` 0.10.0. `list_sites` reads `GET /v1/sites` on `SATSGATE_MCP_CORE_URL` (default `https://api.satsgate.org`) without any extra setting. Each row is an approved, listed site: name, slug, description, gate URL, and routes (`price_sats`, `max_uses`, `access_seconds`). A row that still carries `status` other than `approved`, or `listed` other than true, is dropped. `SATSGATE_MCP_REGISTRY` is an optional file or URL that replaces the public directory. A directory that times out (5 seconds, and never longer than `SATSGATE_MCP_HTTP_TIMEOUT`), fails to connect, or returns a non-200 or unreadable body comes back as `registry_unavailable` or `invalid_registry` with an empty `sites` list.
+- `satsgate-mcp` 0.10.0. `list_sites` reads `GET /v1/sites` on `SATSGATE_MCP_CORE_URL` (default `https://api.satsgate.org`) without any extra setting. Each row is an approved, listed site: name, slug, description, gate URL, and routes (`price_sats`, `max_uses`, `access_seconds`). A row that still carries `status` other than `approved`, or `listed` other than true, is dropped. A route without an integer `price_sats` is dropped, so a USD-priced route does not appear until a later MCP release. `SATSGATE_MCP_REGISTRY` is an optional file or URL that replaces the public directory. A directory that times out (5 seconds, and never longer than `SATSGATE_MCP_HTTP_TIMEOUT`), fails to connect, or returns a non-200 or unreadable body comes back as `registry_unavailable` or `invalid_registry` with an empty `sites` list.
 - `docs/hosted-gate-terms.md`, a draft terms of use for the closed-beta hosted gate. It is not in effect until legal review.
 
-`GET /health` stays `0.11.0`. The public `GET /v1/sites` response is unchanged, so this does not need a server deploy. The self-hosted proxy stays 0.8.0.
+The MCP package is 0.10.0. The self-hosted proxy stays 0.8.0. The hosted gate stays 0.11.0. Core health for the x402 work is 0.12.0 below.
+
+## [0.12.0] - 2026-10-19
+
+### Added
+- Core x402 v2 on Base Sepolia (`eip155:84532`), USDC, scheme `exact` (EIP-3009). The facilitator is `https://x402.org/facilitator` unless `SATSGATE_X402_FACILITATOR_URL` is set. Satsgate does not sign, broadcast, or hold a key. Base mainnet is refused at startup. There is no CDP path.
+- A merchant sets an EVM `payTo` with the account key. `POST /v1/client/payee/evm/challenge` returns an EIP-191 message (10 minutes, nothing on chain). `POST /v1/client/payee/evm` checks the signature and stores the address. A bad signature leaves the stored address as it was. Changing the address turns x402 off on that account's sites. `GET /v1/client` adds `payee_evm_address` and `payee_evm_verified`. It does not return the signature.
+- `PATCH /v1/sites/{slug}` accepts `rail_lightning` and `rail_x402` from the account key only. Lightning stays on. x402 stays off until the merchant turns it on, and that requires a verified address. Both off is `400 rails_required`. A restricted key still cannot change rails.
+- A route has one price: `price_currency` `sats` with `price_sats`, or `usd` with `price_usd_atomic` (USDC atomic units, 6 decimals, 1 to 100000000). Mixing the two is `400 price_conflict`. This release offers x402 only for a USD price on an x402-enabled site. A sats price stays Lightning. There is no conversion yet.
+- The internal gate API, still omitted from OpenAPI and still requiring `SATSGATE_GATE_TOKEN`, can `POST /internal/gate/x402/verify` and `POST /internal/gate/x402/settle`. Verify checks the `PAYMENT-SIGNATURE` locally (amount, asset, network, payTo, validity), then asks the facilitator `/verify`, and returns `serve: true` without debiting a credit. Settle runs only after the caller reports a successful origin response: facilitator `/settle`, then one credit, then `PAYMENT-RESPONSE`. A failed settle does not debit. A used nonce is rejected. The hosted gate 0.11.0 does not call these routes yet.
+- `GET /v1/sites` adds `price_currency` on each route. A USD route includes `price_usd_atomic` and omits `price_sats`. The directory still does not include `payTo`, the owner, or the origin.
+
+`GET /health` reports `0.12.0`. Lightning challenges, invoices, and the debit-before-forward path are unchanged. The hosted gate stays 0.11.0. The self-hosted proxy stays 0.8.0. satsgate-mcp stays 0.10.0.
+
+Copy `satsgate.sqlite3` before restart. Startup adds `payee_evm_*` on `clients` (existing rows stay NULL), `rail_lightning` (default on) and `rail_x402` (default off) on `sites`, rebuilds `site_routes` so `price_sats` may be null (existing rows stay `sats` with the same amount), and creates `payment_offers` and `x402_authorizations`. New env vars have safe defaults: leave `SATSGATE_X402_NETWORK` unset or set `eip155:84532` (anything else refuses to boot), `SATSGATE_X402_FACILITATOR_URL` defaults to `https://x402.org/facilitator`, and `SATSGATE_X402_OFFER_SECONDS` defaults to 60 (15 to 300). No new secret. A USD route is stored but the current gate does not serve it.
 
 ## [0.11.0] - 2026-10-18
 

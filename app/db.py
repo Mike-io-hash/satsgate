@@ -218,7 +218,9 @@ def init_db(db_path: str) -> None:
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               site_id INTEGER NOT NULL,
               path_pattern TEXT NOT NULL,
-              price_sats INTEGER NOT NULL,
+              price_sats INTEGER,
+              price_currency TEXT NOT NULL DEFAULT 'sats',
+              price_usd_atomic INTEGER,
               max_uses INTEGER,
               access_seconds INTEGER,
               created_at INTEGER NOT NULL,
@@ -231,6 +233,128 @@ def init_db(db_path: str) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sites_client ON sites(client_id, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sites_public ON sites(status, listed, slug)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_site_routes_site ON site_routes(site_id, id)")
+        _migrate_x402(conn)
+
+
+def _migrate_x402(conn: sqlite3.Connection) -> None:
+    """Payee, rails, USD route prices, and x402 replay rows.
+
+    Existing Lightning rows stay valid. price_sats cannot lose NOT NULL with
+    ALTER TABLE, so an old site_routes table is copied and renamed.
+    """
+    client_cols = [r["name"] for r in conn.execute("PRAGMA table_info(clients)").fetchall()]
+    for name, ddl in (
+        ("payee_evm_address", "ALTER TABLE clients ADD COLUMN payee_evm_address TEXT"),
+        ("payee_evm_verified_at", "ALTER TABLE clients ADD COLUMN payee_evm_verified_at INTEGER"),
+        ("payee_evm_message", "ALTER TABLE clients ADD COLUMN payee_evm_message TEXT"),
+        ("payee_evm_signature", "ALTER TABLE clients ADD COLUMN payee_evm_signature TEXT"),
+        ("payee_evm_pending_message", "ALTER TABLE clients ADD COLUMN payee_evm_pending_message TEXT"),
+        ("payee_evm_pending_expires", "ALTER TABLE clients ADD COLUMN payee_evm_pending_expires INTEGER"),
+    ):
+        if name not in client_cols:
+            conn.execute(ddl)
+    site_cols = [r["name"] for r in conn.execute("PRAGMA table_info(sites)").fetchall()]
+    if "rail_lightning" not in site_cols:
+        conn.execute("ALTER TABLE sites ADD COLUMN rail_lightning INTEGER NOT NULL DEFAULT 1")
+    if "rail_x402" not in site_cols:
+        conn.execute("ALTER TABLE sites ADD COLUMN rail_x402 INTEGER NOT NULL DEFAULT 0")
+
+    info = conn.execute("PRAGMA table_info(site_routes)").fetchall()
+    by_name = {row["name"]: row for row in info}
+    needs_rebuild = "price_currency" not in by_name or int(by_name["price_sats"]["notnull"]) == 1
+    if needs_rebuild:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("BEGIN")
+        conn.execute("DROP TABLE IF EXISTS site_routes_v2")
+        conn.execute(
+            """
+            CREATE TABLE site_routes_v2 (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              site_id INTEGER NOT NULL,
+              path_pattern TEXT NOT NULL,
+              price_sats INTEGER,
+              price_currency TEXT NOT NULL DEFAULT 'sats',
+              price_usd_atomic INTEGER,
+              max_uses INTEGER,
+              access_seconds INTEGER,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL,
+              UNIQUE(site_id, path_pattern),
+              FOREIGN KEY(site_id) REFERENCES sites(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO site_routes_v2(
+              id, site_id, path_pattern, price_sats, price_currency, price_usd_atomic,
+              max_uses, access_seconds, created_at, updated_at
+            )
+            SELECT id, site_id, path_pattern, price_sats, 'sats', NULL,
+                   max_uses, access_seconds, created_at, updated_at
+            FROM site_routes
+            """
+        )
+        conn.execute("DROP TABLE site_routes")
+        conn.execute("ALTER TABLE site_routes_v2 RENAME TO site_routes")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_site_routes_site ON site_routes(site_id, id)")
+        conn.execute("COMMIT")
+        conn.execute("PRAGMA foreign_keys=ON")
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS payment_offers (
+          id TEXT PRIMARY KEY,
+          client_id INTEGER NOT NULL,
+          resource TEXT NOT NULL,
+          api_key_id INTEGER,
+          price_currency TEXT NOT NULL,
+          amount_sats INTEGER,
+          amount_usd_atomic INTEGER,
+          rate_num INTEGER,
+          rate_den INTEGER,
+          rate_fetched_at INTEGER,
+          expires_at INTEGER NOT NULL,
+          max_uses INTEGER,
+          access_seconds INTEGER,
+          payment_hash TEXT UNIQUE,
+          scheme TEXT,
+          network TEXT,
+          asset TEXT,
+          pay_to TEXT,
+          requirements_json TEXT,
+          buyer_ip_hash TEXT,
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY(client_id) REFERENCES clients(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS x402_authorizations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          network TEXT NOT NULL,
+          asset TEXT NOT NULL,
+          payer TEXT NOT NULL,
+          nonce TEXT NOT NULL,
+          offer_id TEXT NOT NULL,
+          value_atomic TEXT NOT NULL,
+          pay_to TEXT NOT NULL,
+          state TEXT NOT NULL,
+          tx_hash TEXT,
+          settled_at INTEGER,
+          credit_charged INTEGER NOT NULL DEFAULT 0,
+          uses_consumed INTEGER NOT NULL DEFAULT 0,
+          access_until INTEGER,
+          updated_at INTEGER NOT NULL,
+          UNIQUE(network, asset, payer, nonce)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_offers_client ON payment_offers(client_id, created_at)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_offers_buyer ON payment_offers(client_id, buyer_ip_hash, created_at)"
+    )
 
 
 def hash_api_key(api_key: str) -> str:
@@ -564,6 +688,91 @@ def _buyer_rate_row(
     ).fetchone()
 
 
+def _offer_rate_row(
+    conn: sqlite3.Connection,
+    *,
+    client_id: int,
+    buyer_ip_hash: str,
+    since: int,
+    scope: str,
+    api_key_id: int | None,
+):
+    if scope == "key" and api_key_id is None:
+        return conn.execute(
+            """
+            SELECT COUNT(*), MIN(created_at)
+            FROM payment_offers
+            WHERE client_id = ? AND buyer_ip_hash = ? AND created_at >= ? AND api_key_id IS NULL
+            """,
+            (client_id, buyer_ip_hash, since),
+        ).fetchone()
+    if scope == "key":
+        return conn.execute(
+            """
+            SELECT COUNT(*), MIN(created_at)
+            FROM payment_offers
+            WHERE client_id = ? AND buyer_ip_hash = ? AND created_at >= ? AND api_key_id = ?
+            """,
+            (client_id, buyer_ip_hash, since, int(api_key_id)),
+        ).fetchone()
+    return conn.execute(
+        """
+        SELECT COUNT(*), MIN(created_at)
+        FROM payment_offers
+        WHERE client_id = ? AND buyer_ip_hash = ? AND created_at >= ?
+        """,
+        (client_id, buyer_ip_hash, since),
+    ).fetchone()
+
+
+def _offer_open_row(
+    conn: sqlite3.Connection,
+    *,
+    client_id: int,
+    buyer_ip_hash: str,
+    grace: int,
+    cap: int,
+    invoice_cutoff: int,
+    cap_cutoff: int,
+    scope: str,
+    api_key_id: int | None,
+):
+    if scope == "key" and api_key_id is None:
+        return conn.execute(
+            """
+            SELECT COUNT(*), MIN(min(expires_at + ?, created_at + ?))
+            FROM payment_offers
+            WHERE client_id = ? AND buyer_ip_hash = ? AND expires_at >= ? AND created_at >= ?
+              AND api_key_id IS NULL
+            """,
+            (grace, cap, client_id, buyer_ip_hash, invoice_cutoff, cap_cutoff),
+        ).fetchone()
+    if scope == "key":
+        return conn.execute(
+            """
+            SELECT COUNT(*), MIN(min(expires_at + ?, created_at + ?))
+            FROM payment_offers
+            WHERE client_id = ? AND buyer_ip_hash = ? AND expires_at >= ? AND created_at >= ?
+              AND api_key_id = ?
+            """,
+            (grace, cap, client_id, buyer_ip_hash, invoice_cutoff, cap_cutoff, int(api_key_id)),
+        ).fetchone()
+    return conn.execute(
+        """
+        SELECT COUNT(*), MIN(min(expires_at + ?, created_at + ?))
+        FROM payment_offers
+        WHERE client_id = ? AND buyer_ip_hash = ? AND expires_at >= ? AND created_at >= ?
+        """,
+        (grace, cap, client_id, buyer_ip_hash, invoice_cutoff, cap_cutoff),
+    ).fetchone()
+
+
+def _sum_counts(left, right) -> tuple[int, int | None]:
+    count = int(left[0] or 0) + int(right[0] or 0)
+    stamps = [stamp for stamp in (left[1], right[1]) if stamp is not None]
+    return count, (min(int(stamp) for stamp in stamps) if stamps else None)
+
+
 def _buyer_open_row(
     conn: sqlite3.Connection,
     *,
@@ -635,8 +844,17 @@ def enforce_challenge_capacity(
             scope=buyer_limit_scope,
             api_key_id=api_key_id,
         )
-        if rate and int(rate[0]) >= int(buyer_rate_max):
-            raise ChallengeLimit("buyer_rate_limited", _retry_after(int(rate[1]) + window, now))
+        offers = _offer_rate_row(
+            conn,
+            client_id=int(client_id),
+            buyer_ip_hash=buyer_ip_hash,
+            since=int(now) - window,
+            scope=buyer_limit_scope,
+            api_key_id=api_key_id,
+        )
+        total, earliest = _sum_counts(rate or (0, None), offers or (0, None))
+        if total >= int(buyer_rate_max):
+            raise ChallengeLimit("buyer_rate_limited", _retry_after((earliest or now) + window, now))
 
     if buyer_ip_hash and int(buyer_max_open) > 0:
         # Unpaid only. A settled challenge no longer occupies the buyer's slot.
@@ -653,8 +871,20 @@ def enforce_challenge_capacity(
             scope=buyer_limit_scope,
             api_key_id=api_key_id,
         )
-        if open_buyer and int(open_buyer[0]) >= int(buyer_max_open):
-            raise ChallengeLimit("too_many_open_challenges_for_buyer", _retry_after(open_buyer[1], now))
+        open_offers = _offer_open_row(
+            conn,
+            client_id=int(client_id),
+            buyer_ip_hash=buyer_ip_hash,
+            grace=int(claim_grace_seconds),
+            cap=int(claim_cap_seconds),
+            invoice_cutoff=int(invoice_cutoff),
+            cap_cutoff=int(cap_cutoff),
+            scope=buyer_limit_scope,
+            api_key_id=api_key_id,
+        )
+        open_total, open_deadline = _sum_counts(open_buyer or (0, None), open_offers or (0, None))
+        if open_total >= int(buyer_max_open):
+            raise ChallengeLimit("too_many_open_challenges_for_buyer", _retry_after(open_deadline, now))
 
     open_rows = conn.execute(
         """
@@ -671,8 +901,24 @@ def enforce_challenge_capacity(
             int(cap_cutoff),
         ),
     ).fetchone()
-    if open_rows and int(open_rows[0]) >= int(max_open_per_client):
-        raise ChallengeLimit("too_many_open_challenges", _retry_after(open_rows[1], now))
+    offer_rows = conn.execute(
+        """
+        SELECT COUNT(*),
+               MIN(min(expires_at + ?, created_at + ?))
+        FROM payment_offers
+        WHERE client_id = ? AND expires_at >= ? AND created_at >= ?
+        """,
+        (
+            int(claim_grace_seconds),
+            int(claim_cap_seconds),
+            int(client_id),
+            int(invoice_cutoff),
+            int(cap_cutoff),
+        ),
+    ).fetchone()
+    open_total, open_deadline = _sum_counts(open_rows or (0, None), offer_rows or (0, None))
+    if open_total >= int(max_open_per_client):
+        raise ChallengeLimit("too_many_open_challenges", _retry_after(open_deadline, now))
 
 
 def preview_challenge_capacity(
