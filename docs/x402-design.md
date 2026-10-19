@@ -13,8 +13,14 @@ Non-goals for the first cut:
 - Satsgate does not run a facilitator, a relayer, or a wallet. It does not sign, broadcast, or sponsor a transaction.
 - No Polygon, Solana, or MPP. The data model has a network and a scheme column so those can be added later without a new table.
 - No conversion of funds. The merchant is paid whatever the buyer sent. Satsgate does not swap USDC for sats or the reverse.
-- No change to today's Lightning debit timing in the first x402 pull requests. See the conflict in section 12.
+- The first x402 pull requests do not change Lightning debit timing. That change is its own later PR (section 11). The rule, once it lands, is the same on both rails.
 - Lightning-only callers keep working. A 402 that also offers x402 still has `WWW-Authenticate: L402` and `error: payment_required`.
+
+## 1.1 Decisions
+
+1. **Credit timing, both rails.** The merchant's credit and the use counter move only after a successful origin response. Today `settle_and_consume` debits before `forward()`, and a failed origin still returns `use_spent: true`. That stays until the Lightning PR in section 11. On x402, credit and use also wait for a successful `/settle` (section 3.2). A failed origin consumes neither.
+2. **x402 flow.** Offers use the standard `exact` flow: facilitator `/verify`, then the origin, then `/settle`. Not `upfront`. A later per-site setting may advertise `upfront`. The first cut has no such column.
+3. **USDC credit packs.** Each plan has a fixed USD price, not a BTC median. The amounts are decided in Etapa 4 pricing. Testnet uses placeholder values. This is decided later, not open.
 
 ## 2. What the code does today
 
@@ -28,7 +34,11 @@ Credit packs are `app/plans.py`. Every plan has `price_sats` and `credits`. `GET
 
 ## 3. Payment flows
 
-Settlement of buyer funds happens before the origin is called. For x402 that is the v2 `upfront` flow (`extra.paymentFlow: "upfront"`): facilitator `POST /settle`, then the origin, then the response. The scheme default is `authorization` (verify, serve, settle). We will not advertise that default. A client that does not understand `upfront` is required by the spec to skip that `accepts` entry. Lightning remains available when the merchant enabled it.
+x402 uses the standard `exact` flow (`authorization`): facilitator `POST /verify`, then the origin, then `POST /settle`. The offer does not set `extra.paymentFlow`. Clients that speak the default flow can pay. `upfront` (settle, then serve) is a possible later per-site setting. It is not offered in the first cut.
+
+The residual risk is accepted. `/settle` can fail after the origin has already run (facilitator reject, timeout, or the balance disappearing inside `validBefore`). Mitigations: `/verify` first, so a bad signature or an empty balance never reaches the origin; a short offer window; if settle fails, do not consume the credit or the use, and log the offer id, nonce, facilitator status, and short reason. Satsgate does not refund and does not try a second facilitator. Custody is unchanged: USDC still moves from the buyer to the merchant's `payTo` inside the facilitator's transaction. Satsgate does not receive it.
+
+Lightning money already moves when the invoice is paid, to `clients.payee_lightning_address`, before the origin runs. The Lightning PR does not change that. It changes only when the Satsgate credit and the use counter move.
 
 The facilitator is not us. Testnet calls the public x402.org facilitator, which must advertise `exact` on `eip155:84532` from `GET /supported`. Mainnet calls the Coinbase CDP facilitator only when `SATSGATE_X402_CDP=1`. The default is off. Core is the only process that holds facilitator credentials and the only process that calls `/verify` or `/settle`. The gate and the proxy call core, the same way they call `_unlock_paywall` today.
 
@@ -41,7 +51,9 @@ USDC contracts are fixed in config, not taken from the buyer or the merchant:
 
 ### 3.1 Lightning only
 
-Unchanged. The gate or proxy calls `_issue_paywall_challenge`. The 402 has `WWW-Authenticate` and no `PAYMENT-REQUIRED`. Unlock still uses the macaroon and, when the payee advertised it, the LUD-21 verify URL. Credit debit stays where it is today.
+The 402 is unchanged: `WWW-Authenticate`, no `PAYMENT-REQUIRED`. Unlock is still the macaroon plus a preimage, or the LUD-21 verify URL when the payee advertises it. Until the Lightning PR, `settle_and_consume` still debits before `forward()`.
+
+Target, in that later PR:
 
 ```mermaid
 sequenceDiagram
@@ -54,12 +66,22 @@ sequenceDiagram
   Core-->>Gate: macaroon, invoice
   Gate-->>Buyer: 402 L402
   Buyer->>Gate: Authorization L402
-  Gate->>Core: verify or status, consume=true
-  Note over Core: settle_and_consume debits 1 credit
-  Core-->>Gate: settled
+  Gate->>Core: confirm payment, do not consume
+  Note over Core: settled_at set, credit stays
+  Core-->>Gate: paid, not charged
   Gate->>Origin: signed request
-  Origin-->>Buyer: response
+  alt origin 2xx
+    Gate->>Core: consume credit and one use
+    Gate-->>Buyer: response
+  else origin fails
+    Note over Core: payment stays paid, use stays
+    Gate-->>Buyer: 502 use_spent false
+  end
 ```
+
+Core checks that the merchant has at least one credit before the origin call, and does not debit it. `settled_at` is set when the preimage or LUD-21 confirms. `verifications` and `uses_consumed` are written only after origin 2xx, in one `IMMEDIATE` transaction, the same conditional update that stops two workers taking the last use. The loser gets `token_used_up` and is not charged.
+
+A retry sends the same macaroon. If `settled_at` is set, core does not mint a new invoice and does not poll the wallet again. No `verifications` row means the credit was not taken, so a previous origin failure is retried. The first 2xx debits once. `UNIQUE(client_id, payment_hash)` makes a second debit a no-op. A grant that is already used up or expired is still a fresh 402 with `reason=token_used_up` or `token_expired`, and the origin is not called. That path does not run after an origin failure, because the use was not taken. A crash after a 2xx and before the debit is the same as a failure: the retry serves again and debits once.
 
 ### 3.2 x402 only
 
@@ -77,23 +99,31 @@ sequenceDiagram
   Core-->>Gate: offer, PAYMENT-REQUIRED
   Gate-->>Buyer: 402 PAYMENT-REQUIRED
   Buyer->>Gate: PAYMENT-SIGNATURE
-  Gate->>Core: POST /internal/gate/x402/settle
-  Note over Core: insert nonce pending, then settle
-  Core->>Fac: POST /settle
-  Fac-->>Core: success, tx, payer
-  Note over Core: mark settled, do not debit yet
-  Core-->>Gate: settled grant
+  Gate->>Core: POST /internal/gate/x402/verify
+  Note over Core: nonce pending
+  Core->>Fac: POST /verify
+  Fac-->>Core: isValid
+  Core-->>Gate: ok to serve
   Gate->>Origin: signed request
-  alt origin 2xx
-    Gate->>Core: consume credit and one use
-    Gate-->>Buyer: body plus PAYMENT-RESPONSE
-  else origin fails
-    Note over Core: nonce stays spent, credit stays
+  alt origin not 2xx
+    Note over Core: no settle, no debit
     Gate-->>Buyer: 502 use_spent false
+  else origin 2xx
+    Gate->>Core: POST /internal/gate/x402/settle
+    Core->>Fac: POST /settle
+    alt settle ok
+      Note over Core: debit 1 credit, take one use
+      Gate-->>Buyer: body plus PAYMENT-RESPONSE
+    else settle fails
+      Note over Core: log, do not debit
+      Gate-->>Buyer: 402 x402_rejected
+    end
   end
 ```
 
-A retry of the same `PAYMENT-SIGNATURE` after an origin failure does not call `/settle` again. Core finds the nonce already recorded, and the grant still has a use, so the gate tries the origin again. The first successful origin response is what debits the credit and takes the use.
+The gate holds the origin body until `/settle` returns. A failed settle is a 402 to the buyer. The origin has already run. That is the accepted risk. Credit and use move only after settle succeeds.
+
+A retry after an origin failure uses the same `PAYMENT-SIGNATURE`, does not call `/settle`, and tries the origin again while the offer is valid. A retry after a failed settle calls `/settle` again with the stored requirements. It does not ask the buyer for a new nonce while the row is `pending`. A `settled` nonce does not call `/settle` again, and the debit runs once. A `rejected` verify lets the buyer submit a new authorization.
 
 ### 3.3 Both rails
 
@@ -111,16 +141,16 @@ sequenceDiagram
   Gate-->>Buyer: 402 L402 and PAYMENT-REQUIRED
   alt Lightning
     Buyer->>Gate: Authorization L402
-    Gate->>Core: existing verify or status
+    Gate->>Core: confirm, then origin, then consume
   else USDC
     Buyer->>Gate: PAYMENT-SIGNATURE
-    Gate->>Core: x402 settle
+    Gate->>Core: x402 verify, then origin, then settle
   end
 ```
 
 ### 3.4 Credit top-up in USDC
 
-`GET /v1/topup/{plan_id}` stays Lightning and still uses `plans.price_sats`. A new `GET /v1/topup/{plan_id}/x402` sells the same pack for a fixed USD amount (section 12) to Satsgate's own Base address (`SATSGATE_X402_PAYTO`). Satsgate is the merchant of that one route. The buyer pays that address through the facilitator. Core never receives the USDC. On settle, the same credit function that settles a Lightning top-up writes `ledger` (`reason` `topup_x402`, `ref` the tx hash) and the `topups` row. Credits are not transferred and are not redeemable for money. A failed facilitator response adds nothing.
+`GET /v1/topup/{plan_id}` stays Lightning and still uses `plans.price_sats`. A new `GET /v1/topup/{plan_id}/x402` sells the same pack for a fixed USD amount to Satsgate's own Base address (`SATSGATE_X402_PAYTO`). The amount is not the BTC median. Real pack prices are decided in Etapa 4. Testnet uses placeholders (every plan `1_000_000` atomic, meaning $1) and those values must not ship as production prices. Satsgate is the merchant of that one route. There is no origin. The flow is `/verify`, then `/settle`, then the ledger write. Credits are applied only after settle succeeds. Core never receives the USDC. Credits are not transferred and are not redeemable for money. A failed facilitator response adds nothing.
 
 ```mermaid
 sequenceDiagram
@@ -130,12 +160,14 @@ sequenceDiagram
   Merchant->>Core: GET /v1/topup/starter/x402
   Core-->>Merchant: 402 PAYMENT-REQUIRED payTo Satsgate
   Merchant->>Core: PAYMENT-SIGNATURE
+  Core->>Fac: POST /verify
+  Fac-->>Core: isValid
   Core->>Fac: POST /settle
   Fac-->>Core: tx to SATSGATE_X402_PAYTO
   Core-->>Merchant: credits_added, new_balance
 ```
 
-There is no origin to fail, so the credit is applied when settle succeeds. If the process dies after settle and before the ledger write, the nonce row (inserted before `/settle` returns, section 7) is how a retry finds the tx and finishes the credit without a second charge.
+If the process dies after settle and before the ledger write, the nonce row (inserted before `/verify`, section 7) is how a retry finds the tx and finishes the credit without a second charge.
 
 ## 4. Data model
 
@@ -193,17 +225,17 @@ New table `x402_authorizations`, the replay record:
 | --- | --- |
 | `network`, `asset`, `payer`, `nonce` | Unique together. The EIP-3009 nonce is 32 bytes. |
 | `offer_id` | The offer that was paid. |
-| `value_atomic`, `pay_to` | What we required. Checked before `/settle`. |
-| `state` | `pending`, `settled`, or `rejected`. |
+| `value_atomic`, `pay_to` | What we required. Checked before `/verify` and again before `/settle`. |
+| `state` | `pending`, `verified`, `settled`, or `rejected`. |
 | `tx_hash`, `settled_at` | From the facilitator. Empty until settle succeeds. |
-| `credit_charged` | 0 until the origin (or the top-up) succeeds. |
-| `uses_consumed`, `access_until` | Same grant rules as `paywall_challenges`. |
+| `credit_charged` | 0 until settle has succeeded and, for a gate or proxy route, the origin returned 2xx. |
+| `uses_consumed`, `access_until` | Same grant rules as `paywall_challenges`. Written with the credit, not before. |
 
-Insert `pending` in a local transaction before calling `/settle`. Two workers cannot both settle one nonce. On facilitator failure, mark `rejected` and do not debit. On success, store the tx and only then serve. `verifications` stays the Lightning once-per-hash record. It is not reused as a nonce table, because an x402-only payment has no Lightning payment hash.
+Insert `pending` before `/verify`. Two workers cannot both verify one nonce. Verify failure marks `rejected` and does not call the origin. Origin failure leaves `pending` and does not call `/settle`. Settle success stores the tx, then the same transaction debits the credit and takes the use. Settle failure after a 2xx leaves the credit and the use alone and writes a log line. `verifications` stays the Lightning once-per-hash record, inserted by the Lightning PR only after origin 2xx. It is not a nonce table.
 
 `topups` gains `rail` (`lightning` or `x402`, default `lightning`), `tx_hash`, and `amount_usd_atomic`. `payment_hash` stays unique for Lightning. x402 top-ups use `tx_hash` as their unique ref. `ledger.ref` is that tx hash.
 
-`app/plans.py` gains a fixed `price_usd_atomic` per plan when the top-up PR lands. That number is not the BTC median. The median is only for a route whose other rail is derived.
+`app/plans.py` gains a fixed `price_usd_atomic` per plan when the top-up PR lands. That number is not the BTC median. The median is only for a route whose other rail is derived. Production amounts wait for Etapa 4. Until then the column is a testnet placeholder.
 
 ## 5. API
 
@@ -230,11 +262,13 @@ Merchant account, all on the account key. A restricted `sgr_` key cannot set a p
 - The EIP-712 domain name and version are the USDC values we put in `extra`, not values the buyer invented.
 - The nonce is 32 bytes and not already `settled` for that network, asset, and payer.
 
-Then core calls the facilitator. The requirements object sent to `/settle` is the one core stored, not the buyer's copy. A facilitator `isValid: false` or `success: false` becomes 402 `x402_rejected`. `invalidReason` or `errorReason` is passed through only if it is a short token (`[a-z0-9_]{1,64}`). Anything else is `x402_rejected` with no detail. The origin is not called, and the nonce is marked `rejected`, so the buyer can submit a new authorization. A timeout or a non-JSON body is 502 `paywall_unavailable`, the same shape as a Lightning provider failure in `_lud21_state`, and the nonce stays `pending`. Settle may have landed. A retry of the same `PAYMENT-SIGNATURE` looks that row up and does not start a second payment. Only a `rejected` row allows a new nonce.
+Core then calls facilitator `/verify` with the stored requirements, not the buyer's copy. `isValid: false` is 402 `x402_rejected`. `invalidReason` is passed through only if it is a short token (`[a-z0-9_]{1,64}`). The nonce is `rejected`, the origin is not called, and the buyer can submit a new authorization. A verify timeout or a non-JSON body is 502 `paywall_unavailable`, the same shape as a Lightning provider failure in `_lud21_state`, and the nonce stays `pending`.
 
-`PAYMENT-RESPONSE` on the successful buyer response is the base64 settle result the spec expects (`success`, `tx`, `network`, `payer`). It is not sent on the 502 after a failed origin. The tx is already in our row.
+On verify success the gate calls the origin. A non-2xx does not call `/settle`. On 2xx the gate calls core again, and core calls `/settle` with the stored requirements. `success: false` is 402 `x402_rejected`, the origin body is not returned, and the credit and the use stay put. The log line is the offer id, the nonce, the HTTP status, and the short reason. A settle timeout leaves `pending` (the tx may have landed). A retry of the same payload looks the row up and does not start a second payment. Only a `rejected` row allows a new nonce.
 
-Internal gate (`app/internal_gate.py`): `POST /internal/gate/challenge` keeps its body (`slug`, `path`) and returns both offers. New `POST /internal/gate/x402/settle` takes the same gate token and `SATSGATE_GATE_PEERS` check. The gate does not receive `SATSGATE_X402_CDP_*`. Public OpenAPI continues to omit `/internal/*`.
+`PAYMENT-RESPONSE` is the base64 settle result (`success`, `tx`, `network`, `payer`) on the buyer response that carries the origin body. It is not sent on the 402 or the 502.
+
+Internal gate (`app/internal_gate.py`): `POST /internal/gate/challenge` keeps its body (`slug`, `path`) and returns both offers. New `POST /internal/gate/x402/verify` and `POST /internal/gate/x402/settle` take the same gate token and `SATSGATE_GATE_PEERS` check. The gate does not receive `SATSGATE_X402_CDP_*`. Public OpenAPI continues to omit `/internal/*`. The Lightning consume-after-origin call is added in the Lightning PR, not here.
 
 Proxy YAML (`proxy/src/satsgate_proxy/config.py`) later gains `price_currency`, `price_usd`, and `rails`. Until that PR, the proxy is Lightning only. When it lands, the proxy forwards `PAYMENT-SIGNATURE` to core and copies `PAYMENT-REQUIRED` and `PAYMENT-RESPONSE`. It strips both before the origin, next to the L402 `Authorization` drop.
 
@@ -260,7 +294,7 @@ Satsgate never converts a settled payment. If the buyer pays the USDC amount, th
 ## 7. Security
 
 - Signature check for payTo is EIP-191 over the server's message. The message includes a nonce stored on the client row and an expiry of 10 minutes. The recovered address must equal the address in the body. No on-chain call.
-- Replay is the unique `(network, asset, payer, nonce)` row. The on-chain nonce is the backstop. The row is what stops two gate workers, and what lets a retry after a failed origin skip `/settle`.
+- Replay is the unique `(network, asset, payer, nonce)` row, inserted before `/verify`. The on-chain nonce is the backstop. The row stops two gate workers. An origin failure skips `/settle`. A settle timeout retries `/settle` on the same row. Lightning replay is the payment hash: `settled_at` means the invoice is paid, and `verifications` means the credit was taken. A second presentation of the same proof does not debit twice.
 - Amount, asset, network, and payTo are compared to the offer and to the hardcoded USDC address for that network. A mainnet payload is rejected while `SATSGATE_X402_CDP` is off, even if the signature is valid.
 - `validBefore` must fall inside the offer window. An authorization that is valid for longer than `maxTimeoutSeconds` is rejected, so a buyer cannot reuse a signature after the locked price has expired.
 - Limits: the existing per-buyer challenge caps (`SATSGATE_BUYER_CHALLENGE_MAX`, `SATSGATE_BUYER_MAX_OPEN_CHALLENGES`) apply to offers. x402 settle is not a way around them. Facilitator calls use a 10 second timeout, no redirects, and the existing SSRF guard (`app/ssrf.py`) even though the URL is ours.
@@ -277,7 +311,7 @@ Satsgate does not run a facilitator or a relayer. Configuring our own `/settle` 
 
 Credits are closed-loop. They are not a balance the merchant can withdraw, transfer to another client, or redeem for sats or USDC. A refund, if one is ever given, is more credits on `ledger`, not a payment. The existing top-up path already works this way.
 
-Buyer money that has already settled is not ours to return. If the origin fails after `/settle`, the merchant's credit is not taken, and any refund of the USDC or the sats is between the buyer and the merchant.
+Buyer funds go from the buyer to the merchant. On Lightning that is the invoice to `payee_lightning_address`. On x402 that is the facilitator's `/settle` to `payTo`. Satsgate does not sit in that path. The standard flow calls the origin before `/settle`. If the origin fails, `/settle` is not called. If `/settle` fails after the origin has run, the merchant's credit is not taken and the failure is logged. Any remedy for that unpaid origin work, or for sats already paid on Lightning, is between the buyer and the merchant. Satsgate does not refund.
 
 Changes that would cross the line, and should be rejected or sent for a new decision:
 
@@ -294,7 +328,7 @@ The facilitator may refuse a payment (sanctions or KYT). That refusal is a faile
 
 Not edited in this pull request. When the draft terms are next updated, add:
 
-- USDC payments depend on a third-party facilitator. That facilitator can reject a payment. Satsgate does not control that decision and does not complete the payment itself.
+- USDC payments depend on a third-party facilitator. That facilitator can reject a payment, including after the origin has been called. Satsgate does not control that decision, does not complete the payment itself, and does not refund.
 - Sites may not offer illegal or sanctioned content or services. Satsgate may disable a site on an abuse report, as it already may for the other prohibited uses.
 - Credits are not money. They cannot be transferred or cashed out. A refund from Satsgate, if any, is credits only.
 - Do not describe the service as anonymous. Payment hashes, settlement transaction ids, and a rate-limit hash of the buyer IP are stored.
@@ -307,9 +341,12 @@ Unit tests, with the facilitator HTTP mocked, the same style as `tests/test_sats
 - Unverified EVM address cannot enable the rail. A new signature is required after the address changes. A signature over the wrong message does not verify.
 - Derived rail omitted when the rate fixture is stale or has one source. Main price still returned. Stored offer amount does not change if the fixture rate changes before settle.
 - Settle checks amount, asset, network, payTo, and expiry. A mutated payload does not reach the facilitator.
-- Replay: a second settle of the same nonce does not call the facilitator and does not debit twice.
-- Facilitator 200 with `success: false` does not call the origin and does not debit.
-- Facilitator success then origin 500: no credit debit, `uses_consumed` stays 0, retry serves and then debits once.
+- The offer has no `paymentFlow: upfront`.
+- Replay: a second settle of a `settled` nonce does not call the facilitator and does not debit twice.
+- `/verify` with `isValid: false` does not call the origin or `/settle`, and does not debit.
+- Origin 500 after a valid verify: no `/settle`, no debit, `uses_consumed` stays 0, retry serves.
+- Origin 2xx then `/settle` `success: false`: buyer gets 402, no debit, a log line exists, retry calls `/settle` once more and then debits once.
+- Lightning PR: payment confirmed, origin 500, credit unchanged, `use_spent` false, retry of the same macaroon debits once. A used-up grant is still `reason=token_used_up`.
 - Dual header present, and `one_rail_only` when both payment headers are sent.
 - CDP flag off: `eip155:8453` is rejected. Flag on: the test double is the CDP base URL, and the key is absent from logs.
 - Public `GET /v1/sites` still has no owner, origin, secret, or payTo.
@@ -322,21 +359,20 @@ Mainnet, last, behind the flag, one route at the smallest sensible USDC amount, 
 
 Each one is shippable on its own. None of them is this pull request.
 
-1. Core, testnet only. Offer rows, nonce table, payTo verification, `upfront` settle through the x402.org facilitator, feature flag default off for mainnet. No gate change. A test can call the internal route.
+1. Core, testnet only. Offer rows, nonce table, payTo verification, standard `/verify` then `/settle` through the x402.org facilitator, feature flag default off for mainnet. No gate change. A test can call the internal routes. Lightning debit timing stays as it is today.
 2. Rates and main currency. Route columns, median refresh, lock on the offer, stale-rate behavior.
-3. Gate. Dual 402, header pass-through, private Sepolia test against a real origin. Credit debit only after a successful origin response, for the x402 rail only.
-4. USDC credit top-up to `SATSGATE_X402_PAYTO`, fixed USD prices on `app/plans.py`.
-5. Proxy YAML and the same headers, still talking to core.
-6. MCP. Parse `PAYMENT-REQUIRED`, show the USDC amount, and enforce a separate USD cap (`SATSGATE_MCP_MAX_PAYMENT_USD` and a daily cap). Do not pay automatically unless a later, explicit wallet setting exists. The sats caps in `budget.py` do not apply to USDC and must not be reused as if they did.
-7. CDP mainnet behind `SATSGATE_X402_CDP`, default off, after the small real payment in section 10.
+3. Gate. Dual 402, header pass-through, private Sepolia test against a real origin. x402 credit and use move only after origin 2xx and settle success. The Lightning path still uses today's `consume=true`.
+4. Lightning credit timing, its own small PR. `settled_at` on payment confirmation. Credit and `uses_consumed` only after origin 2xx, in the gate and the proxy. Retry and replay as in section 3.1. No x402 work in this PR.
+5. USDC credit top-up to `SATSGATE_X402_PAYTO`. Fixed `price_usd_atomic` on `app/plans.py`, testnet placeholders only. Real amounts wait for Etapa 4.
+6. Proxy YAML and the same headers, still talking to core.
+7. MCP. Parse `PAYMENT-REQUIRED`, show the USDC amount, and enforce a separate USD cap (`SATSGATE_MCP_MAX_PAYMENT_USD` and a daily cap). Do not pay automatically unless a later, explicit wallet setting exists. The sats caps in `budget.py` do not apply to USDC and must not be reused as if they did.
+8. CDP mainnet behind `SATSGATE_X402_CDP`, default off, after the small real payment in section 10. A per-site `upfront` option is not in this list.
 
 ## 12. Open questions
 
-These need an owner decision. The rest of this document assumes the recommendation in each bullet.
+Credit timing, the standard x402 flow, and fixed USD pack prices are decisions in section 1.1. Pack amounts are decided later, in Etapa 4. These still need an owner:
 
-1. Credits versus Lightning. Today `settle_and_consume` debits one credit before `forward()`, and a failed origin still reports `use_spent: true`. The requirement says a failed origin does not consume the credit. This design does that for x402 only, and does not change Lightning. Confirm that split. Also confirm that a retry of the same settled USDC authorization may be served, and that the use counter moves only on a successful origin response. The on-chain nonce cannot be settled twice, so the retry has to be recognized from `x402_authorizations`.
-2. USD prices for credit packs. Plans are sats today (`trial` is 1000 sats for 200 credits, and so on). The USDC top-up should use a fixed USD amount per plan, not the BTC median. The amounts are not chosen in this document.
-3. Rounding. Section 6 proposes 0.0001 USDC steps and a 0.001 USDC floor, and whole sats with a 1 sat floor. A 21-sat route is about two cents at a $100k BTC, so the floor matters for cheap routes.
-4. Whether `payTo` may appear on `GET /v1/sites`. This design keeps it off the directory, like the Lightning address, and puts it only in the 402.
-5. Whether the MCP may hold a buyer private key. This design says no in the first MCP PR. It returns the payment requirements and enforces a USD cap. A key in the environment would be a separate decision, and it would have to be unread from logs the way `SATSGATE_MCP_NWC_URI` is.
-6. Exact facilitator base URLs, confirmed at implementation by `GET /supported`, not hard-coded from memory in this document. Testnet is the public x402.org facilitator. Mainnet is CDP, flag off.
+1. Rounding. Section 6 proposes 0.0001 USDC steps and a 0.001 USDC floor, and whole sats with a 1 sat floor. A 21-sat route is about two cents at a $100k BTC, so the floor matters for cheap routes.
+2. Whether `payTo` may appear on `GET /v1/sites`. This design keeps it off the directory, like the Lightning address, and puts it only in the 402.
+3. Whether the MCP may hold a buyer private key. This design says no in the first MCP PR. It returns the payment requirements and enforces a USD cap. A key in the environment would be a separate decision, and it would have to be unread from logs the way `SATSGATE_MCP_NWC_URI` is.
+4. Exact facilitator base URLs, confirmed at implementation by `GET /supported`, not hard-coded from memory in this document. Testnet is the public x402.org facilitator. Mainnet is CDP, flag off.
