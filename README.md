@@ -49,6 +49,7 @@ See [`STATUS.md`](./STATUS.md).
 - Contributing: [`CONTRIBUTING.md`](./CONTRIBUTING.md)
 - Changelog: [`CHANGELOG.md`](./CHANGELOG.md)
 - Security: [`SECURITY.md`](./SECURITY.md)
+- x402 design (not implemented): [`docs/x402-design.md`](./docs/x402-design.md)
 
 ## Manifest (.well-known)
 

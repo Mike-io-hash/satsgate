@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `docs/x402-design.md`, a design for adding x402 v2 (USDC on Base) later. No server, schema, or response change in this change.
 - `satsgate-mcp` 0.10.0. `list_sites` reads `GET /v1/sites` on `SATSGATE_MCP_CORE_URL` (default `https://api.satsgate.org`) without any extra setting. Each row is an approved, listed site: name, slug, description, gate URL, and routes (`price_sats`, `max_uses`, `access_seconds`). A row that still carries `status` other than `approved`, or `listed` other than true, is dropped. `SATSGATE_MCP_REGISTRY` is an optional file or URL that replaces the public directory. A directory that times out (5 seconds, and never longer than `SATSGATE_MCP_HTTP_TIMEOUT`), fails to connect, or returns a non-200 or unreadable body comes back as `registry_unavailable` or `invalid_registry` with an empty `sites` list.
 - `docs/hosted-gate-terms.md`, a draft terms of use for the closed-beta hosted gate. It is not in effect until legal review.
 
