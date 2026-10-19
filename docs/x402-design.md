@@ -148,6 +148,8 @@ sequenceDiagram
   end
 ```
 
+The Lightning branch is the target in section 3.1. The gate PR still calls today's verify or status with `consume=true`.
+
 ### 3.4 Credit top-up in USDC
 
 `GET /v1/topup/{plan_id}` stays Lightning and still uses `plans.price_sats`. A new `GET /v1/topup/{plan_id}/x402` sells the same pack for a fixed USD amount to Satsgate's own Base address (`SATSGATE_X402_PAYTO`). The amount is not the BTC median. Real pack prices are decided in Etapa 4. Testnet uses placeholders (every plan `1_000_000` atomic, meaning $1) and those values must not ship as production prices. Satsgate is the merchant of that one route. There is no origin. The flow is `/verify`, then `/settle`, then the ledger write. Credits are applied only after settle succeeds. Core never receives the USDC. Credits are not transferred and are not redeemable for money. A failed facilitator response adds nothing.
