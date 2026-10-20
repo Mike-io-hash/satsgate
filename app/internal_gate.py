@@ -164,10 +164,15 @@ def internal_site_config(slug: str, request: Request):
     for route in site["routes"]:
         if len(gate_resource(site["slug"], route["path"])) > _RESOURCE_MAX:
             continue
+        if route.get("price_currency", "sats") != "sats":
+            continue
+        price = route.get("price_sats")
+        if isinstance(price, bool) or not isinstance(price, int) or price < 1:
+            continue
         routes.append(
             {
                 "path": route["path"],
-                "price_sats": route["price_sats"],
+                "price_sats": price,
                 "max_uses": route["max_uses"],
                 "access_seconds": route["access_seconds"],
             }
@@ -208,6 +213,60 @@ def internal_challenge(
     if route is None or client is None:
         return _not_found()
     from . import main as core
+
+    from . import x402_service
+
+    if x402_service.rail_for(site, route) == "x402":
+        from . import db_x402
+
+        pay_to = db_x402.payee_verified(config.DB_PATH, client_id=client.id)
+        if not pay_to:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "payee_evm_not_verified"},
+                headers=_NO_STORE,
+            )
+        peer = request.client.host if request.client else None
+        try:
+            buyer_ip = core.buyer_ip_from_trusted_proxy(
+                peer=peer,
+                header=x_satsgate_buyer_ip,
+                trusted_proxies=config.TRUSTED_PROXIES,
+            )
+        except ValueError as exc:
+            if str(exc) == "invalid_buyer_ip":
+                return JSONResponse(
+                    status_code=400,
+                    content={"ok": False, "error": "invalid_buyer_ip"},
+                    headers=_NO_STORE,
+                )
+            raise
+        buyer_hash = core.hash_buyer_ip(buyer_ip, secret=config.MACAROON_SECRET) if buyer_ip else None
+        try:
+            body_out = x402_service.issue_offer(
+                client_id=client.id,
+                slug=slug,
+                path=path,
+                resource=gate_resource(slug, path),
+                pay_to=pay_to,
+                amount=int(route["price_usd_atomic"]),
+                max_uses=route["max_uses"],
+                access_seconds=route["access_seconds"],
+                buyer_ip_hash=buyer_hash,
+            )
+        except core.db.ChallengeLimit as exc:
+            response = core._challenge_limited(exc)
+            response.headers["Cache-Control"] = "no-store"
+            return response
+        response = JSONResponse(content=body_out, headers=_NO_STORE)
+        response.headers["PAYMENT-REQUIRED"] = body_out["payment_required"]
+        return response
+    if x402_service.rail_for(site, route) != "lightning":
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": "rail_unavailable"},
+            headers=_NO_STORE,
+        )
 
     resource = gate_resource(slug, path)
     memo = f"satsgate {slug} {path}"
@@ -332,3 +391,77 @@ def internal_status(
         poll=True,
         consume=bool(consume),
     )
+
+
+class X402PaymentIn(BaseModel):
+    slug: str = Field(min_length=1, max_length=80)
+    path: str = Field(min_length=1, max_length=200)
+    payment_signature: str = Field(min_length=1, max_length=12000)
+
+
+def _x402_call(request: Request, body: X402PaymentIn, *, settle: bool):
+    denied = _authorized(request)
+    if denied is not None:
+        return denied
+    slug = _clean_slug(body.slug)
+    path = _clean_path(body.path)
+    if slug is None or path is None:
+        return _not_found()
+    site = _approved(slug)
+    route = _route(site, path) if site is not None else None
+    client = _owner(site) if site is not None and route is not None else None
+    if site is None or route is None or client is None:
+        return _not_found()
+    from . import x402
+    from . import x402_service
+
+    if x402_service.rail_for(site, route) != "x402":
+        return JSONResponse(status_code=400, content={"ok": False, "error": "rail_unavailable"}, headers=_NO_STORE)
+    try:
+        if settle:
+            result = x402_service.settle_payment(
+                client_id=client.id,
+                slug=slug,
+                path=path,
+                resource=gate_resource(slug, path),
+                encoded=body.payment_signature,
+            )
+        else:
+            result = x402_service.verify_payment(
+                client_id=client.id,
+                slug=slug,
+                path=path,
+                resource=gate_resource(slug, path),
+                encoded=body.payment_signature,
+            )
+    except x402.X402Error as exc:
+        content = {"ok": False, "error": exc.code}
+        if exc.reason:
+            content["reason"] = exc.reason
+        return JSONResponse(status_code=exc.status, content=content, headers=_NO_STORE)
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=402,
+            content={
+                "ok": False,
+                "error": str(exc),
+                "hint": "Top up payment verifications (credits): GET /v1/plans then /v1/topup/{plan_id}",
+            },
+            headers=_NO_STORE,
+        )
+    response = JSONResponse(content=result, headers=_NO_STORE)
+    if result.get("payment_response"):
+        response.headers["PAYMENT-RESPONSE"] = result["payment_response"]
+    return response
+
+
+@router.post("/internal/gate/x402/verify")
+def internal_x402_verify(body: X402PaymentIn, request: Request):
+    """Facilitator /verify. serve=true means the caller may call the origin. No credit is taken."""
+    return _x402_call(request, body, settle=False)
+
+
+@router.post("/internal/gate/x402/settle")
+def internal_x402_settle(body: X402PaymentIn, request: Request):
+    """Call only after the origin returned 2xx. Facilitator /settle, then one credit."""
+    return _x402_call(request, body, settle=True)

@@ -17,6 +17,8 @@ from . import db_keys
 from . import db_reports
 from . import db_sites
 from . import db_verify
+from . import db_x402
+from . import x402 as x402_mod
 from . import ssrf
 from . import wallet_lnaddr
 from .admin import router as admin_router
@@ -311,6 +313,8 @@ def well_known_satsgate(request: Request) -> dict:
                 "balance": {"method": "GET", "path": "/v1/balance"},
                 "client": {"method": "GET", "path": "/v1/client"},
                 "set_payee": {"method": "POST", "path": "/v1/client/payee"},
+                "evm_payee_challenge": {"method": "POST", "path": "/v1/client/payee/evm/challenge"},
+                "evm_payee": {"method": "POST", "path": "/v1/client/payee/evm"},
                 "api_keys_create": {"method": "POST", "path": "/v1/api-keys"},
                 "api_keys_list": {"method": "GET", "path": "/v1/api-keys"},
                 "api_keys_revoke": {"method": "POST", "path": "/v1/api-keys/{key_id}/revoke"},
@@ -370,11 +374,14 @@ def v1_client(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
     if isinstance(client, JSONResponse):
         return client
 
+    evm = db_x402.get_evm_payee(config.DB_PATH, client_id=client.id)
     return {
         "ok": True,
         "client_id": client.id,
         "credits": client.credits,
         "payee_lightning_address": client.payee_lightning_address,
+        "payee_evm_address": evm["address"] if evm else None,
+        "payee_evm_verified": bool(evm and evm["verified_at"]),
     }
 
 
@@ -618,6 +625,69 @@ def v1_client_set_payee(
     }
 
 
+class EvmPayeeChallengeIn(BaseModel):
+    address: str = Field(..., min_length=42, max_length=42)
+
+
+class EvmPayeeIn(BaseModel):
+    address: str = Field(..., min_length=42, max_length=42)
+    signature: str = Field(..., min_length=132, max_length=132)
+
+
+@app.post("/v1/client/payee/evm/challenge")
+def v1_client_evm_challenge(
+    body: EvmPayeeChallengeIn,
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+):
+    """Ask for an EIP-191 message. Nothing is written on chain and the stored address does not change."""
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    try:
+        challenge = db_x402.begin_payee_challenge(config.DB_PATH, client_id=client.id, address=body.address)
+    except x402_mod.X402Error as exc:
+        return JSONResponse(status_code=exc.status, content={"ok": False, "error": exc.code})
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+    return {
+        "ok": True,
+        "address": challenge["address"],
+        "message": challenge["message"],
+        "expires_at": challenge["expires_at"],
+        "note": "Sign this exact message with that address. Nothing is written on chain.",
+    }
+
+
+@app.post("/v1/client/payee/evm")
+def v1_client_evm_payee(
+    body: EvmPayeeIn,
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+):
+    """Verify the signed message and save one EVM payTo. A bad signature does not change the stored address."""
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    try:
+        saved = db_x402.verify_payee_signature(
+            config.DB_PATH,
+            client_id=client.id,
+            address=body.address,
+            signature=body.signature,
+        )
+    except x402_mod.X402Error as exc:
+        return JSONResponse(status_code=exc.status, content={"ok": False, "error": exc.code})
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+    return {
+        "ok": True,
+        "client_id": client.id,
+        "payee_evm_address": saved["address"],
+        "payee_evm_verified": True,
+        "rails_cleared": saved["rails_cleared"],
+        "note": "x402 stays off until you enable it on a site. Changing the address turns it off again.",
+    }
+
+
 class ApiKeyCreateIn(BaseModel):
     label: str = Field(..., min_length=1, max_length=64)
     scope: str = Field(
@@ -733,11 +803,15 @@ class SiteUpdateIn(BaseModel):
     description: str | None = Field(default=None, max_length=300)
     origin_url: str | None = Field(default=None, max_length=300)
     listed: bool | None = None
+    rail_lightning: bool | None = None
+    rail_x402: bool | None = None
 
 
 class RouteCreateIn(BaseModel):
     path: str = Field(..., min_length=1, max_length=200)
-    price_sats: int = Field(..., ge=1, le=10_000_000)
+    price_sats: int | None = Field(default=None, ge=1, le=10_000_000)
+    price_currency: str | None = Field(default=None, max_length=8)
+    price_usd_atomic: int | None = Field(default=None, ge=1, le=config.X402_MAX_USD_ATOMIC)
     max_uses: int | None = Field(default=None, ge=1, le=config.MAX_PAYWALL_USES)
     access_seconds: int | None = Field(default=None, ge=1, le=config._MAX_PAYWALL_ACCESS_CAP_SECONDS)
 
@@ -745,6 +819,8 @@ class RouteCreateIn(BaseModel):
 class RouteUpdateIn(BaseModel):
     path: str | None = Field(default=None, max_length=200)
     price_sats: int | None = Field(default=None, ge=1, le=10_000_000)
+    price_currency: str | None = Field(default=None, max_length=8)
+    price_usd_atomic: int | None = Field(default=None, ge=1, le=config.X402_MAX_USD_ATOMIC)
     max_uses: int | None = Field(default=None, ge=1, le=config.MAX_PAYWALL_USES)
     access_seconds: int | None = Field(default=None, ge=1, le=config._MAX_PAYWALL_ACCESS_CAP_SECONDS)
 
@@ -829,6 +905,9 @@ def v1_sites_update(
     if isinstance(auth, JSONResponse):
         return auth
     fields = body.model_fields_set
+    if "rail_lightning" in fields or "rail_x402" in fields:
+        if auth.scope != db_keys.SCOPE_ACCOUNT:
+            return _insufficient_scope(auth.scope)
     try:
         updated = db_sites.update_site(
             config.DB_PATH,
@@ -839,6 +918,8 @@ def v1_sites_update(
             origin_url=body.origin_url if "origin_url" in fields else None,
             listed=body.listed if "listed" in fields else None,
             set_description="description" in fields,
+            rail_lightning=body.rail_lightning if "rail_lightning" in fields else None,
+            rail_x402=body.rail_x402 if "rail_x402" in fields else None,
         )
     except (ValueError, db_sites.OriginError) as exc:
         return _sites_error(exc)
@@ -896,6 +977,8 @@ def v1_site_routes_create(
             max_uses=body.max_uses,
             access_seconds=body.access_seconds,
             max_routes=config.SITES_MAX_ROUTES,
+            price_currency=body.price_currency or "sats",
+            price_usd_atomic=body.price_usd_atomic,
         )
     except ValueError as exc:
         code = str(exc)
@@ -929,6 +1012,9 @@ def v1_site_routes_update(
             access_seconds=body.access_seconds,
             set_max_uses="max_uses" in fields,
             set_access_seconds="access_seconds" in fields,
+            price_currency=body.price_currency if "price_currency" in fields else None,
+            price_usd_atomic=body.price_usd_atomic if "price_usd_atomic" in fields else None,
+            set_price="price_currency" in fields or "price_usd_atomic" in fields,
         )
     except ValueError as exc:
         return _sites_error(exc)

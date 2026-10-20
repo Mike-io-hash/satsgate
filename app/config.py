@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 # Load env vars from .env if present. Existing process env wins.
 load_dotenv()
 
-APP_VERSION = "0.11.0"
+APP_VERSION = "0.12.0"
 
 # production is the safe default. Local mock/dev only runs when this is explicit.
 SATSGATE_ENV = os.environ.get("SATSGATE_ENV", "production").strip().lower() or "production"
@@ -186,6 +186,49 @@ GATE_PUBLIC_BASE = _gate_public_base()
 # compose network). Compose pins this to the gate container.
 GATE_TOKEN = os.environ.get("SATSGATE_GATE_TOKEN", "").strip()
 GATE_PEERS = os.environ.get("SATSGATE_GATE_PEERS", "").strip()
+
+# x402 testnet. Core calls a third-party facilitator. It does not hold a key
+# and it does not sign or submit transactions. Base mainnet is rejected here
+# until a later flag exists. There is no CDP credential in this process.
+X402_TESTNET_NETWORK = "eip155:84532"
+X402_USDC_SEPOLIA = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+X402_MAX_USD_ATOMIC = 100_000_000
+X402_PAYEE_CHALLENGE_SECONDS = 600
+X402_SIGNATURE_MAX_BYTES = 8192
+X402_FACILITATOR_TIMEOUT_SECONDS = 10.0
+X402_OFFER_SECONDS = _optional_int("SATSGATE_X402_OFFER_SECONDS", 60, minimum=15, maximum=300)
+
+
+def _x402_network() -> str:
+    raw = os.environ.get("SATSGATE_X402_NETWORK", X402_TESTNET_NETWORK).strip()
+    if raw != X402_TESTNET_NETWORK:
+        raise RuntimeError(
+            "SATSGATE_X402_NETWORK must be eip155:84532. "
+            "Base mainnet is disabled. Satsgate does not run a facilitator."
+        )
+    return raw
+
+
+def _x402_facilitator_url() -> str:
+    raw = os.environ.get("SATSGATE_X402_FACILITATOR_URL", "https://x402.org/facilitator").strip()
+    parsed = urlsplit(raw)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError(
+            "SATSGATE_X402_FACILITATOR_URL must be an https URL without userinfo, a query, or a fragment"
+        )
+    return raw.rstrip("/")
+
+
+X402_NETWORK = _x402_network()
+X402_FACILITATOR_URL = _x402_facilitator_url()
+X402_USDC = X402_USDC_SEPOLIA
 
 
 def site_secret_key() -> bytes | None:

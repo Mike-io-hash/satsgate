@@ -1,6 +1,6 @@
 # x402 v2 on Satsgate (USDC on Base)
 
-Design only. This document does not change the server, the database, or any response. The tables and endpoints below are the ones a later pull request would edit. Core is 0.11.0. The hosted gate and satsgate-mcp are as on `main`. The self-hosted proxy is 0.8.0.
+Core 0.12.0 implements the testnet slice of this design: Base Sepolia (`eip155:84532`), the x402.org facilitator, merchant payTo, per-site rails, a USD or sats price on each route, and verify-then-settle. Rates, the hosted gate, Lightning credit timing, USDC credit packs, the proxy, and the buyer MCP are still later steps in section 11. The hosted gate stays 0.11.0. satsgate-mcp stays 0.10.0. The self-hosted proxy is 0.8.0.
 
 The protocol is [x402 v2](https://github.com/x402-foundation/x402/blob/main/specs/x402-specification-v2.md) over HTTP: a 402 carries `PAYMENT-REQUIRED`, the buyer retries with `PAYMENT-SIGNATURE`, and a successful response carries `PAYMENT-RESPONSE`. The only scheme in the first cut is `exact` with EIP-3009 (`transferWithAuthorization`). The only asset is USDC. The only networks are Base Sepolia (`eip155:84532`) and, behind a flag, Base (`eip155:8453`).
 

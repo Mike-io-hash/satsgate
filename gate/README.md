@@ -2,7 +2,7 @@
 
 The hosted gate. One process serves many approved sites at `https://gate.satsgate.org/<slug>/<path>`.
 
-Version **0.11.0**. Core is **0.11.0**. The self-hosted proxy stays **0.8.0** and is a different program: one merchant, one YAML file, one origin secret in the environment. This process has no origin secret of its own.
+Version **0.11.0**. Core is **0.12.0**. This process still speaks Lightning only. A route priced in USD is omitted from the site config it reads, so that path is not served here yet. The self-hosted proxy stays **0.8.0** and is a different program: one merchant, one YAML file, one origin secret in the environment. This process has no origin secret of its own.
 
 ## Why an internal API
 

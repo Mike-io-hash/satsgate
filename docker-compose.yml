@@ -51,6 +51,12 @@ services:
       # Only the gate container may present that token. Empty would allow any peer.
       SATSGATE_GATE_PEERS: ${SATSGATE_GATE_PEERS:-172.28.0.4}
 
+      # x402 testnet. Defaults are safe: Base Sepolia, public facilitator, rail off.
+      # SATSGATE_X402_NETWORK must stay eip155:84532. Mainnet refuses to boot.
+      SATSGATE_X402_FACILITATOR_URL: ${SATSGATE_X402_FACILITATOR_URL:-https://x402.org/facilitator}
+      SATSGATE_X402_NETWORK: ${SATSGATE_X402_NETWORK:-eip155:84532}
+      SATSGATE_X402_OFFER_SECONDS: ${SATSGATE_X402_OFFER_SECONDS:-60}
+
       # Disable dev endpoints in production
       SATSGATE_DEV_MODE: ${SATSGATE_DEV_MODE:-0}
     volumes:

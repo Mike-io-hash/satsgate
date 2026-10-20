@@ -92,6 +92,15 @@ _ACCOUNT_ONLY = [
     ("get", "/v1/api-keys", None),
     ("get", "/v1/topup/trial", None),
     ("post", "/v1/client/payee", {"payee_lightning_address": "other@pay.example"}),
+    ("post", "/v1/client/payee/evm/challenge", {"address": "0x1111111111111111111111111111111111111111"}),
+    (
+        "post",
+        "/v1/client/payee/evm",
+        {
+            "address": "0x1111111111111111111111111111111111111111",
+            "signature": "0x" + "11" * 65,
+        },
+    ),
     ("post", "/v1/api-keys", {"label": "nope"}),
     ("post", "/v1/api-keys/1/revoke", None),
     ("post", "/v1/spend", None),
@@ -530,7 +539,7 @@ def test_migration_on_an_existing_database(tmp_path):
     assert old_challenge == ("old/resource", None)
 
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.11.0"
+        assert http.get("/health").json()["version"] == "0.12.0"
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})
         assert balance.status_code == 200
         assert balance.json()["credits"] == 42
