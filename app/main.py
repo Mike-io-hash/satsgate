@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -18,6 +20,7 @@ from . import db_reports
 from . import db_sites
 from . import db_verify
 from . import db_x402
+from . import rates
 from . import x402 as x402_mod
 from . import ssrf
 from . import wallet_lnaddr
@@ -46,10 +49,32 @@ from .rate_limit import RateLimiter
 from .wallet_lnaddr import LightningAddressWallet, LnurlError
 
 
+_log = logging.getLogger("satsgate")
+
+
+def _rates_loop(stop: threading.Event) -> None:
+    while not stop.is_set():
+        try:
+            rates.refresh()
+        except Exception:
+            _log.warning("btc/usd refresh failed")
+        stop.wait(config.RATES_REFRESH_SECONDS)
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    yield
-    ssrf.close()
+    stop = threading.Event()
+    thread = None
+    if config.RATES_ENABLED:
+        thread = threading.Thread(target=_rates_loop, args=(stop,), name="satsgate-rates", daemon=True)
+        thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        if thread is not None:
+            thread.join(timeout=1)
+        ssrf.close()
 
 
 app = FastAPI(title="satsgate", version=config.APP_VERSION, lifespan=_lifespan)
@@ -259,6 +284,20 @@ def _upstream_error(exc: Exception) -> JSONResponse:
     if isinstance(exc, ValueError):
         return JSONResponse(status_code=400, content={"ok": False, "error": "amount_out_of_range"})
     return JSONResponse(status_code=502, content={"ok": False, "error": "payee_fetch_failed"})
+
+
+@app.get("/v1/rates")
+def v1_rates():
+    """BTC/USD median. A quote for merchants. Not a price Satsgate converts at."""
+    view = rates.snapshot()
+    return {
+        "ok": True,
+        "pair": "BTC-USD",
+        "value": view["value"],
+        "sources": view["sources"],
+        "fetched_at": view["fetched_at"],
+        "status": view["status"],
+    }
 
 
 @app.get("/health", operation_id="health_get")
@@ -831,6 +870,21 @@ def _without_secret(site: dict) -> dict:
     return view
 
 
+def _with_derived(site: dict) -> dict:
+    view = dict(site)
+    routes = []
+    for route in site.get("routes") or []:
+        item = dict(route)
+        item["derived"] = rates.describe_derived(
+            price_currency=item.get("price_currency") or "sats",
+            price_sats=item.get("price_sats"),
+            price_usd_atomic=item.get("price_usd_atomic"),
+        )
+        routes.append(item)
+    view["routes"] = routes
+    return view
+
+
 @app.get("/v1/sites")
 def v1_sites_public(limit: int = 20, cursor: str | None = None):
     """Approved sites that opted in. No owner, origin, or secret."""
@@ -846,7 +900,7 @@ def v1_sites_mine(x_api_key: str | None = Header(default=None, alias="X-Api-Key"
     if isinstance(auth, JSONResponse):
         return auth
     sites = db_sites.list_sites_for_client(config.DB_PATH, client_id=auth.client.id)
-    return {"ok": True, "sites": [_without_secret(site) for site in sites]}
+    return {"ok": True, "sites": [_with_derived(_without_secret(site)) for site in sites]}
 
 
 @app.post("/v1/sites")

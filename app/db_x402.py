@@ -142,43 +142,72 @@ def find_reusable_offer(
     *,
     client_id: int,
     resource: str,
-    amount: int,
-    pay_to: str,
+    price_currency: str,
+    main_sats: int | None,
+    main_usd: int | None,
+    pay_to: str | None,
     buyer_ip_hash: str | None,
     max_uses: int | None,
     access_seconds: int | None,
     now: int,
 ) -> dict | None:
+    """Reuse the locked quote. The derived amount is not part of the match."""
     if not buyer_ip_hash or config.CHALLENGE_REUSE_SECONDS <= 0:
         return None
+    if price_currency == "sats":
+        if main_sats is None:
+            return None
+        amount_column = "amount_sats"
+        amount = int(main_sats)
+    else:
+        if main_usd is None:
+            return None
+        amount_column = "amount_usd_atomic"
+        amount = int(main_usd)
+    params = (
+        int(client_id),
+        resource,
+        price_currency,
+        amount,
+        pay_to,
+        buyer_ip_hash,
+        int(max_uses) if max_uses is not None else None,
+        int(access_seconds) if access_seconds is not None else None,
+        int(now),
+        int(now) - int(config.CHALLENGE_REUSE_SECONDS),
+    )
+    sats_sql = """
+        SELECT * FROM payment_offers
+        WHERE client_id = ?
+          AND resource = ?
+          AND price_currency = ?
+          AND amount_sats = ?
+          AND pay_to IS ?
+          AND buyer_ip_hash = ?
+          AND max_uses IS ?
+          AND access_seconds IS ?
+          AND expires_at > ?
+          AND created_at >= ?
+        ORDER BY created_at DESC
+        LIMIT 1
+    """
+    usd_sql = """
+        SELECT * FROM payment_offers
+        WHERE client_id = ?
+          AND resource = ?
+          AND price_currency = ?
+          AND amount_usd_atomic = ?
+          AND pay_to IS ?
+          AND buyer_ip_hash = ?
+          AND max_uses IS ?
+          AND access_seconds IS ?
+          AND expires_at > ?
+          AND created_at >= ?
+        ORDER BY created_at DESC
+        LIMIT 1
+    """
     with _connect(db_path) as conn:
-        row = conn.execute(
-            """
-            SELECT * FROM payment_offers
-            WHERE client_id = ?
-              AND resource = ?
-              AND amount_usd_atomic = ?
-              AND pay_to = ?
-              AND buyer_ip_hash = ?
-              AND max_uses IS ?
-              AND access_seconds IS ?
-              AND expires_at > ?
-              AND created_at >= ?
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            (
-                int(client_id),
-                resource,
-                int(amount),
-                pay_to,
-                buyer_ip_hash,
-                int(max_uses) if max_uses is not None else None,
-                int(access_seconds) if access_seconds is not None else None,
-                int(now),
-                int(now) - int(config.CHALLENGE_REUSE_SECONDS),
-            ),
-        ).fetchone()
+        row = conn.execute(sats_sql if amount_column == "amount_sats" else usd_sql, params).fetchone()
     return None if row is None else _offer_dict(row)
 
 
@@ -188,57 +217,81 @@ def create_offer(
     client_id: int,
     resource: str,
     resource_url: str,
-    amount: int,
-    pay_to: str,
-    requirements: dict,
+    price_currency: str,
+    amount_sats: int | None,
+    amount_usd_atomic: int | None,
+    pay_to: str | None,
+    requirements: dict | None,
     buyer_ip_hash: str | None,
     max_uses: int | None,
     access_seconds: int | None,
+    rate_num: int | None = None,
+    rate_den: int | None = None,
+    rate_fetched_at: int | None = None,
+    payment_hash: str | None = None,
+    expires_at: int | None = None,
+    enforce: bool = True,
     now: int | None = None,
 ) -> dict:
     now = int(time.time()) if now is None else int(now)
-    expires = now + int(config.X402_OFFER_SECONDS)
+    expires = int(expires_at) if expires_at is not None else now + int(config.X402_OFFER_SECONDS)
     offer_id = secrets.token_hex(16)
-    requirements = dict(requirements)
-    requirements["maxTimeoutSeconds"] = int(config.X402_OFFER_SECONDS)
+    stored = None
+    scheme = None
+    network = None
+    asset = None
+    if requirements is not None:
+        stored = dict(requirements)
+        stored["maxTimeoutSeconds"] = max(1, expires - now)
+        scheme = "exact"
+        network = config.X402_NETWORK
+        asset = x402.checksum_address(config.X402_USDC)
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        try:
-            limits = _limits(
-                client_id=client_id,
-                api_key_id=None,
-                buyer_ip_hash=buyer_ip_hash,
-                now=now,
-            )
-            enforce_challenge_capacity(
-                conn,
-                invoice_cutoff=now - int(limits["claim_grace_seconds"]),
-                cap_cutoff=now - int(limits["claim_cap_seconds"]),
-                **limits,
-            )
-        except ChallengeLimit:
-            conn.execute("ROLLBACK")
-            raise
+        if enforce:
+            try:
+                limits = _limits(
+                    client_id=client_id,
+                    api_key_id=None,
+                    buyer_ip_hash=buyer_ip_hash,
+                    now=now,
+                )
+                enforce_challenge_capacity(
+                    conn,
+                    invoice_cutoff=now - int(limits["claim_grace_seconds"]),
+                    cap_cutoff=now - int(limits["claim_cap_seconds"]),
+                    **limits,
+                )
+            except ChallengeLimit:
+                conn.execute("ROLLBACK")
+                raise
         conn.execute(
             """
             INSERT INTO payment_offers(
               id, client_id, resource, api_key_id, price_currency, amount_sats, amount_usd_atomic,
               rate_num, rate_den, rate_fetched_at, expires_at, max_uses, access_seconds, payment_hash,
               scheme, network, asset, pay_to, requirements_json, buyer_ip_hash, created_at
-            ) VALUES(?, ?, ?, NULL, 'usd', NULL, ?, NULL, NULL, NULL, ?, ?, ?, NULL, 'exact', ?, ?, ?, ?, ?, ?)
+            ) VALUES(?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 offer_id,
                 int(client_id),
                 resource,
-                int(amount),
+                price_currency,
+                None if amount_sats is None else int(amount_sats),
+                None if amount_usd_atomic is None else int(amount_usd_atomic),
+                None if rate_num is None else int(rate_num),
+                None if rate_den is None else int(rate_den),
+                None if rate_fetched_at is None else int(rate_fetched_at),
                 expires,
                 int(max_uses) if max_uses is not None else None,
                 int(access_seconds) if access_seconds is not None else None,
-                config.X402_NETWORK,
-                x402.checksum_address(config.X402_USDC),
+                payment_hash,
+                scheme,
+                network,
+                asset,
                 pay_to,
-                json.dumps(requirements, separators=(",", ":"), sort_keys=True),
+                None if stored is None else json.dumps(stored, separators=(",", ":"), sort_keys=True),
                 buyer_ip_hash,
                 now,
             ),
@@ -254,6 +307,29 @@ def get_offer(db_path: str, offer_id: str) -> dict | None:
     with _connect(db_path) as conn:
         row = conn.execute("SELECT * FROM payment_offers WHERE id = ?", (offer_id,)).fetchone()
     return None if row is None else _offer_dict(row)
+
+
+def offer_by_payment_hash(db_path: str, payment_hash: str) -> dict | None:
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM payment_offers WHERE payment_hash = ?",
+            (payment_hash,),
+        ).fetchone()
+    return None if row is None else _offer_dict(row)
+
+
+def recent_offers(db_path: str, *, client_id: int, resource: str, limit: int = 20) -> list[dict]:
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM payment_offers
+            WHERE client_id = ? AND resource = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (int(client_id), resource, int(limit)),
+        ).fetchall()
+    return [_offer_dict(row) for row in rows]
 
 
 def latest_offer(db_path: str, *, client_id: int, resource: str) -> dict | None:
@@ -291,7 +367,12 @@ def _offer_dict(row) -> dict:
         "client_id": int(row["client_id"]),
         "resource": row["resource"],
         "price_currency": row["price_currency"],
+        "amount_sats": None if row["amount_sats"] is None else int(row["amount_sats"]),
         "amount_usd_atomic": None if row["amount_usd_atomic"] is None else int(row["amount_usd_atomic"]),
+        "rate_num": None if row["rate_num"] is None else int(row["rate_num"]),
+        "rate_den": None if row["rate_den"] is None else int(row["rate_den"]),
+        "rate_fetched_at": None if row["rate_fetched_at"] is None else int(row["rate_fetched_at"]),
+        "payment_hash": row["payment_hash"],
         "expires_at": int(row["expires_at"]),
         "max_uses": None if row["max_uses"] is None else int(row["max_uses"]),
         "access_seconds": None if row["access_seconds"] is None else int(row["access_seconds"]),

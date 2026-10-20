@@ -70,7 +70,7 @@ Configured via env vars:
   - checks the BOLT11 amount, network, `description_hash` (LUD-06), expiry, and payment hash before issuing a challenge
   - if the provider advertises LUD-21 `verify`, settlement is confirmed there too, including without the payer returning a preimage. Providers that omit it (Wallet of Satoshi) stay preimage-only
 
-`GET /health` returns `{"ok": true, "version": "0.12.0"}` and nothing else.
+`GET /health` returns `{"ok": true, "version": "0.13.0"}` and nothing else.
 
 ## Prepaid payment verifications (credits)
 
@@ -287,7 +287,7 @@ New sites start `pending`. `GET /v1/sites` lists only `approved` sites with `lis
 | `SATSGATE_GATE_TOKEN` | unset | Shared with the gate container. Unset means `/internal/gate/*` is 404. |
 | `SATSGATE_GATE_PEERS` | empty (Compose sets `172.28.0.4`) | When set, only that TCP peer may present the gate token. |
 
-Restart to serve 0.12.0. Copy `satsgate.sqlite3` before you restart. Startup adds columns and rebuilds `site_routes` (see below). Current API keys, credits, and Lightning challenges keep working if you do not set the new variables. Set `SATSGATE_SITE_SECRET_KEY` before the first site is created, and keep that value. Losing it makes stored secrets unreadable. Rotation still works and issues a new secret. Leave `SATSGATE_GATE_TOKEN` unset until the gate container is deployed. The public API host rejects `/internal/*` in Caddy either way.
+Restart to serve 0.13.0. Copy `satsgate.sqlite3` before you restart. The 0.12.0 startup adds columns and rebuilds `site_routes` (see below). 0.13.0 does not add another table. Current API keys, credits, and Lightning challenges keep working if you do not set the new variables. Set `SATSGATE_SITE_SECRET_KEY` before the first site is created, and keep that value. Losing it makes stored secrets unreadable. Rotation still works and issues a new secret. Leave `SATSGATE_GATE_TOKEN` unset until the gate container is deployed. The public API host rejects `/internal/*` in Caddy either way.
 
 ### x402 on Base Sepolia (0.12.0)
 
@@ -303,7 +303,25 @@ A route has one price. `{"path":"/blog/post","price_sats":21}` stays Lightning. 
 | `SATSGATE_X402_NETWORK` | `eip155:84532` | Base Sepolia only. Any other value, including Base mainnet `eip155:8453`, refuses to boot. |
 | `SATSGATE_X402_OFFER_SECONDS` | 60 | How long a `PAYMENT-REQUIRED` offer stays reusable (15 to 300). |
 
-Deployment: stop the process, copy the sqlite file, then start 0.12.0. The migration adds six `payee_evm_*` columns on `clients` (existing rows stay empty), `rail_lightning` (default on) and `rail_x402` (default off) on `sites`, rebuilds `site_routes` so an existing row keeps its sats price, and creates `payment_offers` and `x402_authorizations`. You do not need a new secret. Leave the three variables unset unless you are pointing at another testnet facilitator. The current gate ignores USD routes, so a mixed site's Lightning routes keep working and a USD path is not served until a later gate release.
+Deployment of 0.12.0: stop the process, copy the sqlite file, then start. That migration adds six `payee_evm_*` columns on `clients` (existing rows stay empty), `rail_lightning` (default on) and `rail_x402` (default off) on `sites`, rebuilds `site_routes` so an existing row keeps its sats price, and creates `payment_offers` and `x402_authorizations`. You do not need a new secret. Leave the three x402 variables unset unless you are pointing at another testnet facilitator. The current gate ignores USD routes, so a mixed site's Lightning routes keep working and a USD path is not served until a later gate release.
+
+### Rates (0.13.0)
+
+`GET /v1/rates` is public. It returns the BTC/USD median, the sources that agreed, `fetched_at`, and `status` (`ok`, `stale`, or `unavailable`). Core reads Coinbase `BTC-USD`, Kraken `XBTUSD`, and Bitstamp `btcusd` about once a minute. Two sources are required. A source more than 2% from the median is dropped. The median is stale after 3 minutes.
+
+The median is a quote. Satsgate does not convert, hold, or forward funds. The merchant is paid whatever the buyer sends on the rail they use.
+
+When both rails are on and the median is fresh, the challenge locks the other currency on the offer. Derived sats round up to the next sat. Derived USDC rounds up to the next 0.000001 USDC, and a result below $0.001 is left off. A stale or missing median offers only the main currency. `GET /v1/sites/mine` shows that live quote as `derived`. The public directory does not, because it moves.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SATSGATE_RATES_ENABLED` | on | `0` skips the background refresh. |
+| `SATSGATE_RATES_REFRESH_SECONDS` | 60 | How often the three sources are read (15 to 600). |
+| `SATSGATE_RATES_STALE_SECONDS` | 180 | After this, the last median is not used to price a challenge. |
+| `SATSGATE_RATES_SOURCE_TIMEOUT_SECONDS` | 2 | Timeout for one source (0.5 to 5). |
+| `SATSGATE_RATES_OUTLIER_BPS` | 200 | Drop a source this far from the median. 200 is 2%. |
+
+No new table. Copy `satsgate.sqlite3` before restarting onto 0.13.0 anyway. Lightning is unchanged when the quote is not used. The hosted gate stays 0.11.0.
 
 The gate resource string is `gate:<slug>:<path>` and must be at most 200 characters, which is the paywall resource limit. A longer route is stored and is not served.
 
@@ -313,7 +331,7 @@ The gate resource string is `gate:<slug>:<path>` and must be at most 200 charact
 
 An unpaid request is **402** with `WWW-Authenticate: L402 macaroon="...", invoice="..."` (macaroon before invoice, standard base64), which lnget and Alby `fetch402` already parse. The JSON body carries `amount_sats`, `payment_hash`, `invoice_expires_at`, and a hint for wallets that do not return a preimage. `Authorization: L402 <macaroon>:<preimage>` verifies with `consume=true`. `Authorization: L402 <macaroon>` polls status with `consume=true`. Pending stays on that invoice (`402 payment_pending`, `Retry-After`). A used, expired, or wrong-route token is a fresh 402, not 401.
 
-The self-hosted proxy stays 0.8.0. `GET /healthz` on the proxy reports `0.8.0`. Core health is `0.12.0`. The proxy's paywall calls are unchanged. The hosted gate is a different process.
+The self-hosted proxy stays 0.8.0. `GET /healthz` on the proxy reports `0.8.0`. Core health is `0.13.0`. The proxy's paywall calls are unchanged. The hosted gate is a different process.
 
 Config is YAML: upstream base URL, routes (`per_request`, `uses:N`, `pass:<seconds>`, scope `route` or `site`), free paths, body limits, and an origin secret from the environment. A `per_request` price below about 10 times the plan's sats-per-credit logs a warning at startup. The trial plan is about 5 sats per credit, so that line is 50 sats. Cheap calls should be bundles or passes.
 
@@ -337,7 +355,7 @@ Full steps, the signature, and a mainnet checklist are in [`proxy/README.md`](./
 
 An optional `sgr_` key enables read-only `challenge_status` and `credits_balance`. The key cannot top up or change the payee. `list_sites` reads `GET /v1/sites` on the core URL: approved, listed sites, each with a gate URL and route prices. Set `SATSGATE_MCP_REGISTRY` to a JSON file or another URL only when that directory should be replaced.
 
-Core health is `0.12.0`. `GET /health` reports `0.12.0`. The MCP package is 0.10.0. A USD route in the public directory is skipped by `list_sites` until a later MCP release, because that tool still requires `price_sats`.
+Core health is `0.13.0`. `GET /health` reports `0.13.0`. The MCP package is 0.10.0. A USD route in the public directory is skipped by `list_sites` until a later MCP release, because that tool still requires `price_sats`.
 
 ```bash
 pip install -r mcp/requirements.txt

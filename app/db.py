@@ -703,6 +703,7 @@ def _offer_rate_row(
             SELECT COUNT(*), MIN(created_at)
             FROM payment_offers
             WHERE client_id = ? AND buyer_ip_hash = ? AND created_at >= ? AND api_key_id IS NULL
+              AND payment_hash IS NULL
             """,
             (client_id, buyer_ip_hash, since),
         ).fetchone()
@@ -712,6 +713,7 @@ def _offer_rate_row(
             SELECT COUNT(*), MIN(created_at)
             FROM payment_offers
             WHERE client_id = ? AND buyer_ip_hash = ? AND created_at >= ? AND api_key_id = ?
+              AND payment_hash IS NULL
             """,
             (client_id, buyer_ip_hash, since, int(api_key_id)),
         ).fetchone()
@@ -720,6 +722,7 @@ def _offer_rate_row(
         SELECT COUNT(*), MIN(created_at)
         FROM payment_offers
         WHERE client_id = ? AND buyer_ip_hash = ? AND created_at >= ?
+          AND payment_hash IS NULL
         """,
         (client_id, buyer_ip_hash, since),
     ).fetchone()
@@ -743,7 +746,7 @@ def _offer_open_row(
             SELECT COUNT(*), MIN(min(expires_at + ?, created_at + ?))
             FROM payment_offers
             WHERE client_id = ? AND buyer_ip_hash = ? AND expires_at >= ? AND created_at >= ?
-              AND api_key_id IS NULL
+              AND api_key_id IS NULL AND payment_hash IS NULL
             """,
             (grace, cap, client_id, buyer_ip_hash, invoice_cutoff, cap_cutoff),
         ).fetchone()
@@ -753,7 +756,7 @@ def _offer_open_row(
             SELECT COUNT(*), MIN(min(expires_at + ?, created_at + ?))
             FROM payment_offers
             WHERE client_id = ? AND buyer_ip_hash = ? AND expires_at >= ? AND created_at >= ?
-              AND api_key_id = ?
+              AND api_key_id = ? AND payment_hash IS NULL
             """,
             (grace, cap, client_id, buyer_ip_hash, invoice_cutoff, cap_cutoff, int(api_key_id)),
         ).fetchone()
@@ -762,6 +765,7 @@ def _offer_open_row(
         SELECT COUNT(*), MIN(min(expires_at + ?, created_at + ?))
         FROM payment_offers
         WHERE client_id = ? AND buyer_ip_hash = ? AND expires_at >= ? AND created_at >= ?
+          AND payment_hash IS NULL
         """,
         (grace, cap, client_id, buyer_ip_hash, invoice_cutoff, cap_cutoff),
     ).fetchone()
@@ -906,7 +910,7 @@ def enforce_challenge_capacity(
         SELECT COUNT(*),
                MIN(min(expires_at + ?, created_at + ?))
         FROM payment_offers
-        WHERE client_id = ? AND expires_at >= ? AND created_at >= ?
+        WHERE client_id = ? AND payment_hash IS NULL AND expires_at >= ? AND created_at >= ?
         """,
         (
             int(claim_grace_seconds),

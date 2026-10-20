@@ -7,27 +7,99 @@ import time
 
 from eth_utils import to_checksum_address
 
-from . import config, db, db_x402, x402, x402_facilitator
+from . import config, db, db_x402, rates, x402, x402_facilitator
 
 log = logging.getLogger("satsgate.x402")
 _COST = 1
 _LOCK_SECONDS = 15
 
 
-def rail_for(site: dict, route: dict) -> str:
-    """Which rail this route can offer. Conversion is a later change.
+def quote_plan(site: dict, route: dict) -> dict:
+    """Which rails to offer, and the derived amount when a fresh median exists.
 
-    x402 is offered only when the route has a USD price and the site enabled it.
-    A sats price still offers Lightning, including when x402 is also enabled.
+    A missing or stale rate drops the derived rail. The main currency stays.
     """
-    lightning = bool(int(site.get("rail_lightning", 1)))
+    lightning_on = bool(int(site.get("rail_lightning", 1)))
     x402_on = bool(int(site.get("rail_x402", 0)))
     currency = route.get("price_currency") or "sats"
-    if x402_on and currency == "usd" and route.get("price_usd_atomic"):
-        return "x402"
-    if lightning and currency == "sats" and route.get("price_sats"):
-        return "lightning"
-    return "unavailable"
+    main_sats = int(route["price_sats"]) if currency == "sats" and route.get("price_sats") else None
+    main_usd = int(route["price_usd_atomic"]) if currency == "usd" and route.get("price_usd_atomic") else None
+    rate = rates.quote_rate()
+    derived_usd = rates.usd_atomic_from_sats(main_sats, rate) if rate is not None and main_sats and x402_on else None
+    derived_sats = rates.sats_from_usd_atomic(main_usd, rate) if rate is not None and main_usd and lightning_on else None
+    lightning_sats = main_sats if lightning_on and main_sats else derived_sats if lightning_on else None
+    x402_atomic = main_usd if x402_on and main_usd else derived_usd if x402_on else None
+    used = rate if derived_usd is not None or derived_sats is not None else None
+    return {
+        "price_currency": currency,
+        "main_sats": main_sats,
+        "main_usd": main_usd,
+        "lightning_sats": lightning_sats,
+        "x402_atomic": x402_atomic,
+        "rate": used,
+        "x402_on": x402_on,
+    }
+
+
+def _rate_view(offer: dict) -> dict | None:
+    if offer.get("rate_num") is None or offer.get("rate_den") is None:
+        return None
+    return {
+        "rate_num": int(offer["rate_num"]),
+        "rate_den": int(offer["rate_den"]),
+        "fetched_at": offer.get("rate_fetched_at"),
+    }
+
+
+def x402_view(offer: dict, *, resource_url: str, reused: bool, resource: str) -> dict:
+    offer["resource_url"] = resource_url
+    amount = str(int(offer["amount_usd_atomic"]))
+    document = x402.payment_required_document(resource_url=resource_url, accept=offer["requirements"])
+    body = {
+        "ok": True,
+        "rail": "x402",
+        "resource": resource,
+        "offer_id": offer["id"],
+        "expires_at": offer["expires_at"],
+        "reused": reused,
+        "payment_required": x402.b64_json(document),
+        "price_currency": offer.get("price_currency"),
+        "x402": {
+            "scheme": "exact",
+            "network": offer.get("network") or config.X402_NETWORK,
+            "asset": offer.get("asset") or to_checksum_address(config.X402_USDC),
+            "amount": amount,
+            "payTo": offer["pay_to"],
+            "expires_at": offer["expires_at"],
+        },
+    }
+    rate = _rate_view(offer)
+    if rate is not None:
+        body["rate"] = rate
+    if offer.get("amount_sats") is not None:
+        body["amount_sats"] = int(offer["amount_sats"])
+    return body
+
+
+def _store_kwargs(plan: dict, *, pay_to: str | None, requirements: dict | None) -> dict:
+    currency = plan["price_currency"]
+    if currency == "sats":
+        amount_sats = plan["main_sats"]
+        amount_usd = plan["x402_atomic"]
+    else:
+        amount_usd = plan["main_usd"]
+        amount_sats = plan["lightning_sats"]
+    rate = plan.get("rate")
+    return {
+        "price_currency": currency,
+        "amount_sats": amount_sats,
+        "amount_usd_atomic": amount_usd,
+        "pay_to": pay_to,
+        "requirements": requirements,
+        "rate_num": None if rate is None else int(rate.rate_num),
+        "rate_den": None if rate is None else int(rate.rate_den),
+        "rate_fetched_at": None if rate is None else int(rate.fetched_at),
+    }
 
 
 def issue_offer(
@@ -37,25 +109,28 @@ def issue_offer(
     path: str,
     resource: str,
     pay_to: str,
-    amount: int,
+    plan: dict,
     max_uses: int | None,
     access_seconds: int | None,
     buyer_ip_hash: str | None,
 ) -> dict:
     now = int(time.time())
     url = x402.resource_url(slug, path)
+    amount = int(plan["x402_atomic"])
     existing = db_x402.find_reusable_offer(
         config.DB_PATH,
         client_id=client_id,
         resource=resource,
-        amount=amount,
+        price_currency=plan["price_currency"],
+        main_sats=plan["main_sats"],
+        main_usd=plan["main_usd"],
         pay_to=pay_to,
         buyer_ip_hash=buyer_ip_hash,
         max_uses=max_uses,
         access_seconds=access_seconds,
         now=now,
     )
-    if existing is None:
+    if existing is None or not existing.get("requirements"):
         requirements = x402.accept_for(
             resource_url=url,
             amount=amount,
@@ -74,48 +149,38 @@ def issue_offer(
             client_id=client_id,
             resource=resource,
             resource_url=url,
-            amount=amount,
-            pay_to=pay_to,
-            requirements=requirements,
             buyer_ip_hash=buyer_ip_hash,
             max_uses=max_uses,
             access_seconds=access_seconds,
             now=now,
+            **_store_kwargs(plan, pay_to=pay_to, requirements=requirements),
         )
         reused = False
     else:
         reused = True
-    existing["resource_url"] = url
-    document = x402.payment_required_document(resource_url=url, accept=existing["requirements"])
-    return {
-        "ok": True,
-        "rail": "x402",
-        "resource": resource,
-        "offer_id": existing["id"],
-        "expires_at": existing["expires_at"],
-        "reused": reused,
-        "payment_required": x402.b64_json(document),
-        "x402": {
-            "scheme": "exact",
-            "network": config.X402_NETWORK,
-            "asset": to_checksum_address(config.X402_USDC),
-            "amount": str(int(amount)),
-            "payTo": pay_to,
-            "expires_at": existing["expires_at"],
-        },
-    }
+    return x402_view(existing, resource_url=url, reused=reused, resource=resource)
 
 
 def _bind(encoded: str, *, client_id: int, resource: str, resource_url: str) -> tuple[dict, dict, dict]:
     payload = x402.decode_payment_signature(encoded)
-    offer = db_x402.latest_offer(config.DB_PATH, client_id=client_id, resource=resource)
-    if offer is None:
+    offers = db_x402.recent_offers(config.DB_PATH, client_id=client_id, resource=resource)
+    if not offers:
         raise x402.X402Error("not_found", status=404)
-    offer["resource_url"] = resource_url
-    fields = x402.validate_payload(payload, offer=offer)
-    if offer["requirements"] is None:
-        raise x402.X402Error("bad_signature")
-    return payload, offer, fields
+    first_error: x402.X402Error | None = None
+    for offer in offers:
+        if not offer.get("amount_usd_atomic") or not offer.get("pay_to") or not offer.get("requirements"):
+            continue
+        offer["resource_url"] = resource_url
+        try:
+            fields = x402.validate_payload(payload, offer=offer)
+        except x402.X402Error as exc:
+            if first_error is None:
+                first_error = exc
+            continue
+        return payload, offer, fields
+    if first_error is not None:
+        raise first_error
+    raise x402.X402Error("not_found", status=404)
 
 
 def _require_credit(client_id: int) -> int:
