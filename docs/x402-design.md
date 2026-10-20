@@ -1,6 +1,6 @@
 # x402 v2 on Satsgate (USDC on Base)
 
-Core 0.12.0 implements the testnet slice of this design: Base Sepolia (`eip155:84532`), the x402.org facilitator, merchant payTo, per-site rails, a USD or sats price on each route, and verify-then-settle. Rates, the hosted gate, Lightning credit timing, USDC credit packs, the proxy, and the buyer MCP are still later steps in section 11. The hosted gate stays 0.11.0. satsgate-mcp stays 0.10.0. The self-hosted proxy is 0.8.0.
+Core 0.13.0 adds the BTC/USD median and locks the derived rail on the offer. Core 0.12.0 already had Base Sepolia (`eip155:84532`), the x402.org facilitator (confirmed: `GET /supported` lists `exact` on that network), merchant payTo, per-site rails, a USD or sats price, and verify-then-settle. The hosted gate, Lightning credit timing, USDC credit packs, the proxy, and the buyer MCP are still later steps in section 11. The hosted gate stays 0.11.0. satsgate-mcp stays 0.10.0. The self-hosted proxy is 0.8.0.
 
 The protocol is [x402 v2](https://github.com/x402-foundation/x402/blob/main/specs/x402-specification-v2.md) over HTTP: a 402 carries `PAYMENT-REQUIRED`, the buyer retries with `PAYMENT-SIGNATURE`, and a successful response carries `PAYMENT-RESPONSE`. The only scheme in the first cut is `exact` with EIP-3009 (`transferWithAuthorization`). The only asset is USDC. The only networks are Base Sepolia (`eip155:84532`) and, behind a flag, Base (`eip155:8453`).
 
@@ -284,10 +284,11 @@ Core refreshes a median about once a minute from two or three public BTC/USD sou
 
 The rate is stale at 3 minutes. Stale, empty, or non-numeric means the derived rail is omitted. The main currency is still offered. A 402 never includes a guessed price. The offer row stores the numerator and denominator actually used (`rate_num` / `rate_den` as integers of USD per BTC scaled by 10^8) and `rate_fetched_at`. Settle checks the locked amount, not a new fetch.
 
-Rounding, proposed and called out in section 12:
+Rounding, decided in core 0.13.0:
 
-- Derived USDC rounds to the nearest 0.0001 USDC (100 atomic units). A result below 0.001 USDC (1000 atomic) is treated as unusable, and only the main currency is offered.
-- Derived sats round to the nearest sat, minimum 1 sat. A result that would be 0 is unusable the same way.
+- Derived USDC rounds up to the next atomic unit (6 decimals, 0.000001 USDC). A result below 0.001 USDC (1000 atomic) is not offered, and only the main currency is returned.
+- Derived sats round up to the next sat. A result of 0 is not offered. The minimum offered sat is 1, and a derived sats price above 10,000,000 sats is not offered.
+- The merchant's own price is not rounded. A route priced at 1 atomic USDC stays 1 atomic. The floor applies only to the derived quote.
 
 The gate's site cache (`SATSGATE_GATE_CACHE_SECONDS`, default 5) may cache the route's main price. It must not cache a derived quote. The quote is created inside the challenge call and stored on `payment_offers`.
 
@@ -362,7 +363,7 @@ Mainnet, last, behind the flag, one route at the smallest sensible USDC amount, 
 Each one is shippable on its own. None of them is this pull request.
 
 1. Core, testnet only. Offer rows, nonce table, payTo verification, standard `/verify` then `/settle` through the x402.org facilitator, feature flag default off for mainnet. No gate change. A test can call the internal routes. Lightning debit timing stays as it is today.
-2. Rates and main currency. Route columns, median refresh, lock on the offer, stale-rate behavior.
+2. Rates and main currency. Shipped in core 0.13.0: median refresh, lock on the offer, stale-rate behavior. The route columns landed in 0.12.0.
 3. Gate. Dual 402, header pass-through, private Sepolia test against a real origin. x402 credit and use move only after origin 2xx and settle success. The Lightning path still uses today's `consume=true`.
 4. Lightning credit timing, its own small PR. `settled_at` on payment confirmation. Credit and `uses_consumed` only after origin 2xx, in the gate and the proxy. Retry and replay as in section 3.1. No x402 work in this PR.
 5. USDC credit top-up to `SATSGATE_X402_PAYTO`. Fixed `price_usd_atomic` on `app/plans.py`, testnet placeholders only. Real amounts wait for Etapa 4.
@@ -372,9 +373,8 @@ Each one is shippable on its own. None of them is this pull request.
 
 ## 12. Open questions
 
-Credit timing, the standard x402 flow, and fixed USD pack prices are decisions in section 1.1. Pack amounts are decided later, in Etapa 4. These still need an owner:
+Credit timing, the standard x402 flow, fixed USD pack prices, and rounding are decisions (sections 1.1 and 6). Pack amounts are decided later, in Etapa 4. The testnet facilitator URL is `https://x402.org/facilitator`; `GET /supported` lists `exact` on `eip155:84532`. These still need an owner:
 
-1. Rounding. Section 6 proposes 0.0001 USDC steps and a 0.001 USDC floor, and whole sats with a 1 sat floor. A 21-sat route is about two cents at a $100k BTC, so the floor matters for cheap routes.
-2. Whether `payTo` may appear on `GET /v1/sites`. This design keeps it off the directory, like the Lightning address, and puts it only in the 402.
-3. Whether the MCP may hold a buyer private key. This design says no in the first MCP PR. It returns the payment requirements and enforces a USD cap. A key in the environment would be a separate decision, and it would have to be unread from logs the way `SATSGATE_MCP_NWC_URI` is.
-4. Exact facilitator base URLs, confirmed at implementation by `GET /supported`, not hard-coded from memory in this document. Testnet is the public x402.org facilitator. Mainnet is CDP, flag off.
+1. Whether `payTo` may appear on `GET /v1/sites`. This design keeps it off the directory, like the Lightning address, and puts it only in the 402.
+2. Whether the MCP may hold a buyer private key. This design says no in the first MCP PR. It returns the payment requirements and enforces a USD cap. A key in the environment would be a separate decision, and it would have to be unread from logs the way `SATSGATE_MCP_NWC_URI` is.
+3. The mainnet facilitator URL. It stays disabled. There is still no CDP path.

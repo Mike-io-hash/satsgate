@@ -20,6 +20,7 @@ The routes are omitted from the public OpenAPI document.
 from __future__ import annotations
 
 import hmac
+import time
 
 from fastapi import APIRouter, Header, Query, Request
 from fastapi.responses import JSONResponse
@@ -212,81 +213,181 @@ def internal_challenge(
     client = _owner(site) if route is not None else None
     if route is None or client is None:
         return _not_found()
+    from . import db_x402
     from . import main as core
-
+    from . import x402
     from . import x402_service
 
-    if x402_service.rail_for(site, route) == "x402":
-        from . import db_x402
-
+    plan = x402_service.quote_plan(site, route)
+    pay_to = None
+    if plan["x402_on"]:
         pay_to = db_x402.payee_verified(config.DB_PATH, client_id=client.id)
         if not pay_to:
+            plan["x402_atomic"] = None
+    if plan["lightning_sats"] is None and plan["x402_atomic"] is None:
+        code = "payee_evm_not_verified" if plan["x402_on"] and not pay_to else "rail_unavailable"
+        return JSONResponse(status_code=400, content={"ok": False, "error": code}, headers=_NO_STORE)
+
+    peer = request.client.host if request.client else None
+    try:
+        buyer_ip = core.buyer_ip_from_trusted_proxy(
+            peer=peer,
+            header=x_satsgate_buyer_ip,
+            trusted_proxies=config.TRUSTED_PROXIES,
+        )
+    except ValueError as exc:
+        if str(exc) == "invalid_buyer_ip":
             return JSONResponse(
                 status_code=400,
-                content={"ok": False, "error": "payee_evm_not_verified"},
+                content={"ok": False, "error": "invalid_buyer_ip"},
                 headers=_NO_STORE,
             )
-        peer = request.client.host if request.client else None
-        try:
-            buyer_ip = core.buyer_ip_from_trusted_proxy(
-                peer=peer,
-                header=x_satsgate_buyer_ip,
-                trusted_proxies=config.TRUSTED_PROXIES,
-            )
-        except ValueError as exc:
-            if str(exc) == "invalid_buyer_ip":
-                return JSONResponse(
-                    status_code=400,
-                    content={"ok": False, "error": "invalid_buyer_ip"},
-                    headers=_NO_STORE,
-                )
-            raise
-        buyer_hash = core.hash_buyer_ip(buyer_ip, secret=config.MACAROON_SECRET) if buyer_ip else None
-        try:
-            body_out = x402_service.issue_offer(
-                client_id=client.id,
-                slug=slug,
-                path=path,
-                resource=gate_resource(slug, path),
-                pay_to=pay_to,
-                amount=int(route["price_usd_atomic"]),
-                max_uses=route["max_uses"],
-                access_seconds=route["access_seconds"],
-                buyer_ip_hash=buyer_hash,
-            )
-        except core.db.ChallengeLimit as exc:
-            response = core._challenge_limited(exc)
-            response.headers["Cache-Control"] = "no-store"
-            return response
-        response = JSONResponse(content=body_out, headers=_NO_STORE)
-        response.headers["PAYMENT-REQUIRED"] = body_out["payment_required"]
-        return response
-    if x402_service.rail_for(site, route) != "lightning":
-        return JSONResponse(
-            status_code=400,
-            content={"ok": False, "error": "rail_unavailable"},
-            headers=_NO_STORE,
-        )
-
+        raise
+    buyer_hash = core.hash_buyer_ip(buyer_ip, secret=config.MACAROON_SECRET) if buyer_ip else None
     resource = gate_resource(slug, path)
-    memo = f"satsgate {slug} {path}"
-    if len(memo) > 250:
-        memo = memo[:250]
-    challenge = core.PaywallChallengeIn(
-        amount_sats=int(route["price_sats"]),
-        resource=resource,
-        memo=memo,
-        max_uses=route["max_uses"],
-        access_seconds=route["access_seconds"],
-    )
-    return _json(
-        core._issue_paywall_challenge(
+    lightning_body = None
+    if plan["lightning_sats"] is not None:
+        memo = f"satsgate {slug} {path}"
+        if len(memo) > 250:
+            memo = memo[:250]
+        challenge = core.PaywallChallengeIn(
+            amount_sats=int(plan["lightning_sats"]),
+            resource=resource,
+            memo=memo,
+            max_uses=route["max_uses"],
+            access_seconds=route["access_seconds"],
+        )
+        issued = core._issue_paywall_challenge(
             challenge,
             request,
             _owner_principal(client),
             x_satsgate_buyer_ip,
         )
+        if isinstance(issued, JSONResponse):
+            # A limit applies to the whole request. A failed derived invoice
+            # still leaves the main x402 price available.
+            if issued.status_code == 429 or plan["price_currency"] == "sats" or plan["x402_atomic"] is None:
+                issued.headers["Cache-Control"] = "no-store"
+                return issued
+        else:
+            lightning_body = issued
+
+    if lightning_body is not None:
+        merged = _lock_lightning_offer(
+            lightning_body,
+            plan=plan,
+            pay_to=pay_to,
+            client_id=client.id,
+            resource=resource,
+            resource_url=x402.resource_url(slug, path),
+            buyer_ip_hash=buyer_hash,
+            max_uses=route["max_uses"],
+            access_seconds=route["access_seconds"],
+        )
+        response = JSONResponse(content=merged, headers=_NO_STORE)
+        if merged.get("payment_required"):
+            response.headers["PAYMENT-REQUIRED"] = merged["payment_required"]
+        return response
+
+    try:
+        body_out = x402_service.issue_offer(
+            client_id=client.id,
+            slug=slug,
+            path=path,
+            resource=resource,
+            pay_to=pay_to,
+            plan=plan,
+            max_uses=route["max_uses"],
+            access_seconds=route["access_seconds"],
+            buyer_ip_hash=buyer_hash,
+        )
+    except core.db.ChallengeLimit as exc:
+        response = core._challenge_limited(exc)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    response = JSONResponse(content=body_out, headers=_NO_STORE)
+    response.headers["PAYMENT-REQUIRED"] = body_out["payment_required"]
+    return response
+
+
+def _lock_lightning_offer(
+    body: dict,
+    *,
+    plan: dict,
+    pay_to: str | None,
+    client_id: int,
+    resource: str,
+    resource_url: str,
+    buyer_ip_hash: str | None,
+    max_uses: int | None,
+    access_seconds: int | None,
+) -> dict:
+    """Keep the Lightning body. Attach the locked x402 quote when that rail was offered."""
+    from . import db_x402
+    from . import x402
+    from . import x402_service
+
+    now = int(time.time())
+    offer = db_x402.offer_by_payment_hash(config.DB_PATH, str(body["payment_hash"]))
+    if body.get("reused"):
+        if (
+            plan["x402_on"]
+            and pay_to
+            and offer is not None
+            and int(offer["expires_at"]) > now
+            and offer.get("pay_to") == pay_to
+            and offer.get("amount_usd_atomic")
+            and offer.get("requirements")
+        ):
+            view = x402_service.x402_view(offer, resource_url=resource_url, reused=True, resource=resource)
+            merged = dict(body)
+            merged.update(view)
+            merged["rail"] = "lightning"
+            return merged
+        return body
+
+    expires = int(body["invoice_expires_at"])
+    if expires <= now:
+        return body
+    requirements = None
+    stored_pay_to = None
+    if plan["x402_atomic"] and pay_to:
+        requirements = x402.accept_for(
+            resource_url=resource_url,
+            amount=int(plan["x402_atomic"]),
+            pay_to=pay_to,
+            timeout_seconds=max(1, expires - now),
+        )
+        stored_pay_to = pay_to
+    elif plan.get("rate") is None:
+        return body
+    offer = db_x402.create_offer(
+        config.DB_PATH,
+        client_id=client_id,
+        resource=resource,
+        resource_url=resource_url,
+        buyer_ip_hash=buyer_ip_hash,
+        max_uses=max_uses,
+        access_seconds=access_seconds,
+        payment_hash=str(body["payment_hash"]),
+        expires_at=expires,
+        enforce=False,
+        now=now,
+        **x402_service._store_kwargs(plan, pay_to=stored_pay_to, requirements=requirements),
     )
+    merged = dict(body)
+    if requirements is not None:
+        view = x402_service.x402_view(offer, resource_url=resource_url, reused=False, resource=resource)
+        merged.update(view)
+        merged["rail"] = "lightning"
+        merged["reused"] = False
+    else:
+        rate = x402_service._rate_view(offer)
+        if rate is not None:
+            merged["rate"] = rate
+            merged["price_currency"] = plan["price_currency"]
+            merged["price_usd_atomic"] = plan["main_usd"]
+    return merged
 
 
 def _unlock(
@@ -415,7 +516,7 @@ def _x402_call(request: Request, body: X402PaymentIn, *, settle: bool):
     from . import x402
     from . import x402_service
 
-    if x402_service.rail_for(site, route) != "x402":
+    if not bool(int(site.get("rail_x402", 0))):
         return JSONResponse(status_code=400, content={"ok": False, "error": "rail_unavailable"}, headers=_NO_STORE)
     try:
         if settle:

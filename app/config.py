@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 # Load env vars from .env if present. Existing process env wins.
 load_dotenv()
 
-APP_VERSION = "0.12.0"
+APP_VERSION = "0.13.0"
 
 # production is the safe default. Local mock/dev only runs when this is explicit.
 SATSGATE_ENV = os.environ.get("SATSGATE_ENV", "production").strip().lower() or "production"
@@ -229,6 +229,28 @@ def _x402_facilitator_url() -> str:
 X402_NETWORK = _x402_network()
 X402_FACILITATOR_URL = _x402_facilitator_url()
 X402_USDC = X402_USDC_SEPOLIA
+
+# BTC/USD quotes. The median is not a conversion. Defaults are safe to leave unset.
+# SATSGATE_RATES_ENABLED=0 skips the background refresh (tests). The last good
+# median is stale after 3 minutes and is then not used to price a challenge.
+RATES_ENABLED = os.environ.get("SATSGATE_RATES_ENABLED", "1") == "1"
+RATES_REFRESH_SECONDS = _optional_int("SATSGATE_RATES_REFRESH_SECONDS", 60, minimum=15, maximum=600)
+RATES_STALE_SECONDS = _optional_int("SATSGATE_RATES_STALE_SECONDS", 180, minimum=60, maximum=900)
+RATES_OUTLIER_BPS = _optional_int("SATSGATE_RATES_OUTLIER_BPS", 200, minimum=50, maximum=1000)
+
+
+def _rates_timeout() -> float:
+    raw = os.environ.get("SATSGATE_RATES_SOURCE_TIMEOUT_SECONDS", "2").strip()
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError("SATSGATE_RATES_SOURCE_TIMEOUT_SECONDS must be a number") from exc
+    if value < 0.5 or value > 5:
+        raise RuntimeError("SATSGATE_RATES_SOURCE_TIMEOUT_SECONDS must be between 0.5 and 5")
+    return value
+
+
+RATES_SOURCE_TIMEOUT_SECONDS = _rates_timeout()
 
 
 def site_secret_key() -> bytes | None:

@@ -11,7 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `satsgate-mcp` 0.10.0. `list_sites` reads `GET /v1/sites` on `SATSGATE_MCP_CORE_URL` (default `https://api.satsgate.org`) without any extra setting. Each row is an approved, listed site: name, slug, description, gate URL, and routes (`price_sats`, `max_uses`, `access_seconds`). A row that still carries `status` other than `approved`, or `listed` other than true, is dropped. A route without an integer `price_sats` is dropped, so a USD-priced route does not appear until a later MCP release. `SATSGATE_MCP_REGISTRY` is an optional file or URL that replaces the public directory. A directory that times out (5 seconds, and never longer than `SATSGATE_MCP_HTTP_TIMEOUT`), fails to connect, or returns a non-200 or unreadable body comes back as `registry_unavailable` or `invalid_registry` with an empty `sites` list.
 - `docs/hosted-gate-terms.md`, a draft terms of use for the closed-beta hosted gate. It is not in effect until legal review.
 
-The MCP package is 0.10.0. The self-hosted proxy stays 0.8.0. The hosted gate stays 0.11.0. Core health for the x402 work is 0.12.0 below.
+The MCP package is 0.10.0. The self-hosted proxy stays 0.8.0. The hosted gate stays 0.11.0. Core health is 0.13.0 below.
+
+## [0.13.0] - 2026-10-20
+
+### Added
+- `GET /v1/rates`, a public BTC/USD median. Core refreshes Coinbase, Kraken, and Bitstamp about once a minute (2 second timeout each, no API key). It keeps the median of the sources that agree. One source is not enough. A price more than 2% from the median is dropped. The last good median goes stale after 3 minutes. `status` is `ok`, `stale`, or `unavailable`.
+- A route still has one main price, sats or USD. When the other rail is enabled and the median is fresh, the challenge locks the derived amount on `payment_offers` (`rate_num`, `rate_den`, `rate_fetched_at`, both amounts, expiry). A later verify uses that row, not a new fetch. If the median is missing or stale, the challenge offers only the main currency. It does not fail because the quote is down.
+- Derived sats round up to the next sat (minimum 1). Derived USDC rounds up to the next atomic unit (6 decimals). A derived USDC amount below $0.001 is not offered. The merchant's own price is unchanged.
+- `GET /v1/sites/mine` adds `derived` on each route: the live quote, or `unavailable` / `stale` / `below_minimum`. `GET /v1/sites` still shows the main price and `price_currency` only. It does not show `payTo` or the moving quote.
+
+`GET /health` reports `0.13.0`. No new table and no new column. Copy `satsgate.sqlite3` before restart anyway. Lightning challenges are unchanged when x402 is off or the median cannot be used. The hosted gate stays 0.11.0 and still ignores extra fields on a Lightning challenge. Satsgate does not convert, hold, or forward the payment. The buyer pays the locked amount on that rail to the merchant.
+
+New env vars, all optional: `SATSGATE_RATES_ENABLED` (default on), `SATSGATE_RATES_REFRESH_SECONDS` (60), `SATSGATE_RATES_STALE_SECONDS` (180), `SATSGATE_RATES_SOURCE_TIMEOUT_SECONDS` (2), `SATSGATE_RATES_OUTLIER_BPS` (200).
 
 ## [0.12.0] - 2026-10-19
 
