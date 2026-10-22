@@ -322,7 +322,7 @@ def test_health_does_not_leak_internals(client):
     body = response.json()
     assert set(body) == {"ok", "version"}
     assert body["ok"] is True
-    assert body["version"] == "0.13.1"
+    assert body["version"] == "0.14.0"
     serialized = json.dumps(body).lower()
     assert "sqlite" not in serialized
     assert "db_path" not in serialized

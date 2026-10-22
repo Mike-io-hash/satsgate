@@ -22,6 +22,7 @@ from . import db_verify
 from . import db_x402
 from . import rates
 from . import x402 as x402_mod
+from . import x402_topup
 from . import ssrf
 from . import wallet_lnaddr
 from .admin import router as admin_router
@@ -348,6 +349,7 @@ def well_known_satsgate(request: Request) -> dict:
             "endpoints": {
                 "plans": {"method": "GET", "path": "/v1/plans"},
                 "topup": {"method": "GET", "path": "/v1/topup/{plan_id}"},
+                "topup_x402": {"method": "GET", "path": "/v1/topup/{plan_id}/x402"},
                 "topup_status": {"method": "GET", "path": "/v1/topup/status/{payment_hash}"},
                 "balance": {"method": "GET", "path": "/v1/balance"},
                 "client": {"method": "GET", "path": "/v1/client"},
@@ -1398,6 +1400,58 @@ def v1_topup_status(
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
     return result
+
+
+@app.get("/v1/topup/{plan_id}/x402")
+def v1_topup_x402(
+    plan_id: str,
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+    payment_signature: str | None = Header(default=None, alias="PAYMENT-SIGNATURE"),
+):
+    """Buy a credit pack with USDC on Base Sepolia.
+
+    No `PAYMENT-SIGNATURE`: 402 and `PAYMENT-REQUIRED` (scheme `exact`, payTo
+    the treasury, amount from the locked BTC/USD quote). With that header:
+    verify, settle, then grant credits. A failed settle grants nothing.
+    Credits are not redeemable for USDC. Lightning top-up is a different path.
+    """
+    try:
+        plan = get_plan(plan_id)
+    except KeyError as exc:
+        return JSONResponse(status_code=404, content={"ok": False, "error": str(exc)})
+    if not x402_topup.enabled():
+        return JSONResponse(status_code=400, content={"ok": False, "error": "x402_topup_disabled"})
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    try:
+        presented = payment_signature.strip() if payment_signature else ""
+        if presented:
+            if len(presented) > config.X402_SIGNATURE_MAX_BYTES:
+                return JSONResponse(status_code=400, content={"ok": False, "error": "bad_signature"})
+            result = x402_topup.settle(client_id=client.id, plan=plan, encoded=presented)
+            header = str(result.pop("payment_response"))
+            return JSONResponse(
+                status_code=200,
+                headers={"PAYMENT-RESPONSE": header, "Cache-Control": "no-store"},
+                content=result,
+            )
+        quoted = x402_topup.issue(
+            client_id=client.id,
+            plan=plan,
+            resource_url=f"{str(request.base_url).rstrip('/')}/v1/topup/{plan.id}/x402",
+        )
+        return JSONResponse(
+            status_code=402,
+            headers={"PAYMENT-REQUIRED": quoted["payment_required"], "Cache-Control": "no-store"},
+            content=quoted,
+        )
+    except x402_mod.X402Error as exc:
+        content: dict[str, Any] = {"ok": False, "error": exc.code}
+        if exc.reason:
+            content["reason"] = exc.reason
+        return JSONResponse(status_code=exc.status, content=content)
 
 
 @app.get("/v1/topup/{plan_id}")

@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import re
 from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
@@ -7,7 +9,7 @@ from dotenv import load_dotenv
 # Load env vars from .env if present. Existing process env wins.
 load_dotenv()
 
-APP_VERSION = "0.13.1"
+APP_VERSION = "0.14.0"
 
 # production is the safe default. Local mock/dev only runs when this is explicit.
 SATSGATE_ENV = os.environ.get("SATSGATE_ENV", "production").strip().lower() or "production"
@@ -229,6 +231,32 @@ def _x402_facilitator_url() -> str:
 X402_NETWORK = _x402_network()
 X402_FACILITATOR_URL = _x402_facilitator_url()
 X402_USDC = X402_USDC_SEPOLIA
+
+# Satsgate's own USDC address for credit packs only. Unset or invalid disables
+# that rail. Buyer payments for a merchant route still go to the merchant.
+_TREASURY_ADDR = re.compile(r"^0x[0-9a-fA-F]{40}$")
+
+
+def _treasury_address() -> str | None:
+    raw = os.environ.get("SATSGATE_TREASURY_EVM_ADDRESS", "").strip()
+    if not raw or not _TREASURY_ADDR.fullmatch(raw):
+        return None
+    try:
+        from eth_utils import to_checksum_address
+
+        checksum = to_checksum_address(raw)
+    except Exception:  # noqa: BLE001
+        return None
+    if int(checksum, 16) == 0:
+        return None
+    return checksum
+
+
+TREASURY_EVM_ADDRESS = _treasury_address()
+if os.environ.get("SATSGATE_TREASURY_EVM_ADDRESS", "").strip() and TREASURY_EVM_ADDRESS is None:
+    logging.getLogger("satsgate.x402").warning(
+        "USDC top-up disabled: SATSGATE_TREASURY_EVM_ADDRESS is not a valid address"
+    )
 
 # BTC/USD quotes. The median is not a conversion. Defaults are safe to leave unset.
 # SATSGATE_RATES_ENABLED=0 skips the background refresh (tests). The last good

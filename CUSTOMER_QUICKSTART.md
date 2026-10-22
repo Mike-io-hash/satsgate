@@ -45,6 +45,8 @@ If the hosted payee's provider advertises LUD-21 `verify` (Alby does), you can s
 
 Pay the invoice from a **different** wallet than the one that receives it. Paying yourself from the same node (for example Alby Go on the same Alby Hub) usually fails.
 
+The same packs can be bought with USDC on Base Sepolia when the operator has set `SATSGATE_TREASURY_EVM_ADDRESS`. `GET /v1/topup/trial/x402` with the account key returns `402` and `PAYMENT-REQUIRED`. Retry with `PAYMENT-SIGNATURE` after your wallet signs that exact USDC authorization. Credits land only after the facilitator settles, and they are not redeemable for USDC. If that variable is unset, the route says `x402_topup_disabled` and the Lightning steps above are unchanged. A request sketch is `scripts/x402_topup_example.py`. The proxy and the MCP server do not call this route.
+
 ## 2) Register your payee (where your users will pay)
 
 ```bash
