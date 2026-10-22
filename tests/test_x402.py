@@ -288,6 +288,99 @@ def test_payee_signature_and_usd_route_offer_only_when_priced(tmp_path, monkeypa
         assert "payTo" not in public and owner.address not in http.get("/v1/sites").text
 
 
+def _swap_line(message: str, prefix: str, value: str) -> str:
+    lines = []
+    for line in message.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        ending = line[len(body) :]
+        if body.startswith(prefix):
+            lines.append(prefix + value + ending)
+        else:
+            lines.append(line)
+    return "".join(lines)
+
+
+def test_payee_signature_accepts_trimmed_text_and_rejects_any_other_change(tmp_path, monkeypatch):
+    module = _load_app(tmp_path)
+    _patch_dns(monkeypatch, module)
+    owner = Account.create()
+    other = Account.create()
+    with TestClient(module.app) as http:
+        key = _buy(http)
+
+        def issue() -> str:
+            response = http.post(
+                "/v1/client/payee/evm/challenge",
+                headers={"X-Api-Key": key},
+                json={"address": owner.address},
+            )
+            assert response.status_code == 200, response.text
+            text = response.json()["message"]
+            assert text.endswith("\n")
+            assert "\r" not in text
+            return text
+
+        def submit(message: str, signer=owner, address: str | None = None):
+            return http.post(
+                "/v1/client/payee/evm",
+                headers={"X-Api-Key": key},
+                json={"address": address or owner.address, "signature": _sign(signer, message)},
+            )
+
+        def unchanged() -> None:
+            info = http.get("/v1/client", headers={"X-Api-Key": key}).json()
+            assert info["payee_evm_address"] == owner.address
+            assert info["payee_evm_verified"] is True
+
+        message = issue()
+        exact = submit(message)
+        assert exact.status_code == 200, exact.text
+        assert exact.json()["payee_evm_address"] == owner.address
+        replay = submit(message)
+        assert replay.status_code == 400
+        assert replay.json()["error"] == "stale_challenge"
+        unchanged()
+        fresh = issue()
+        again = submit(message)
+        assert again.status_code == 400
+        assert again.json()["error"] == "bad_signature"
+        unchanged()
+        assert fresh != message
+
+        trimmed = issue()
+        saved = submit(trimmed.rstrip(), address=owner.address.lower())
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["payee_evm_address"] == owner.address
+
+        crlf = issue()
+        saved = submit(crlf.replace("\n", "\r\n"))
+        assert saved.status_code == 200, saved.text
+
+        def rejected(edited: str, signer=owner) -> None:
+            response = submit(edited, signer=signer)
+            assert response.status_code == 400, response.text
+            assert response.json()["error"] == "bad_signature"
+            unchanged()
+
+        nonce = issue()
+        current = nonce.split("Nonce: ", 1)[1].split("\n", 1)[0]
+        rejected(_swap_line(nonce, "Nonce: ", "0x" + "11" * 16))
+        assert current not in ("0x" + "11" * 16)
+        rejected(_swap_line(issue(), "Address: ", other.address))
+        rejected(_swap_line(issue(), "Expires: ", "1"))
+        rejected(_swap_line(issue(), "Domain: ", "not-satsgate"))
+        rejected(" " + issue())
+        rejected(issue(), signer=other)
+
+        expired_message = issue()
+        with sqlite3.connect(os.environ["SATSGATE_DB_PATH"]) as conn:
+            conn.execute("UPDATE clients SET payee_evm_pending_expires = 1")
+        expired = submit(expired_message)
+        assert expired.status_code == 400
+        assert expired.json()["error"] == "stale_challenge"
+        unchanged()
+
+
 def test_verify_settle_replay_and_failures(tmp_path, monkeypatch):
     module = _load_app(tmp_path)
     _patch_dns(monkeypatch, module)
@@ -498,7 +591,7 @@ def test_old_site_routes_keep_their_sats_price(tmp_path):
     assert row == (21, "sats", None)
     price = next(column for column in notnull if column[1] == "price_sats")
     assert price[3] == 0
-    assert module.config.APP_VERSION == "0.13.0"
+    assert module.config.APP_VERSION == "0.13.1"
 
 
 def test_address_change_clears_the_x402_rail(tmp_path, monkeypatch):

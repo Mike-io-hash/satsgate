@@ -2,7 +2,7 @@
 
 The hosted gate. One process serves many approved sites at `https://gate.satsgate.org/<slug>/<path>`.
 
-Version **0.12.0**. Core is **0.13.0**. A site can offer Lightning, x402 (USDC on Base Sepolia), or both. x402 is off until the merchant turns it on. The self-hosted proxy stays **0.8.0** and is a different program: one merchant, one YAML file, one origin secret in the environment. This process has no origin secret of its own, and it does not call the facilitator.
+Version **0.12.0**. Core is **0.13.1**. A site can offer Lightning, x402 (USDC on Base Sepolia), or both. x402 is off until the merchant turns it on. The self-hosted proxy stays **0.8.0** and is a different program: one merchant, one YAML file, one origin secret in the environment. This process has no origin secret of its own, and it does not call the facilitator.
 
 ## Why an internal API
 

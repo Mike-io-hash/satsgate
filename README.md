@@ -70,7 +70,7 @@ Configured via env vars:
   - checks the BOLT11 amount, network, `description_hash` (LUD-06), expiry, and payment hash before issuing a challenge
   - if the provider advertises LUD-21 `verify`, settlement is confirmed there too, including without the payer returning a preimage. Providers that omit it (Wallet of Satoshi) stay preimage-only
 
-`GET /health` returns `{"ok": true, "version": "0.13.0"}` and nothing else.
+`GET /health` returns `{"ok": true, "version": "0.13.1"}` and nothing else.
 
 ## Prepaid payment verifications (credits)
 
@@ -336,7 +336,7 @@ Enable it with the account key, not a restricted `sgr_` key:
 3. `PATCH /v1/sites/{slug}` with `{"rail_x402": true}`. Lightning can stay true. Both false is rejected.
 4. Price the route in sats or in USD (`price_usd_atomic`, 6 decimals, 1 to 100000000). One main price per route.
 
-No new migration and no new environment variable. Rebuild the gate image and the core image. Start them together, or start the gate first. `GET /health` stays `0.13.0`. `GET /healthz` on the gate reports `0.12.0`. Keep the facilitator at `https://x402.org/facilitator`. Do not configure a Satsgate receiving wallet. The private Sepolia check, including the merchant test address, is in [`gate/README.md`](./gate/README.md).
+No new migration and no new environment variable. Rebuild the gate image and the core image. Start them together, or start the gate first. `GET /health` reports `0.13.1`. `GET /healthz` on the gate reports `0.12.0`. Keep the facilitator at `https://x402.org/facilitator`. Do not configure a Satsgate receiving wallet. The private Sepolia check, including the merchant test address, is in [`gate/README.md`](./gate/README.md).
 
 The gate resource string is `gate:<slug>:<path>` and must be at most 200 characters, which is the paywall resource limit. A longer route is stored and is not served.
 
@@ -346,7 +346,7 @@ The gate resource string is `gate:<slug>:<path>` and must be at most 200 charact
 
 An unpaid request is **402** with `WWW-Authenticate: L402 macaroon="...", invoice="..."` (macaroon before invoice, standard base64), which lnget and Alby `fetch402` already parse. The JSON body carries `amount_sats`, `payment_hash`, `invoice_expires_at`, and a hint for wallets that do not return a preimage. `Authorization: L402 <macaroon>:<preimage>` verifies with `consume=true`. `Authorization: L402 <macaroon>` polls status with `consume=true`. Pending stays on that invoice (`402 payment_pending`, `Retry-After`). A used, expired, or wrong-route token is a fresh 402, not 401.
 
-The self-hosted proxy stays 0.8.0. `GET /healthz` on the proxy reports `0.8.0`. Core health is `0.13.0`. The proxy's paywall calls are unchanged. The hosted gate is a different process.
+The self-hosted proxy stays 0.8.0. `GET /healthz` on the proxy reports `0.8.0`. Core health is `0.13.1`. The proxy's paywall calls are unchanged. The hosted gate is a different process.
 
 Config is YAML: upstream base URL, routes (`per_request`, `uses:N`, `pass:<seconds>`, scope `route` or `site`), free paths, body limits, and an origin secret from the environment. A `per_request` price below about 10 times the plan's sats-per-credit logs a warning at startup. The trial plan is about 5 sats per credit, so that line is 50 sats. Cheap calls should be bundles or passes.
 
@@ -370,7 +370,7 @@ Full steps, the signature, and a mainnet checklist are in [`proxy/README.md`](./
 
 An optional `sgr_` key enables read-only `challenge_status` and `credits_balance`. The key cannot top up or change the payee. `list_sites` reads `GET /v1/sites` on the core URL: approved, listed sites, each with a gate URL and route prices. Set `SATSGATE_MCP_REGISTRY` to a JSON file or another URL only when that directory should be replaced.
 
-Core health is `0.13.0`. `GET /health` reports `0.13.0`. The MCP package is 0.10.0. A USD route in the public directory is skipped by `list_sites` until a later MCP release, because that tool still requires `price_sats`.
+Core health is `0.13.1`. `GET /health` reports `0.13.1`. The MCP package is 0.10.0. A USD route in the public directory is skipped by `list_sites` until a later MCP release, because that tool still requires `price_sats`.
 
 ```bash
 pip install -r mcp/requirements.txt

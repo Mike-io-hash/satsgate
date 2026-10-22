@@ -1,6 +1,6 @@
 # x402 v2 on Satsgate (USDC on Base)
 
-Core 0.13.0 adds the BTC/USD median and locks the derived rail on the offer. Core 0.12.0 already had Base Sepolia (`eip155:84532`), the x402.org facilitator (confirmed: `GET /supported` lists `exact` on that network), merchant payTo, per-site rails, a USD or sats price, and verify-then-settle. satsgate-gate 0.12.0 serves both rails on one 402 and runs verify, then the origin, then settle. Lightning credit timing, USDC credit packs, the proxy, and the buyer MCP are still later steps in section 11. satsgate-mcp stays 0.10.0. The self-hosted proxy is 0.8.0. Core health stays 0.13.0.
+Core 0.13.0 adds the BTC/USD median and locks the derived rail on the offer. Core 0.12.0 already had Base Sepolia (`eip155:84532`), the x402.org facilitator (confirmed: `GET /supported` lists `exact` on that network), merchant payTo, per-site rails, a USD or sats price, and verify-then-settle. satsgate-gate 0.12.0 serves both rails on one 402 and runs verify, then the origin, then settle. Lightning credit timing, USDC credit packs, the proxy, and the buyer MCP are still later steps in section 11. satsgate-mcp stays 0.10.0. The self-hosted proxy is 0.8.0. Core health is 0.13.1.
 
 The protocol is [x402 v2](https://github.com/x402-foundation/x402/blob/main/specs/x402-specification-v2.md) over HTTP: a 402 carries `PAYMENT-REQUIRED`, the buyer retries with `PAYMENT-SIGNATURE`, and a successful response carries `PAYMENT-RESPONSE`. The only scheme in the first cut is `exact` with EIP-3009 (`transferWithAuthorization`). The only asset is USDC. The only networks are Base Sepolia (`eip155:84532`) and, behind a flag, Base (`eip155:8453`).
 
@@ -246,7 +246,7 @@ Insert `pending` before `/verify`. Two workers cannot both verify one nonce. Ver
 Merchant account, all on the account key. A restricted `sgr_` key cannot set a payee or a rail (`app/db_keys.py` already refuses payee changes for a non-account scope).
 
 - `POST /v1/client/payee/evm/challenge` returns a one-time message: domain, client id, checksummed address, nonce, expiry. Nothing is written on chain.
-- `POST /v1/client/payee/evm` sends the address and the EIP-191 signature of that exact message. Core recovers the address and sets `payee_evm_verified_at`. A wrong signer, a stale nonce, or a different message is 400 and does not change the stored address.
+- `POST /v1/client/payee/evm` sends the address and the EIP-191 signature of that message. A signature over the same text with only trailing whitespace removed, or with CRLF line endings, is accepted. Core recovers the address and sets `payee_evm_verified_at`. A wrong signer, a stale or reused nonce, or any other change to the message is 400 and does not change the stored address.
 - `PATCH /v1/sites/{slug}` accepts `rail_lightning` and `rail_x402`. Turning x402 on without a verified address is 400 `payee_evm_not_verified`. Turning both off is 400. Default for a new site is Lightning on, x402 off.
 - `POST /v1/sites/{slug}/routes` and the route `PATCH` accept `price_currency` (`sats` or `usd`) and, when USD, `price_usd_atomic`. `price_sats` stays required for a sats-priced route. Bounds stay inside `clean_price` for sats. USD must be at least 1 atomic unit and at most a config cap (proposed `$1,000`, `100_000_000` atomic, so a typo cannot quote a fortune).
 
@@ -298,7 +298,7 @@ Satsgate never converts a settled payment. If the buyer pays the USDC amount, th
 
 ## 7. Security
 
-- Signature check for payTo is EIP-191 over the server's message. The message includes a nonce stored on the client row and an expiry of 10 minutes. The recovered address must equal the address in the body. No on-chain call.
+- Signature check for payTo is EIP-191 over the server's message. The message includes a nonce stored on the client row and an expiry of 10 minutes. Trailing whitespace may be absent, and CRLF counts as LF. The recovered address must equal the address in the body, ignoring checksum case. No on-chain call.
 - Replay is the unique `(network, asset, payer, nonce)` row, inserted before `/verify`. The on-chain nonce is the backstop. The row stops two gate workers. An origin failure skips `/settle`. A settle timeout retries `/settle` on the same row. Lightning replay is the payment hash: `settled_at` means the invoice is paid, and `verifications` means the credit was taken. A second presentation of the same proof does not debit twice.
 - Amount, asset, network, and payTo are compared to the offer and to the hardcoded USDC address for that network. A mainnet payload is rejected while `SATSGATE_X402_CDP` is off, even if the signature is valid.
 - `validBefore` must fall inside the offer window. An authorization that is valid for longer than `maxTimeoutSeconds` is rejected, so a buyer cannot reuse a signature after the locked price has expired.

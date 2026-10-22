@@ -693,7 +693,7 @@ def v1_client_evm_challenge(
         "address": challenge["address"],
         "message": challenge["message"],
         "expires_at": challenge["expires_at"],
-        "note": "Sign this exact message with that address. Nothing is written on chain.",
+        "note": "Sign this message with that address. A wallet may drop the trailing newline. Nothing is written on chain.",
     }
 
 
