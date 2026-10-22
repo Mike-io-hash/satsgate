@@ -1,4 +1,8 @@
-"""Short cache of an approved site. Status is never cached."""
+"""Short cache of an approved site. Status is never cached.
+
+The cache may hold the route's main price and which rails are enabled.
+It must not hold a derived quote. That amount is locked on the challenge.
+"""
 
 from __future__ import annotations
 
@@ -10,9 +14,11 @@ from dataclasses import dataclass, field
 @dataclass(frozen=True)
 class GateRoute:
     path: str
-    price_sats: int
+    price_sats: int | None
     max_uses: int | None
     access_seconds: int | None
+    price_currency: str = "sats"
+    price_usd_atomic: int | None = None
 
 
 @dataclass(frozen=True)
@@ -23,6 +29,8 @@ class CachedSite:
     payee: str | None
     routes: tuple[GateRoute, ...]
     origin_secret: str = field(repr=False)
+    rail_lightning: bool = True
+    rail_x402: bool = False
 
     def route(self, path: str) -> GateRoute | None:
         for item in self.routes:

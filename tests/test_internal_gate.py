@@ -172,8 +172,17 @@ def test_config_returns_one_secret_and_challenge_uses_the_owner(tmp_path, monkey
         assert body["origin_secret"] == secret
         assert body["origin_url"] == "https://origin.example"
         assert body["payee_lightning_address"] == "merchant@pay.example"
+        assert body["rail_lightning"] is True
+        assert body["rail_x402"] is False
         assert body["routes"] == [
-            {"path": "/blog/post", "price_sats": 42, "max_uses": 3, "access_seconds": None}
+            {
+                "path": "/blog/post",
+                "price_currency": "sats",
+                "price_sats": 42,
+                "price_usd_atomic": None,
+                "max_uses": 3,
+                "access_seconds": None,
+            }
         ]
         assert config.headers["cache-control"] == "no-store"
         owner = http.get("/v1/sites/my-shop", headers={"X-Api-Key": _key})

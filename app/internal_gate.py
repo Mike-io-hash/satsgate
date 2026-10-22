@@ -165,19 +165,10 @@ def internal_site_config(slug: str, request: Request):
     for route in site["routes"]:
         if len(gate_resource(site["slug"], route["path"])) > _RESOURCE_MAX:
             continue
-        if route.get("price_currency", "sats") != "sats":
+        priced = _priced_route(route)
+        if priced is None:
             continue
-        price = route.get("price_sats")
-        if isinstance(price, bool) or not isinstance(price, int) or price < 1:
-            continue
-        routes.append(
-            {
-                "path": route["path"],
-                "price_sats": price,
-                "max_uses": route["max_uses"],
-                "access_seconds": route["access_seconds"],
-            }
-        )
+        routes.append(priced)
     return JSONResponse(
         content={
             "ok": True,
@@ -186,10 +177,37 @@ def internal_site_config(slug: str, request: Request):
             "origin_url": site["origin_url"],
             "origin_secret": secret,
             "payee_lightning_address": payee,
+            "rail_lightning": bool(int(site.get("rail_lightning", 1))),
+            "rail_x402": bool(int(site.get("rail_x402", 0))),
             "routes": routes,
         },
         headers=_NO_STORE,
     )
+
+
+def _priced_route(route: dict) -> dict | None:
+    """Main price only. A derived quote is not part of the cached site."""
+    currency = route.get("price_currency") or "sats"
+    price_sats = route.get("price_sats")
+    price_usd = route.get("price_usd_atomic")
+    if currency == "sats":
+        if isinstance(price_sats, bool) or not isinstance(price_sats, int) or price_sats < 1:
+            return None
+        price_usd = None
+    elif currency == "usd":
+        if isinstance(price_usd, bool) or not isinstance(price_usd, int) or price_usd < 1:
+            return None
+        price_sats = None
+    else:
+        return None
+    return {
+        "path": route["path"],
+        "price_currency": currency,
+        "price_sats": price_sats,
+        "price_usd_atomic": price_usd,
+        "max_uses": route["max_uses"],
+        "access_seconds": route["access_seconds"],
+    }
 
 
 @router.post("/internal/gate/challenge")

@@ -21,7 +21,11 @@ HOP_BY_HOP = frozenset(
     }
 )
 
-_REQUEST_DROP = HOP_BY_HOP | {"host", "content-length"}
+# PAYMENT-* is the buyer's x402 credential. The origin must not see it.
+# The gate adds PAYMENT-RESPONSE itself after settle, never from the origin.
+_PAYMENT = frozenset({"payment-signature", "payment-required", "payment-response"})
+
+_REQUEST_DROP = HOP_BY_HOP | {"host", "content-length"} | _PAYMENT
 
 _RESPONSE_DROP = HOP_BY_HOP | {
     "server",
@@ -34,7 +38,7 @@ _RESPONSE_DROP = HOP_BY_HOP | {
     "expires",
     "pragma",
     "etag",
-}
+} | _PAYMENT
 
 
 def _connection_names(raw: list[tuple[bytes, bytes]]) -> set[str]:
@@ -58,7 +62,7 @@ def filter_request_headers(
     *,
     inject: tuple[tuple[str, str], ...] = (),
 ) -> list[tuple[str, str]]:
-    """Drop hop-by-hop, client X-Satsgate-*, and L402/LSAT Authorization."""
+    """Drop hop-by-hop, client X-Satsgate-*, L402/LSAT Authorization, and PAYMENT-*."""
     blocked = _REQUEST_DROP | _connection_names(raw)
     kept: list[tuple[str, str]] = []
     for key, value in raw:
