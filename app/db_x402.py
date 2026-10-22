@@ -70,13 +70,10 @@ def verify_payee_signature(db_path: str, *, client_id: int, address: str, signat
             conn.execute("ROLLBACK")
             raise x402.X402Error("bad_signature", status=400)
         try:
-            recovered = x402.recover_personal_signer(message, signature)
+            x402.recover_payee_signer(message, signature, address=checksum)
         except x402.X402Error:
             conn.execute("ROLLBACK")
             raise
-        if recovered != checksum:
-            conn.execute("ROLLBACK")
-            raise x402.X402Error("bad_signature", status=400)
         previous = row["payee_evm_address"]
         changed = previous is not None and x402.checksum_address(previous) != checksum
         conn.execute(

@@ -62,6 +62,40 @@ def payee_message(*, client_id: int, address: str, nonce: str, expires: int) -> 
     )
 
 
+def payee_message_candidates(message: str) -> tuple[str, ...]:
+    """Exact challenge text, plus the same text a wallet UI may actually sign.
+
+    Etherscan and BaseScan trim the trailing newline before MetaMask signs.
+    Only trailing whitespace is removed. CRLF is the same line break as LF.
+    Nonce, expiry, address, client, and domain bytes are not rewritten.
+    """
+    if not isinstance(message, str) or not message:
+        return ()
+    crlf = message.replace("\n", "\r\n")
+    ordered = (message, message.rstrip(), crlf, crlf.rstrip())
+    unique: list[str] = []
+    for item in ordered:
+        if item and item not in unique:
+            unique.append(item)
+    return tuple(unique)
+
+
+def recover_payee_signer(message: str, signature: str, *, address: str) -> str:
+    """Recover the signer of the stored challenge or its trimmed form.
+
+    The recovered address must be the claimed address, ignoring checksum case.
+    """
+    expected = checksum_address(address)
+    for candidate in payee_message_candidates(message):
+        try:
+            recovered = recover_personal_signer(candidate, signature)
+        except X402Error:
+            continue
+        if recovered.lower() == expected.lower():
+            return recovered
+    raise X402Error("bad_signature", status=400)
+
+
 def recover_personal_signer(message: str, signature: str) -> str:
     if not isinstance(signature, str) or not _SIG.fullmatch(signature):
         raise X402Error("bad_signature", status=400)
