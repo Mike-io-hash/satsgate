@@ -210,7 +210,7 @@ def verify_payment(*, client_id: int, slug: str, path: str, resource: str, encod
     if state == "settled":
         raise x402.X402Error("x402_replay")
     if state == "verified":
-        return _serve(offer, fields["payer"])
+        return _serve(offer, fields["payer"], nonce=fields["nonce"])
     if state == "pending":
         row = db_x402.authorization_row(
             config.DB_PATH,
@@ -265,16 +265,19 @@ def verify_payment(*, client_id: int, slug: str, path: str, resource: str, encod
         state="verified",
         now=now,
     )
-    return _serve(offer, payer)
+    return _serve(offer, payer, nonce=fields["nonce"])
 
 
-def _serve(offer: dict, payer: str) -> dict:
+def _serve(offer: dict, payer: str, *, nonce: str) -> dict:
+    """What the gate needs to call the origin. The quote was locked on the offer."""
     return {
         "ok": True,
         "serve": True,
         "offer_id": offer["id"],
         "payer": payer,
         "expires_at": offer["expires_at"],
+        "amount_usd_atomic": int(offer["amount_usd_atomic"]),
+        "nonce": nonce,
     }
 
 

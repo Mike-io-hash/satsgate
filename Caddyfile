@@ -32,6 +32,8 @@
 # no published port. This block is the only public path to it.
 # Buyer-IP is stripped here too. The gate reads X-Forwarded-For from Caddy
 # and sends X-Satsgate-Buyer-Ip to core itself.
+# Do not strip PAYMENT-SIGNATURE, PAYMENT-REQUIRED, or PAYMENT-RESPONSE.
+# Those are the x402 v2 headers. Caddy forwards them by default.
 #
 # gate.satsgate.org {
 # 	encode zstd gzip

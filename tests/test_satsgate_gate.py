@@ -323,7 +323,7 @@ def test_unknown_pending_and_disabled_are_404(tmp_path, monkeypatch):
         gate, core_client, origin_client = _open_gate(module.app, settings, origin)
         try:
             with gate as http:
-                assert http.get("/healthz").json() == {"ok": True, "component": "satsgate-gate", "version": "0.11.0"}
+                assert http.get("/healthz").json() == {"ok": True, "component": "satsgate-gate", "version": "0.12.0"}
                 missing = http.get("/no-such/blog")
                 assert missing.status_code == 404
                 assert missing.json()["error"] == "not_found"

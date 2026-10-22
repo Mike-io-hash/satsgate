@@ -260,7 +260,7 @@ Set the payee with the account key before the proxy creates challenges. There is
 
 ## Hosted sites (closed beta)
 
-Core stores the site. `satsgate-gate` (version 0.11.0, in [`gate/`](./gate/README.md)) serves `https://gate.satsgate.org/<slug>/<path>` after an operator approves the site. The public hostname stays commented out in the Caddyfile until DNS exists. Money goes to the merchant's Lightning Address. One credit is still one unlock. The gate does not hold the sats.
+Core stores the site. `satsgate-gate` (version 0.12.0, in [`gate/`](./gate/README.md)) serves `https://gate.satsgate.org/<slug>/<path>` after an operator approves the site. The public hostname stays commented out in the Caddyfile until DNS exists. Lightning goes to the merchant's Lightning Address. USDC goes to the merchant's verified Base Sepolia address through the public facilitator. One credit is still one unlock. The gate does not hold the sats or the USDC.
 
 ```bash
 curl -s -X POST https://api.satsgate.org/v1/sites \
@@ -291,7 +291,7 @@ Restart to serve 0.13.0. Copy `satsgate.sqlite3` before you restart. The 0.12.0 
 
 ### x402 on Base Sepolia (0.12.0)
 
-A site can take USDC on Base Sepolia as well as Lightning. x402 is off until the merchant turns it on. This release does not serve it from the hosted gate (still 0.11.0) or the self-hosted proxy. Core can build the `PAYMENT-REQUIRED` document, check a `PAYMENT-SIGNATURE`, and ask the public facilitator to verify and settle. Satsgate never signs or broadcasts a transaction and never holds a key. One merchant credit is charged only after the facilitator settles and the caller reports that the origin responded successfully. Lightning still charges the credit before the origin is called.
+A site can take USDC on Base Sepolia as well as Lightning. x402 is off until the merchant turns it on. The hosted gate 0.12.0 puts both enabled rails on one 402. The self-hosted proxy is still Lightning only. Core builds the `PAYMENT-REQUIRED` document, checks a `PAYMENT-SIGNATURE`, and asks the public facilitator to verify and settle. The gate does not call the facilitator and does not hold a key. Satsgate never signs or broadcasts a transaction. On x402, one merchant credit is charged only after the origin returns 2xx and the facilitator settles. Lightning still charges the credit before the origin is called.
 
 The account key sets the receiving address. `POST /v1/client/payee/evm/challenge` with `{"address":"0x..."}` returns a message. The merchant signs that exact text (EIP-191, `personal_sign`) and posts `{"address","signature"}` to `POST /v1/client/payee/evm`. A wrong signature does not replace a stored address. `PATCH /v1/sites/{slug}` with `{"rail_x402": true}` is account-key only and requires that verified address. `{"rail_lightning": false, "rail_x402": false}` is rejected.
 
@@ -321,7 +321,22 @@ When both rails are on and the median is fresh, the challenge locks the other cu
 | `SATSGATE_RATES_SOURCE_TIMEOUT_SECONDS` | 2 | Timeout for one source (0.5 to 5). |
 | `SATSGATE_RATES_OUTLIER_BPS` | 200 | Drop a source this far from the median. 200 is 2%. |
 
-No new table. Copy `satsgate.sqlite3` before restarting onto 0.13.0 anyway. Lightning is unchanged when the quote is not used. The hosted gate stays 0.11.0.
+No new table. Copy `satsgate.sqlite3` before restarting onto 0.13.0 anyway. Lightning is unchanged when the quote is not used.
+
+### Hosted gate x402 (gate 0.12.0)
+
+The gate offers Lightning, x402, or both, matching the site. A Lightning-only 402 is the 0.11.0 body and `WWW-Authenticate`, and it has no `PAYMENT-REQUIRED`. An x402 offer uses scheme `exact` on `eip155:84532`, the Base Sepolia USDC contract, and `payTo` equal to the verified address. The amount is the route's USD price, or the sats price converted with the live median and locked on that challenge. The gate does not cache the converted amount.
+
+`PAYMENT-SIGNATURE` is checked by core (verify, then the origin, then settle). Both payment headers on one request is `400 one_rail_only`. The origin does not see `PAYMENT-SIGNATURE`. A USDC payment is signed with `X-Satsgate-Paid-Usd-Atomic`. The payment-hash header is the EIP-3009 nonce, because the transaction id does not exist until settle, and settle runs after the origin.
+
+Enable it with the account key, not a restricted `sgr_` key:
+
+1. `POST /v1/client/payee/evm/challenge` with `{"address":"0x..."}`. The response is an EIP-191 message. Nothing is written on chain.
+2. Sign that exact text with `personal_sign` and `POST /v1/client/payee/evm` with `{"address","signature"}`. A bad signature does not replace a stored address.
+3. `PATCH /v1/sites/{slug}` with `{"rail_x402": true}`. Lightning can stay true. Both false is rejected.
+4. Price the route in sats or in USD (`price_usd_atomic`, 6 decimals, 1 to 100000000). One main price per route.
+
+No new migration and no new environment variable. Rebuild the gate image and the core image. Start them together, or start the gate first. `GET /health` stays `0.13.0`. `GET /healthz` on the gate reports `0.12.0`. Keep the facilitator at `https://x402.org/facilitator`. Do not configure a Satsgate receiving wallet. The private Sepolia check, including the merchant test address, is in [`gate/README.md`](./gate/README.md).
 
 The gate resource string is `gate:<slug>:<path>` and must be at most 200 characters, which is the paywall resource limit. A longer route is stored and is not served.
 

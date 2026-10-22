@@ -22,10 +22,12 @@ from satsgate_gate.core_client import (
     create_challenge,
     fetch_site,
     fetch_status,
+    settle_x402,
     unlock_with_preimage,
     unlock_without_preimage,
+    verify_x402,
 )
-from satsgate_gate.forward import forward
+from satsgate_gate.forward import call_origin, forward
 from satsgate_gate.macaroon import macaroon_fields
 from satsgate_gate.rate_limit import RateLimiter
 from satsgate_gate.ssrf import build_origin_client
@@ -42,6 +44,8 @@ _POLL_HINT = (
 _PENDING_HINT = (
     "The invoice is not settled yet. Retry the same Authorization header. Do not pay a new invoice."
 )
+# Encoded header, before core sees it. Core also caps the decoded JSON at 8 KB.
+_PAYMENT_SIGNATURE_MAX = 8192
 
 
 def _json(status: int, error: str, **extra: object) -> JSONResponse:
@@ -86,6 +90,13 @@ async def _read_body(request: Request, limit: int) -> bytes | JSONResponse:
             return _json(413, "request_too_large")
         chunks.extend(chunk)
     return bytes(chunks)
+
+
+def _payment_signature(request: Request) -> str | None:
+    """The raw header, or None when the buyer did not send one."""
+    if "payment-signature" not in request.headers:
+        return None
+    return request.headers.get("payment-signature", "").strip()
 
 
 def _l402_authorization(request: Request) -> str | None:
@@ -150,28 +161,51 @@ def _pending(result: CoreResult) -> JSONResponse:
 
 def _challenge_response(result: CoreResult, reason: str | None) -> JSONResponse:
     challenge = result.challenge
-    if challenge is None:
+    if challenge is None or (not challenge.offers_lightning and not challenge.offers_x402):
         return _json(502, "paywall_unavailable")
-    body: dict[str, object] = {
-        "ok": False,
-        "error": "payment_required",
-        "amount_sats": challenge.amount_sats,
-        "payment_hash": challenge.payment_hash,
-        "invoice": challenge.invoice,
-        "invoice_expires_at": challenge.invoice_expires_at,
-        "macaroon": challenge.macaroon,
-        "resource": challenge.resource,
-        "max_uses": challenge.max_uses,
-        "access_seconds": challenge.access_seconds,
-        "hint": _POLL_HINT,
-    }
+    headers = {"Cache-Control": "no-store"}
+    if challenge.offers_lightning:
+        body: dict[str, object] = {
+            "ok": False,
+            "error": "payment_required",
+            "amount_sats": challenge.amount_sats,
+            "payment_hash": challenge.payment_hash,
+            "invoice": challenge.invoice,
+            "invoice_expires_at": challenge.invoice_expires_at,
+            "macaroon": challenge.macaroon,
+            "resource": challenge.resource,
+            "max_uses": challenge.max_uses,
+            "access_seconds": challenge.access_seconds,
+            "hint": _POLL_HINT,
+        }
+        headers["WWW-Authenticate"] = challenge.www_authenticate
+    else:
+        body = {
+            "ok": False,
+            "error": "payment_required",
+            "resource": challenge.resource,
+            "max_uses": challenge.max_uses,
+            "access_seconds": challenge.access_seconds,
+        }
     if reason:
         body["reason"] = reason
-    return JSONResponse(
-        body,
-        status_code=402,
-        headers={"WWW-Authenticate": challenge.www_authenticate, "Cache-Control": "no-store"},
-    )
+    if challenge.offers_x402 and challenge.x402 is not None:
+        body["x402"] = challenge.x402
+        headers["PAYMENT-REQUIRED"] = challenge.payment_required
+    return JSONResponse(body, status_code=402, headers=headers)
+
+
+def _x402_failure(result: CoreResult) -> JSONResponse:
+    if result.action == "missing":
+        return _json(404, "not_found")
+    code = result.error
+    status = result.http_status
+    if result.action == "rejected" and status in {400, 402, 409} and code.isidentifier():
+        extra: dict[str, object] = {}
+        if result.reason:
+            extra["reason"] = result.reason
+        return _json(status, code, **extra)
+    return _json(502, "paywall_unavailable")
 
 
 def _rate_limited(request: Request, slug: str, buyer_ip: str | None) -> JSONResponse | None:
@@ -243,6 +277,33 @@ async def _unlock(request: Request, site: CachedSite, route_path: str, header: s
     return await unlock_with_preimage(client, settings, site, route, header)
 
 
+async def _pay_x402(request: Request, site: CachedSite, route, payment_signature: str) -> Response:
+    """Verify, call the origin, and settle only after a 2xx. The gate never calls the facilitator."""
+    settings: Settings = request.app.state.settings
+    client: httpx.AsyncClient = request.app.state.core_client
+    verified = await verify_x402(client, settings, site, route, payment_signature)
+    if verified.action == "missing":
+        request.app.state.cache.drop(site.slug)
+        return _json(404, "not_found")
+    if verified.action != "serve" or verified.amount_usd_atomic is None or not verified.payment_hash:
+        return _x402_failure(verified)
+    exchanged = await call_origin(
+        request,
+        settings,
+        site,
+        route_path=route.path,
+        payment_hash=verified.payment_hash,
+        resource=site.resource(route.path),
+        paid_usd_atomic=verified.amount_usd_atomic,
+    )
+    if exchanged.error or not (200 <= exchanged.status < 300):
+        return exchanged.response(use_spent=False if exchanged.error else None)
+    settled = await settle_x402(client, settings, site, route, payment_signature)
+    if settled.action != "settled" or not settled.payment_response:
+        return _x402_failure(settled)
+    return exchanged.response(use_spent=None, extra=(("PAYMENT-RESPONSE", settled.payment_response),))
+
+
 async def handle(request: Request) -> Response:
     settings: Settings = request.app.state.settings
     method = request.method.upper()
@@ -287,6 +348,17 @@ async def handle(request: Request) -> Response:
 
     reason: str | None = None
     authorization = _l402_authorization(request)
+    payment_signature = _payment_signature(request)
+    if authorization is not None and payment_signature is not None:
+        return _json(400, "one_rail_only")
+    if payment_signature is not None:
+        if (
+            not payment_signature
+            or len(payment_signature.encode("utf-8")) > _PAYMENT_SIGNATURE_MAX
+            or any(char in payment_signature for char in "\r\n")
+        ):
+            return _json(400, "bad_signature")
+        return await _pay_x402(request, site, route, payment_signature)
     if authorization is not None:
         unlocked = await _unlock(request, site, route.path, authorization)
         if unlocked.action == "forward":
@@ -304,6 +376,9 @@ async def handle(request: Request) -> Response:
                 log.warning("settled unlock had no payment hash")
                 return _json(502, "paywall_unavailable")
             paid = unlocked.amount_sats if unlocked.amount_sats is not None else route.price_sats
+            if isinstance(paid, bool) or not isinstance(paid, int) or paid < 1:
+                log.warning("settled unlock had no sats amount")
+                return _json(502, "paywall_unavailable")
             return await forward(
                 request,
                 settings,
