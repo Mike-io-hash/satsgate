@@ -1672,10 +1672,12 @@ def _challenge_limited(exc: db.ChallengeLimit) -> JSONResponse:
     detail = {
         "buyer_rate_limited": "This buyer has created too many challenges in the current window. Wait for Retry-After.",
         "too_many_open_challenges_for_buyer": (
-            "This buyer has too many unpaid challenges. Pay one, or wait until an unpaid invoice leaves the window."
+            "This buyer has too many unexpired unpaid challenges on this rail. "
+            "Pay one, or wait for Retry-After, which is the soonest expiry. "
+            "Lightning and x402 are counted separately. An expired challenge does not count."
         ),
         "too_many_open_challenges": (
-            "This account has too many open challenges. Wait for Retry-After."
+            "This account has too many unexpired unpaid challenges. Wait for Retry-After."
         ),
     }.get(exc.code, "Try again later.")
     retry_after = max(1, int(exc.retry_after))
@@ -2139,6 +2141,7 @@ def _unlock_paywall(
     poll: bool = False,
     api_key_id: int | None = None,
     consume: bool = False,
+    mode: str = "settle",
 ) -> JSONResponse | dict:
     macaroon_b64, preimage_hex = parse_authorization_header(authorization)
     peeked = peek_bindings(macaroon_b64)
@@ -2186,7 +2189,22 @@ def _unlock_paywall(
         invoice=str(row["invoice"]),
     )
     already = db_verify.has_verification(config.DB_PATH, client_id=client.id, payment_hash=token_hash)
-    if not already:
+    confirmed = row["settled_at"] is not None
+    if mode == "deliver" and not confirmed:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "ok": False,
+                "error": "payment_pending",
+                "status": "pending",
+                "settled": False,
+                "payment_hash": token_hash,
+                "charged_credits": 0,
+            },
+        )
+    # A confirmed payment is not proved again. The gate retries an origin
+    # failure with the same macaroon and does not poll the wallet a second time.
+    if mode != "deliver" and not already and not confirmed:
         if deadline is None:
             if now > int(payload["exp"]):
                 raise L402Error("token expired")
@@ -2208,17 +2226,37 @@ def _unlock_paywall(
                 return _paywall_pending(payment_hash=token_hash, poll=poll)
 
     try:
-        spend = db_verify.settle_and_consume(
-            config.DB_PATH,
-            client_id=client.id,
-            payment_hash=token_hash,
-            cost=int(cost_credits),
-            resource=expected_resource,
-            api_key_id=api_key_id,
-            consume=bool(consume),
-            access_cap_seconds=config.PAYWALL_ACCESS_CAP_SECONDS,
-            now=now,
-        )
+        if mode == "confirm":
+            spend = db_verify.confirm_payment(
+                config.DB_PATH,
+                client_id=client.id,
+                payment_hash=token_hash,
+                cost=int(cost_credits),
+                access_cap_seconds=config.PAYWALL_ACCESS_CAP_SECONDS,
+                now=now,
+            )
+        elif mode == "deliver":
+            spend = db_verify.charge_after_delivery(
+                config.DB_PATH,
+                client_id=client.id,
+                payment_hash=token_hash,
+                cost=int(cost_credits),
+                resource=expected_resource,
+                api_key_id=api_key_id,
+                now=now,
+            )
+        else:
+            spend = db_verify.settle_and_consume(
+                config.DB_PATH,
+                client_id=client.id,
+                payment_hash=token_hash,
+                cost=int(cost_credits),
+                resource=expected_resource,
+                api_key_id=api_key_id,
+                consume=bool(consume),
+                access_cap_seconds=config.PAYWALL_ACCESS_CAP_SECONDS,
+                now=now,
+            )
     except db_verify.UsageDenied as exc:
         detail = (
             "This payment has no uses left. Create a new challenge for another request."

@@ -131,6 +131,7 @@ def _limits(
         "buyer_max_open": config.BUYER_MAX_OPEN_CHALLENGES,
         "buyer_limit_scope": config.BUYER_LIMIT_SCOPE,
         "api_key_id": api_key_id,
+        "rail": "x402",
     }
 
 
@@ -313,9 +314,72 @@ def get_offer(db_path: str, offer_id: str) -> dict | None:
 def offer_by_payment_hash(db_path: str, payment_hash: str) -> dict | None:
     with _connect(db_path) as conn:
         row = conn.execute(
-            "SELECT * FROM payment_offers WHERE payment_hash = ?",
+            """
+            SELECT * FROM payment_offers
+            WHERE payment_hash = ?
+            ORDER BY expires_at DESC, created_at DESC
+            LIMIT 1
+            """,
             (payment_hash,),
         ).fetchone()
+    return None if row is None else _offer_dict(row)
+
+
+def replace_x402_quote(
+    db_path: str,
+    *,
+    payment_hash: str,
+    expires_at: int,
+    requirements: dict,
+    amount_usd_atomic: int | None,
+    pay_to: str | None,
+    rate_num: int | None,
+    rate_den: int | None,
+    rate_fetched_at: int | None,
+    now: int,
+) -> dict | None:
+    """Point the Lightning payment's x402 half at a new short quote.
+
+    ``payment_hash`` is unique on this table, so a reused invoice cannot insert
+    a second row. The Lightning expiry stays on the challenge, not here.
+    """
+    stored = dict(requirements)
+    stored["maxTimeoutSeconds"] = max(1, int(expires_at) - int(now))
+    asset = x402.checksum_address(config.X402_USDC)
+    payload = json.dumps(stored, separators=(",", ":"), sort_keys=True)
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """
+            UPDATE payment_offers
+            SET expires_at = ?, requirements_json = ?, amount_usd_atomic = ?, pay_to = ?,
+                scheme = 'exact', network = ?, asset = ?,
+                rate_num = ?, rate_den = ?, rate_fetched_at = ?
+            WHERE payment_hash = ?
+            """,
+            (
+                int(expires_at),
+                payload,
+                None if amount_usd_atomic is None else int(amount_usd_atomic),
+                pay_to,
+                config.X402_NETWORK,
+                asset,
+                None if rate_num is None else int(rate_num),
+                None if rate_den is None else int(rate_den),
+                None if rate_fetched_at is None else int(rate_fetched_at),
+                payment_hash,
+            ),
+        )
+        row = conn.execute(
+            """
+            SELECT * FROM payment_offers
+            WHERE payment_hash = ?
+            ORDER BY expires_at DESC, created_at DESC
+            LIMIT 1
+            """,
+            (payment_hash,),
+        ).fetchone()
+        conn.execute("COMMIT")
     return None if row is None else _offer_dict(row)
 
 

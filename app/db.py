@@ -766,41 +766,51 @@ def _offer_open_row(
     *,
     client_id: int,
     buyer_ip_hash: str,
-    grace: int,
-    cap: int,
-    invoice_cutoff: int,
-    cap_cutoff: int,
+    now: int,
     scope: str,
     api_key_id: int | None,
 ):
+    """Unexpired x402 offers that have not been charged. The second column is the soonest expiry."""
     if scope == "key" and api_key_id is None:
         return conn.execute(
             """
-            SELECT COUNT(*), MIN(min(expires_at + ?, created_at + ?))
+            SELECT COUNT(*), MIN(expires_at)
             FROM payment_offers
-            WHERE client_id = ? AND buyer_ip_hash = ? AND expires_at >= ? AND created_at >= ?
-              AND api_key_id IS NULL AND payment_hash IS NULL
+            WHERE client_id = ? AND buyer_ip_hash = ? AND api_key_id IS NULL
+              AND payment_hash IS NULL AND expires_at > ?
+              AND NOT EXISTS (
+                SELECT 1 FROM x402_authorizations
+                WHERE offer_id = payment_offers.id AND credit_charged = 1
+              )
             """,
-            (grace, cap, client_id, buyer_ip_hash, invoice_cutoff, cap_cutoff),
+            (client_id, buyer_ip_hash, now),
         ).fetchone()
     if scope == "key":
         return conn.execute(
             """
-            SELECT COUNT(*), MIN(min(expires_at + ?, created_at + ?))
+            SELECT COUNT(*), MIN(expires_at)
             FROM payment_offers
-            WHERE client_id = ? AND buyer_ip_hash = ? AND expires_at >= ? AND created_at >= ?
-              AND api_key_id = ? AND payment_hash IS NULL
+            WHERE client_id = ? AND buyer_ip_hash = ? AND api_key_id = ?
+              AND payment_hash IS NULL AND expires_at > ?
+              AND NOT EXISTS (
+                SELECT 1 FROM x402_authorizations
+                WHERE offer_id = payment_offers.id AND credit_charged = 1
+              )
             """,
-            (grace, cap, client_id, buyer_ip_hash, invoice_cutoff, cap_cutoff, int(api_key_id)),
+            (client_id, buyer_ip_hash, int(api_key_id), now),
         ).fetchone()
     return conn.execute(
         """
-        SELECT COUNT(*), MIN(min(expires_at + ?, created_at + ?))
+        SELECT COUNT(*), MIN(expires_at)
         FROM payment_offers
-        WHERE client_id = ? AND buyer_ip_hash = ? AND expires_at >= ? AND created_at >= ?
-          AND payment_hash IS NULL
+        WHERE client_id = ? AND buyer_ip_hash = ?
+          AND payment_hash IS NULL AND expires_at > ?
+          AND NOT EXISTS (
+            SELECT 1 FROM x402_authorizations
+            WHERE offer_id = payment_offers.id AND credit_charged = 1
+          )
         """,
-        (grace, cap, client_id, buyer_ip_hash, invoice_cutoff, cap_cutoff),
+        (client_id, buyer_ip_hash, now),
     ).fetchone()
 
 
@@ -815,41 +825,39 @@ def _buyer_open_row(
     *,
     client_id: int,
     buyer_ip_hash: str,
-    grace: int,
-    cap: int,
-    invoice_cutoff: int,
-    cap_cutoff: int,
+    now: int,
     scope: str,
     api_key_id: int | None,
 ):
+    """Unpaid Lightning challenges that have not expired. The second column is the soonest expiry."""
     if scope == "key" and api_key_id is None:
         return conn.execute(
             """
-            SELECT COUNT(*), MIN(min(expires_at + ?, created_at + ?))
+            SELECT COUNT(*), MIN(expires_at)
             FROM paywall_challenges
             WHERE client_id = ? AND buyer_ip_hash = ? AND settled_at IS NULL
-              AND expires_at >= ? AND created_at >= ? AND api_key_id IS NULL
+              AND expires_at > ? AND api_key_id IS NULL
             """,
-            (grace, cap, client_id, buyer_ip_hash, invoice_cutoff, cap_cutoff),
+            (client_id, buyer_ip_hash, now),
         ).fetchone()
     if scope == "key":
         return conn.execute(
             """
-            SELECT COUNT(*), MIN(min(expires_at + ?, created_at + ?))
+            SELECT COUNT(*), MIN(expires_at)
             FROM paywall_challenges
             WHERE client_id = ? AND buyer_ip_hash = ? AND settled_at IS NULL
-              AND expires_at >= ? AND created_at >= ? AND api_key_id = ?
+              AND expires_at > ? AND api_key_id = ?
             """,
-            (grace, cap, client_id, buyer_ip_hash, invoice_cutoff, cap_cutoff, int(api_key_id)),
+            (client_id, buyer_ip_hash, now, int(api_key_id)),
         ).fetchone()
     return conn.execute(
         """
-        SELECT COUNT(*), MIN(min(expires_at + ?, created_at + ?))
+        SELECT COUNT(*), MIN(expires_at)
         FROM paywall_challenges
         WHERE client_id = ? AND buyer_ip_hash = ? AND settled_at IS NULL
-          AND expires_at >= ? AND created_at >= ?
+          AND expires_at > ?
         """,
-        (grace, cap, client_id, buyer_ip_hash, invoice_cutoff, cap_cutoff),
+        (client_id, buyer_ip_hash, now),
     ).fetchone()
 
 
@@ -869,8 +877,15 @@ def enforce_challenge_capacity(
     buyer_max_open: int,
     buyer_limit_scope: str,
     api_key_id: int | None,
+    rail: str = "lightning",
 ) -> None:
-    """Raise ChallengeLimit when this insert would pass a cap. Caller holds the write lock."""
+    """Raise ChallengeLimit when this insert would pass a cap. Caller holds the write lock.
+
+    The per-buyer open cap counts one rail. Lightning invoices do not fill the
+    x402 budget, and x402 offers do not fill the Lightning budget. An expired
+    row does not count. Retry-After is the soonest expiry of the rows that do.
+    The per-minute rate still counts recent creates on both rails together.
+    """
     if buyer_ip_hash and int(buyer_rate_max) > 0:
         window = max(1, int(buyer_rate_window_seconds))
         rate = _buyer_rate_row(
@@ -894,64 +909,50 @@ def enforce_challenge_capacity(
             raise ChallengeLimit("buyer_rate_limited", _retry_after((earliest or now) + window, now))
 
     if buyer_ip_hash and int(buyer_max_open) > 0:
-        # Unpaid only. A settled challenge no longer occupies the buyer's slot.
-        # "Unexpired" matches the cleanup window: invoice expiry plus grace, and
-        # not older than the claim cap.
-        open_buyer = _buyer_open_row(
-            conn,
-            client_id=int(client_id),
-            buyer_ip_hash=buyer_ip_hash,
-            grace=int(claim_grace_seconds),
-            cap=int(claim_cap_seconds),
-            invoice_cutoff=int(invoice_cutoff),
-            cap_cutoff=int(cap_cutoff),
-            scope=buyer_limit_scope,
-            api_key_id=api_key_id,
-        )
-        open_offers = _offer_open_row(
-            conn,
-            client_id=int(client_id),
-            buyer_ip_hash=buyer_ip_hash,
-            grace=int(claim_grace_seconds),
-            cap=int(claim_cap_seconds),
-            invoice_cutoff=int(invoice_cutoff),
-            cap_cutoff=int(cap_cutoff),
-            scope=buyer_limit_scope,
-            api_key_id=api_key_id,
-        )
-        open_total, open_deadline = _sum_counts(open_buyer or (0, None), open_offers or (0, None))
-        if open_total >= int(buyer_max_open):
+        # Unpaid and still inside its own expiry. Grace and the claim cap do
+        # not keep an expired offer in this count.
+        if rail == "x402":
+            open_row = _offer_open_row(
+                conn,
+                client_id=int(client_id),
+                buyer_ip_hash=buyer_ip_hash,
+                now=int(now),
+                scope=buyer_limit_scope,
+                api_key_id=api_key_id,
+            )
+        else:
+            open_row = _buyer_open_row(
+                conn,
+                client_id=int(client_id),
+                buyer_ip_hash=buyer_ip_hash,
+                now=int(now),
+                scope=buyer_limit_scope,
+                api_key_id=api_key_id,
+            )
+        open_count = int(open_row[0] or 0) if open_row else 0
+        open_deadline = None if open_row is None or open_row[1] is None else int(open_row[1])
+        if open_count >= int(buyer_max_open):
             raise ChallengeLimit("too_many_open_challenges_for_buyer", _retry_after(open_deadline, now))
 
     open_rows = conn.execute(
         """
-        SELECT COUNT(*),
-               MIN(min(expires_at + ?, created_at + ?))
+        SELECT COUNT(*), MIN(expires_at)
         FROM paywall_challenges
-        WHERE client_id = ? AND expires_at >= ? AND created_at >= ?
+        WHERE client_id = ? AND settled_at IS NULL AND expires_at > ?
         """,
-        (
-            int(claim_grace_seconds),
-            int(claim_cap_seconds),
-            int(client_id),
-            int(invoice_cutoff),
-            int(cap_cutoff),
-        ),
+        (int(client_id), int(now)),
     ).fetchone()
     offer_rows = conn.execute(
         """
-        SELECT COUNT(*),
-               MIN(min(expires_at + ?, created_at + ?))
+        SELECT COUNT(*), MIN(expires_at)
         FROM payment_offers
-        WHERE client_id = ? AND payment_hash IS NULL AND expires_at >= ? AND created_at >= ?
+        WHERE client_id = ? AND payment_hash IS NULL AND expires_at > ?
+          AND NOT EXISTS (
+            SELECT 1 FROM x402_authorizations
+            WHERE offer_id = payment_offers.id AND credit_charged = 1
+          )
         """,
-        (
-            int(claim_grace_seconds),
-            int(claim_cap_seconds),
-            int(client_id),
-            int(invoice_cutoff),
-            int(cap_cutoff),
-        ),
+        (int(client_id), int(now)),
     ).fetchone()
     open_total, open_deadline = _sum_counts(open_rows or (0, None), offer_rows or (0, None))
     if open_total >= int(max_open_per_client):
@@ -972,6 +973,7 @@ def preview_challenge_capacity(
     buyer_max_open: int,
     buyer_limit_scope: str,
     api_key_id: int | None,
+    rail: str = "lightning",
 ) -> None:
     """Check caps before calling the LNURL provider. The insert checks again."""
     now = int(now)
@@ -994,6 +996,7 @@ def preview_challenge_capacity(
             buyer_max_open=int(buyer_max_open),
             buyer_limit_scope=buyer_limit_scope,
             api_key_id=api_key_id,
+            rail=rail,
         )
         conn.execute("COMMIT")
 

@@ -116,6 +116,16 @@ def resource_url(slug: str, path: str) -> str:
     return f"{config.GATE_PUBLIC_BASE}/{slug}{path}"
 
 
+def offer_timeout_seconds() -> int:
+    """How long a gate-route or credit-pack offer stays valid.
+
+    ``SATSGATE_X402_OFFER_SECONDS`` is clamped into 60..300 here. A Lightning
+    invoice and its macaroon keep their own lifetime. This window does not
+    shorten that invoice, and the invoice expiry does not stretch this offer.
+    """
+    return min(300, max(60, int(config.X402_OFFER_SECONDS)))
+
+
 def accept_for(*, resource_url: str, amount: int, pay_to: str, timeout_seconds: int) -> dict:
     return {
         "scheme": "exact",
@@ -259,9 +269,15 @@ def validate_payload(payload: dict, *, offer: dict, now: int | None = None) -> d
 
 
 def payment_response_b64(*, tx: str, payer: str) -> str:
+    """x402 v2 settlement response.
+
+    Spec field is ``transaction`` (coinbase/x402 ``specs/x402-specification-v2.md``,
+    section 5.3). ``tx`` repeats the same hash for one release.
+    """
     return b64_json(
         {
             "success": True,
+            "transaction": tx,
             "tx": tx,
             "network": config.X402_NETWORK,
             "payer": payer,

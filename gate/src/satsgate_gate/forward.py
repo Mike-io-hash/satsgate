@@ -188,27 +188,3 @@ async def call_origin(
     finally:
         pinned_ip.reset(ip_token)
         pinned_host.reset(host_token)
-
-
-async def forward(
-    request: Request,
-    settings: Settings,
-    site: CachedSite,
-    *,
-    route_path: str,
-    payment_hash: str,
-    resource: str,
-    paid_sats: int,
-    use_spent: bool,
-) -> Response:
-    """Lightning forward. The credit was already taken, so a gate failure sets use_spent."""
-    exchanged = await call_origin(
-        request,
-        settings,
-        site,
-        route_path=route_path,
-        payment_hash=payment_hash,
-        resource=resource,
-        paid_sats=paid_sats,
-    )
-    return exchanged.response(use_spent=use_spent if exchanged.error else None)

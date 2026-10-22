@@ -1,6 +1,6 @@
 # x402 v2 on Satsgate (USDC on Base)
 
-Core 0.14.0 sells the same credit packs for USDC, paid to `SATSGATE_TREASURY_EVM_ADDRESS`, with the amount taken from the BTC/USD median and locked on the offer. Core 0.13.0 added that median. Core 0.12.0 already had Base Sepolia (`eip155:84532`), the x402.org facilitator (confirmed: `GET /supported` lists `exact` on that network), merchant payTo, per-site rails, a USD or sats price, and verify-then-settle. satsgate-gate 0.12.0 serves both rails on one 402 and runs verify, then the origin, then settle. Lightning credit timing, the proxy, and the buyer MCP are still later steps in section 11. satsgate-mcp stays 0.10.0. The self-hosted proxy is 0.8.0. Core health is 0.14.0.
+Core 0.14.0 sells the same credit packs for USDC, paid to `SATSGATE_TREASURY_EVM_ADDRESS`, with the amount taken from the BTC/USD median and locked on the offer. Core 0.14.1 and satsgate-gate 0.13.0 charge a Lightning credit only after the origin returns 2xx, give gate-route x402 offers the short 60–300 second window, and count only unexpired challenges toward the buyer cap. Core 0.13.0 added the BTC/USD median. Core 0.12.0 already had Base Sepolia (`eip155:84532`), the x402.org facilitator (confirmed: `GET /supported` lists `exact` on that network), merchant payTo, per-site rails, a USD or sats price, and verify-then-settle. satsgate-gate 0.12.0 serves both rails on one 402 and runs verify, then the origin, then settle. The self-hosted proxy still debits Lightning before it forwards. satsgate-mcp stays 0.10.0. The proxy is 0.8.0. Core health is 0.14.1.
 
 The protocol is [x402 v2](https://github.com/x402-foundation/x402/blob/main/specs/x402-specification-v2.md) over HTTP: a 402 carries `PAYMENT-REQUIRED`, the buyer retries with `PAYMENT-SIGNATURE`, and a successful response carries `PAYMENT-RESPONSE`. The only scheme in the first cut is `exact` with EIP-3009 (`transferWithAuthorization`). The only asset is USDC. The only networks are Base Sepolia (`eip155:84532`) and, behind a flag, Base (`eip155:8453`).
 
@@ -13,12 +13,12 @@ Non-goals for the first cut:
 - Satsgate does not run a facilitator, a relayer, or a wallet. It does not sign, broadcast, or sponsor a transaction.
 - No Polygon, Solana, or MPP. The data model has a network and a scheme column so those can be added later without a new table.
 - No conversion of funds. The merchant is paid whatever the buyer sent. Satsgate does not swap USDC for sats or the reverse.
-- The first x402 pull requests do not change Lightning debit timing. That change is its own later PR (section 11). The rule, once it lands, is the same on both rails.
+- The hosted gate charges Lightning the same way as x402: only after a successful origin response (gate 0.13.0). The self-hosted proxy still debits on verify, before it forwards.
 - Lightning-only callers keep working. A 402 that also offers x402 still has `WWW-Authenticate: L402` and `error: payment_required`.
 
 ## 1.1 Decisions
 
-1. **Credit timing, both rails.** The merchant's credit and the use counter move only after a successful origin response. Today `settle_and_consume` debits before `forward()`, and a failed origin still returns `use_spent: true`. That stays until the Lightning PR in section 11. On x402, credit and use also wait for a successful `/settle` (section 3.2). A failed origin consumes neither.
+1. **Credit timing, both rails.** On the hosted gate, the merchant's credit and the use counter move only after a successful origin response. x402 also waits for a successful `/settle` (section 3.2). A failed origin consumes neither. `POST /v1/paywall/verify` and the self-hosted proxy still debit on the first settled Lightning call, before the proxy forwards. That path can still return `use_spent: true`.
 2. **x402 flow.** Offers use the standard `exact` flow: facilitator `/verify`, then the origin, then `/settle`. Not `upfront`. A later per-site setting may advertise `upfront`. The first cut has no such column.
 3. **USDC credit packs.** Each plan has a fixed USD price, not a BTC median. The amounts are decided in Etapa 4 pricing. Testnet uses placeholder values. This is decided later, not open.
 
@@ -28,7 +28,7 @@ The notes in this section describe the tree before satsgate-gate 0.12.0. The gat
 
 Lightning paywall challenges are minted in `app/main.py` `_issue_paywall_challenge` and stored in `paywall_challenges` (`app/db.py`). The payee is `clients.payee_lightning_address`, set by `POST /v1/client/payee` or on the first challenge. Unlock goes through `_unlock_paywall` into `app/db_verify.py` `settle_and_consume`. That function inserts `verifications` (unique on `client_id, payment_hash`) and debits `clients.credits` in the same transaction, then the caller serves. One credit per payment hash, on the first settled unlock. `ledger.reason` is `paywall_verify`.
 
-Hosted routes live in `sites` and `site_routes`. `site_routes.price_sats` is `NOT NULL` and at least 1 (`app/db_sites.py` `clean_price`). The public directory (`GET /v1/sites`, `_site_public`) returns `price_sats`, `max_uses`, and `access_seconds`. It does not return the Lightning address. The gate (`gate/src/satsgate_gate/app.py` `_challenge_response`) asks core `POST /internal/gate/challenge` and returns HTTP 402 with `WWW-Authenticate` and a JSON body. After `POST /internal/gate/verify` or `GET /internal/gate/status/{payment_hash}` succeeds, `forward()` calls the origin. If the origin then fails, the response sets `use_spent: true` (`gate/src/satsgate_gate/forward.py`). The credit is already gone. `gate/src/satsgate_gate/headers.py` drops the buyer's L402 `Authorization` before the origin sees it.
+Hosted routes live in `sites` and `site_routes`. `site_routes.price_sats` is `NOT NULL` and at least 1 (`app/db_sites.py` `clean_price`). The public directory (`GET /v1/sites`, `_site_public`) returns `price_sats`, `max_uses`, and `access_seconds`. It does not return the Lightning address. The gate (`gate/src/satsgate_gate/app.py` `_challenge_response`) asks core `POST /internal/gate/challenge` and returns HTTP 402 with `WWW-Authenticate` and a JSON body. As of gate 0.13.0, verify and status confirm the payment without a debit. The origin is called next. `POST /internal/gate/charge` runs only after a 2xx. A failed origin does not debit. `gate/src/satsgate_gate/headers.py` drops the buyer's L402 `Authorization` before the origin sees it.
 
 The proxy (`proxy/src/satsgate_proxy/`) does the same shape against `POST /v1/paywall/challenge` and `/v1/paywall/verify`, with prices in YAML (`price_sats`, `access`). satsgate-mcp parses only the L402 header and the JSON sats fields (`mcp/src/satsgate_mcp/challenge.py`). Its budget (`mcp/src/satsgate_mcp/budget.py`) is in sats.
 
@@ -53,9 +53,9 @@ USDC contracts are fixed in config, not taken from the buyer or the merchant:
 
 ### 3.1 Lightning only
 
-The 402 is unchanged: `WWW-Authenticate`, no `PAYMENT-REQUIRED`. Unlock is still the macaroon plus a preimage, or the LUD-21 verify URL when the payee advertises it. Until the Lightning PR, `settle_and_consume` still debits before `forward()`.
+The 402 is unchanged: `WWW-Authenticate`, no `PAYMENT-REQUIRED`. Unlock is still the macaroon plus a preimage, or the LUD-21 verify URL when the payee advertises it. Shipped in gate 0.13.0 / core 0.14.1 for the hosted gate. The proxy still calls public verify, which debits before it forwards.
 
-Target, in that later PR:
+The hosted gate:
 
 ```mermaid
 sequenceDiagram
@@ -150,7 +150,7 @@ sequenceDiagram
   end
 ```
 
-The Lightning branch is the target in section 3.1. The gate PR still calls today's verify or status with `consume=true`.
+The Lightning branch shipped in gate 0.13.0. Verify and status are called with `charge=false`. The credit moves in `POST /internal/gate/charge` after a 2xx.
 
 ### 3.4 Credit top-up in USDC
 
@@ -365,7 +365,7 @@ Each one is shippable on its own. None of them is this pull request.
 1. Core, testnet only. Offer rows, nonce table, payTo verification, standard `/verify` then `/settle` through the x402.org facilitator, feature flag default off for mainnet. No gate change. A test can call the internal routes. Lightning debit timing stays as it is today.
 2. Rates and main currency. Shipped in core 0.13.0: median refresh, lock on the offer, stale-rate behavior. The route columns landed in 0.12.0.
 3. Gate. Shipped as satsgate-gate 0.12.0. Dual 402, header pass-through, verify then origin then settle. x402 credit and use move only after origin 2xx and settle success. The Lightning path still uses today's `consume=true`. The private Sepolia check is in the gate README.
-4. Lightning credit timing, its own small PR. `settled_at` on payment confirmation. Credit and `uses_consumed` only after origin 2xx, in the gate and the proxy. Retry and replay as in section 3.1. No x402 work in this PR.
+4. Lightning credit timing. Shipped for the hosted gate in satsgate-gate 0.13.0 and core 0.14.1. `settled_at` on payment confirmation. Credit and `uses_consumed` only after origin 2xx. Retry and replay as in section 3.1. The self-hosted proxy still consumes before it forwards. This release also shortens gate-route x402 offers to the 60–300 second window, stops expired offers from filling the buyer cap, and names the settlement field `transaction` (section 5.3 of the x402 v2 spec) with `tx` kept as an alias.
 5. USDC credit top-up. Shipped in core 0.14.0 as `GET /v1/topup/{plan_id}/x402`, payTo `SATSGATE_TREASURY_EVM_ADDRESS`, amount from the BTC/USD median locked on the offer. Credits only after settle. No gate change.
 6. Proxy YAML and the same headers, still talking to core.
 7. MCP. Parse `PAYMENT-REQUIRED`, show the USDC amount, and enforce a separate USD cap (`SATSGATE_MCP_MAX_PAYMENT_USD` and a daily cap). Do not pay automatically unless a later, explicit wallet setting exists. The sats caps in `budget.py` do not apply to USDC and must not be reused as if they did.

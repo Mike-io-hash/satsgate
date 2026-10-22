@@ -44,6 +44,7 @@ class GateVerifyIn(BaseModel):
     slug: str = Field(min_length=1, max_length=80)
     path: str = Field(min_length=1, max_length=200)
     consume: bool = True
+    charge: bool = True
 
 
 def gate_resource(slug: str, path: str) -> str:
@@ -347,58 +348,85 @@ def _lock_lightning_offer(
 
     now = int(time.time())
     offer = db_x402.offer_by_payment_hash(config.DB_PATH, str(body["payment_hash"]))
-    if body.get("reused"):
-        if (
-            plan["x402_on"]
-            and pay_to
-            and offer is not None
-            and int(offer["expires_at"]) > now
-            and offer.get("pay_to") == pay_to
-            and offer.get("amount_usd_atomic")
-            and offer.get("requirements")
-        ):
-            view = x402_service.x402_view(offer, resource_url=resource_url, reused=True, resource=resource)
-            merged = dict(body)
-            merged.update(view)
-            merged["rail"] = "lightning"
-            return merged
-        return body
+    window = x402.offer_timeout_seconds()
+    quote_live = (
+        plan["x402_on"]
+        and pay_to
+        and offer is not None
+        and int(offer["expires_at"]) > now
+        and offer.get("pay_to") == pay_to
+        and offer.get("amount_usd_atomic")
+        and offer.get("requirements")
+    )
+    if body.get("reused") and quote_live:
+        view = x402_service.x402_view(offer, resource_url=resource_url, reused=True, resource=resource)
+        merged = dict(body)
+        merged.update(view)
+        merged["rail"] = "lightning"
+        return merged
 
-    expires = int(body["invoice_expires_at"])
-    if expires <= now:
+    invoice_expires = int(body["invoice_expires_at"])
+    if invoice_expires <= now:
+        return body
+    if body.get("reused") and not (plan["x402_atomic"] and pay_to):
         return body
     requirements = None
     stored_pay_to = None
+    offer_expires = invoice_expires
     if plan["x402_atomic"] and pay_to:
         requirements = x402.accept_for(
             resource_url=resource_url,
             amount=int(plan["x402_atomic"]),
             pay_to=pay_to,
-            timeout_seconds=max(1, expires - now),
+            timeout_seconds=window,
         )
         stored_pay_to = pay_to
+        offer_expires = now + window
     elif plan.get("rate") is None:
         return body
-    offer = db_x402.create_offer(
-        config.DB_PATH,
-        client_id=client_id,
-        resource=resource,
-        resource_url=resource_url,
-        buyer_ip_hash=buyer_ip_hash,
-        max_uses=max_uses,
-        access_seconds=access_seconds,
-        payment_hash=str(body["payment_hash"]),
-        expires_at=expires,
-        enforce=False,
-        now=now,
-        **x402_service._store_kwargs(plan, pay_to=stored_pay_to, requirements=requirements),
-    )
+    stored = x402_service._store_kwargs(plan, pay_to=stored_pay_to, requirements=requirements)
+    if offer is not None and requirements is not None:
+        offer = db_x402.replace_x402_quote(
+            config.DB_PATH,
+            payment_hash=str(body["payment_hash"]),
+            expires_at=offer_expires,
+            requirements=requirements,
+            amount_usd_atomic=stored["amount_usd_atomic"],
+            pay_to=stored_pay_to,
+            rate_num=stored["rate_num"],
+            rate_den=stored["rate_den"],
+            rate_fetched_at=stored["rate_fetched_at"],
+            now=now,
+        )
+    elif offer is None:
+        offer = db_x402.create_offer(
+            config.DB_PATH,
+            client_id=client_id,
+            resource=resource,
+            resource_url=resource_url,
+            buyer_ip_hash=buyer_ip_hash,
+            max_uses=max_uses,
+            access_seconds=access_seconds,
+            payment_hash=str(body["payment_hash"]),
+            expires_at=offer_expires,
+            enforce=False,
+            now=now,
+            **stored,
+        )
+    if offer is None:
+        return body
     merged = dict(body)
     if requirements is not None:
-        view = x402_service.x402_view(offer, resource_url=resource_url, reused=False, resource=resource)
+        view = x402_service.x402_view(
+            offer,
+            resource_url=resource_url,
+            reused=bool(body.get("reused")),
+            resource=resource,
+        )
         merged.update(view)
         merged["rail"] = "lightning"
-        merged["reused"] = False
+        if not body.get("reused"):
+            merged["reused"] = False
     else:
         rate = x402_service._rate_view(offer)
         if rate is not None:
@@ -417,6 +445,7 @@ def _unlock(
     payment_hash: str | None,
     poll: bool,
     consume: bool,
+    mode: str,
 ):
     denied = _authorized(request)
     if denied is not None:
@@ -445,6 +474,7 @@ def _unlock(
                 poll=poll,
                 api_key_id=None,
                 consume=bool(consume),
+                mode=mode,
             )
         )
     except core.L402Error as exc:
@@ -477,6 +507,7 @@ def internal_verify(
         payment_hash=None,
         poll=False,
         consume=bool(body.consume),
+        mode="confirm" if not body.charge else "settle",
     )
 
 
@@ -487,6 +518,7 @@ def internal_status(
     slug: str = Query(..., min_length=1, max_length=80),
     path: str = Query(..., min_length=1, max_length=200),
     consume: bool = Query(default=True),
+    charge: bool = Query(default=True),
     authorization: str | None = Header(default=None),
 ):
     from . import main as core
@@ -509,6 +541,41 @@ def internal_status(
         payment_hash=normalized,
         poll=True,
         consume=bool(consume),
+        mode="confirm" if not charge else "settle",
+    )
+
+
+class GateChargeIn(BaseModel):
+    slug: str = Field(min_length=1, max_length=80)
+    path: str = Field(min_length=1, max_length=200)
+    payment_hash: str = Field(min_length=64, max_length=64)
+
+
+@router.post("/internal/gate/charge")
+def internal_charge(
+    body: GateChargeIn,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Debit after the origin returned 2xx. Confirm does not call this."""
+    from . import main as core
+
+    normalized = core._payment_hash_or_none(body.payment_hash)
+    if normalized is None:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": "invalid_payment_hash"},
+            headers=_NO_STORE,
+        )
+    return _unlock(
+        request=request,
+        slug=body.slug,
+        path=body.path,
+        authorization=authorization,
+        payment_hash=normalized,
+        poll=False,
+        consume=False,
+        mode="deliver",
     )
 
 

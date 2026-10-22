@@ -196,11 +196,14 @@ def test_usdc_pack_verifies_settles_once_and_rejects_replays(tmp_path, monkeypat
         assert paid["credits_added"] == 200
         assert paid["credits"] == before + 200
         assert paid["tx"] == _TX
+        assert paid["transaction"] == _TX
         assert paid["network"] == "eip155:84532"
         assert paid["amount_usd_atomic"] == 650_000
         response = json.loads(base64.standard_b64decode(_header(saved, "PAYMENT-RESPONSE")))
         assert response["success"] is True
+        assert response["transaction"] == _TX
         assert response["tx"] == _TX
+        assert response["payer"]
         assert response["network"] == "eip155:84532"
         assert _credits(http, key) == before + 200
         verify_body = next(body for url, body in failed_calls if url.endswith("/verify"))

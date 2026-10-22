@@ -313,3 +313,190 @@ def settle_and_consume(
     if denied is not None:
         raise denied
     return {"charged": charged, "new_balance": new_balance, **usage}
+
+
+def _closed_code(challenge, now: int) -> str:
+    access_until = challenge["access_until"]
+    if access_until is None or now <= int(access_until):
+        return "token_used_up"
+    return "token_expired"
+
+
+def _stamp_confirmed(conn, challenge, payment_hash: str, now: int, access_cap_seconds: int) -> None:
+    """Start the access window when the Lightning payment is confirmed. Do not debit."""
+    window: int | None = None
+    if challenge["access_seconds"] is not None:
+        window = int(challenge["access_seconds"])
+    elif challenge["max_uses"] is not None:
+        window = int(access_cap_seconds)
+    if window is not None:
+        conn.execute(
+            """
+            UPDATE paywall_challenges
+            SET settled_at = COALESCE(settled_at, ?),
+                access_until = COALESCE(access_until, ?)
+            WHERE payment_hash = ?
+            """,
+            (now, now + window, payment_hash),
+        )
+    else:
+        conn.execute(
+            "UPDATE paywall_challenges SET settled_at = COALESCE(settled_at, ?) WHERE payment_hash = ?",
+            (now, payment_hash),
+        )
+
+
+def _deny_closed(conn, challenge, *, now: int, new_balance: int) -> None:
+    usage = usage_view(challenge, consumed=False)
+    conn.execute("ROLLBACK")
+    raise UsageDenied(_closed_code(challenge, now), usage=usage, charged=0, new_balance=new_balance)
+
+
+def confirm_payment(
+    db_path: str,
+    *,
+    client_id: int,
+    payment_hash: str,
+    cost: int,
+    access_cap_seconds: int,
+    now: int | None = None,
+) -> dict:
+    """Record that the buyer paid. Do not debit a credit and do not take a use.
+
+    The hosted gate calls this before the origin. ``settled_at`` frees the
+    unpaid-challenge slot. A later 2xx calls ``charge_after_delivery``. A
+    grant that is already used up is denied here, so the origin is not called.
+    """
+    now = int(time.time()) if now is None else int(now)
+    cost = int(cost)
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        challenge = conn.execute(
+            "SELECT * FROM paywall_challenges WHERE payment_hash = ?",
+            (payment_hash,),
+        ).fetchone()
+        if challenge is None or int(challenge["client_id"]) != int(client_id):
+            conn.execute("ROLLBACK")
+            raise ValueError("client does not exist")
+        bal_row = conn.execute("SELECT credits FROM clients WHERE id = ?", (int(client_id),)).fetchone()
+        if not bal_row:
+            conn.execute("ROLLBACK")
+            raise ValueError("client does not exist")
+        new_balance = int(bal_row[0])
+        if _policy_set(challenge) and not _grant_open(challenge, now):
+            _deny_closed(conn, challenge, now=now, new_balance=new_balance)
+        verified = conn.execute(
+            "SELECT 1 FROM verifications WHERE client_id = ? AND payment_hash = ?",
+            (int(client_id), payment_hash),
+        ).fetchone()
+        if not verified and new_balance < cost:
+            conn.execute("ROLLBACK")
+            raise ValueError("insufficient balance")
+        _stamp_confirmed(conn, challenge, payment_hash, now, access_cap_seconds)
+        challenge = conn.execute(
+            "SELECT * FROM paywall_challenges WHERE payment_hash = ?",
+            (payment_hash,),
+        ).fetchone()
+        usage = usage_view(challenge, consumed=False)
+        conn.execute("COMMIT")
+    return {"charged": 0, "new_balance": new_balance, **usage}
+
+
+def charge_after_delivery(
+    db_path: str,
+    *,
+    client_id: int,
+    payment_hash: str,
+    cost: int,
+    resource: str | None,
+    api_key_id: int | None,
+    now: int | None = None,
+) -> dict:
+    """Take one use and, on the first success, one credit. One IMMEDIATE transaction.
+
+    The use update runs first. If it loses, this rolls back and raises
+    UsageDenied with no debit. An insufficient balance rolls the use back too,
+    so the token stays usable. A challenge with no policy debits once and does
+    not increment a counter. ``UNIQUE(client_id, payment_hash)`` keeps a second
+    caller from debiting again.
+    """
+    now = int(time.time()) if now is None else int(now)
+    cost = int(cost)
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        challenge = conn.execute(
+            "SELECT * FROM paywall_challenges WHERE payment_hash = ?",
+            (payment_hash,),
+        ).fetchone()
+        if challenge is None or int(challenge["client_id"]) != int(client_id):
+            conn.execute("ROLLBACK")
+            raise ValueError("client does not exist")
+        if challenge["settled_at"] is None:
+            conn.execute("ROLLBACK")
+            raise ValueError("payment not confirmed")
+        bal_row = conn.execute("SELECT credits FROM clients WHERE id = ?", (int(client_id),)).fetchone()
+        if not bal_row:
+            conn.execute("ROLLBACK")
+            raise ValueError("client does not exist")
+        new_balance = int(bal_row[0])
+        if _policy_set(challenge) and not _grant_open(challenge, now):
+            _deny_closed(conn, challenge, now=now, new_balance=new_balance)
+        took_use = False
+        if _policy_set(challenge):
+            before = int(challenge["uses_consumed"] or 0)
+            conn.execute(
+                """
+                UPDATE paywall_challenges
+                SET uses_consumed = uses_consumed + 1
+                WHERE payment_hash = ?
+                  AND (max_uses IS NULL OR uses_consumed < max_uses)
+                  AND (access_until IS NULL OR access_until >= ?)
+                """,
+                (payment_hash, now),
+            )
+            challenge = conn.execute(
+                "SELECT * FROM paywall_challenges WHERE payment_hash = ?",
+                (payment_hash,),
+            ).fetchone()
+            if int(challenge["uses_consumed"] or 0) != before + 1:
+                _deny_closed(conn, challenge, now=now, new_balance=new_balance)
+            took_use = True
+        inserted = conn.execute(
+            "INSERT OR IGNORE INTO verifications(client_id, payment_hash, resource, created_at) VALUES(?, ?, ?, ?)",
+            (int(client_id), payment_hash, resource, now),
+        )
+        wrote = inserted.rowcount
+        if wrote < 0:
+            wrote = int(conn.execute("SELECT changes()").fetchone()[0])
+        charged = 0
+        if wrote == 1:
+            if new_balance < cost:
+                conn.execute("ROLLBACK")
+                raise ValueError("insufficient balance")
+            conn.execute(
+                "UPDATE clients SET credits = credits - ? WHERE id = ?",
+                (cost, int(client_id)),
+            )
+            conn.execute(
+                """
+                INSERT INTO ledger(
+                  client_id, delta_credits, reason, ref, created_at, api_key_id, resource
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(client_id),
+                    -cost,
+                    "paywall_verify",
+                    payment_hash,
+                    now,
+                    int(api_key_id) if api_key_id is not None else None,
+                    resource,
+                ),
+            )
+            charged = cost
+            new_balance -= cost
+        consumed = took_use or not _policy_set(challenge)
+        usage = usage_view(challenge, consumed=consumed)
+        conn.execute("COMMIT")
+    return {"charged": charged, "new_balance": new_balance, **usage}
