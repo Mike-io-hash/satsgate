@@ -131,11 +131,12 @@ def issue_offer(
         now=now,
     )
     if existing is None or not existing.get("requirements"):
+        window = x402.offer_timeout_seconds()
         requirements = x402.accept_for(
             resource_url=url,
             amount=amount,
             pay_to=pay_to,
-            timeout_seconds=config.X402_OFFER_SECONDS,
+            timeout_seconds=window,
         )
         try:
             db.preview_challenge_capacity(
@@ -152,6 +153,7 @@ def issue_offer(
             buyer_ip_hash=buyer_ip_hash,
             max_uses=max_uses,
             access_seconds=access_seconds,
+            expires_at=now + window,
             now=now,
             **_store_kwargs(plan, pay_to=pay_to, requirements=requirements),
         )

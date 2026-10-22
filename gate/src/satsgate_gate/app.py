@@ -22,12 +22,13 @@ from satsgate_gate.core_client import (
     create_challenge,
     fetch_site,
     fetch_status,
+    charge_lightning,
     settle_x402,
     unlock_with_preimage,
     unlock_without_preimage,
     verify_x402,
 )
-from satsgate_gate.forward import call_origin, forward
+from satsgate_gate.forward import call_origin
 from satsgate_gate.macaroon import macaroon_fields
 from satsgate_gate.rate_limit import RateLimiter
 from satsgate_gate.ssrf import build_origin_client
@@ -304,6 +305,72 @@ async def _pay_x402(request: Request, site: CachedSite, route, payment_signature
     return exchanged.response(use_spent=None, extra=(("PAYMENT-RESPONSE", settled.payment_response),))
 
 
+async def _serve_lightning(request: Request, site: CachedSite, route, authorization: str) -> Response | str | None:
+    """Confirm the Lightning payment, call the origin, and charge only on 2xx.
+
+    A transport failure or a non-2xx origin response does not debit. The same
+    macaroon can be retried. A grant that is already used up becomes a new 402.
+    The origin body is not returned when the charge loses the use.
+    """
+    settings: Settings = request.app.state.settings
+    unlocked = await _unlock(request, site, route.path, authorization)
+    if unlocked.action == "pending":
+        return _pending(unlocked)
+    if unlocked.action == "limited":
+        return _limited(unlocked)
+    if unlocked.action == "unavailable":
+        return _json(502, "paywall_unavailable")
+    if unlocked.action == "missing":
+        request.app.state.cache.drop(site.slug)
+        return _json(404, "not_found")
+    if unlocked.action != "forward":
+        return unlocked.error or None
+
+    payment_hash = unlocked.payment_hash
+    if not payment_hash:
+        fields = None
+        try:
+            macaroon, _preimage = _split_token(authorization)
+            fields = macaroon_fields(macaroon)
+        except ValueError:
+            fields = None
+        if fields is not None:
+            payment_hash = fields["ph"]
+    if not payment_hash:
+        log.warning("settled unlock had no payment hash")
+        return _json(502, "paywall_unavailable")
+    paid = unlocked.amount_sats if unlocked.amount_sats is not None else route.price_sats
+    if isinstance(paid, bool) or not isinstance(paid, int) or paid < 1:
+        log.warning("settled unlock had no sats amount")
+        return _json(502, "paywall_unavailable")
+    exchanged = await call_origin(
+        request,
+        settings,
+        site,
+        route_path=route.path,
+        payment_hash=payment_hash.lower(),
+        resource=site.resource(route.path),
+        paid_sats=paid,
+    )
+    if exchanged.error:
+        return exchanged.response(use_spent=False)
+    if not (200 <= exchanged.status < 300):
+        return exchanged.response(use_spent=None)
+    charged = await charge_lightning(
+        request.app.state.core_client,
+        settings,
+        site,
+        route,
+        authorization=authorization,
+        payment_hash=payment_hash.lower(),
+    )
+    if charged.action == "charged":
+        return exchanged.response(use_spent=None)
+    if charged.action == "fresh":
+        return charged.error or "token_used_up"
+    return _json(502, "paywall_unavailable")
+
+
 async def handle(request: Request) -> Response:
     settings: Settings = request.app.state.settings
     method = request.method.upper()
@@ -360,45 +427,10 @@ async def handle(request: Request) -> Response:
             return _json(400, "bad_signature")
         return await _pay_x402(request, site, route, payment_signature)
     if authorization is not None:
-        unlocked = await _unlock(request, site, route.path, authorization)
-        if unlocked.action == "forward":
-            payment_hash = unlocked.payment_hash
-            if not payment_hash:
-                fields = None
-                try:
-                    macaroon, _preimage = _split_token(authorization)
-                    fields = macaroon_fields(macaroon)
-                except ValueError:
-                    fields = None
-                if fields is not None:
-                    payment_hash = fields["ph"]
-            if not payment_hash:
-                log.warning("settled unlock had no payment hash")
-                return _json(502, "paywall_unavailable")
-            paid = unlocked.amount_sats if unlocked.amount_sats is not None else route.price_sats
-            if isinstance(paid, bool) or not isinstance(paid, int) or paid < 1:
-                log.warning("settled unlock had no sats amount")
-                return _json(502, "paywall_unavailable")
-            return await forward(
-                request,
-                settings,
-                site,
-                route_path=route.path,
-                payment_hash=payment_hash.lower(),
-                resource=site.resource(route.path),
-                paid_sats=paid,
-                use_spent=True,
-            )
-        if unlocked.action == "pending":
-            return _pending(unlocked)
-        if unlocked.action == "limited":
-            return _limited(unlocked)
-        if unlocked.action == "unavailable":
-            return _json(502, "paywall_unavailable")
-        if unlocked.action == "missing":
-            request.app.state.cache.drop(slug)
-            return _json(404, "not_found")
-        reason = unlocked.error or None
+        served = await _serve_lightning(request, site, route, authorization)
+        if isinstance(served, Response):
+            return served
+        reason = served
 
     challenge = await create_challenge(request.app.state.core_client, settings, site, route, buyer_ip)
     if challenge.action == "missing":

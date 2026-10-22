@@ -557,7 +557,7 @@ async def unlock_with_preimage(
         "POST",
         f"{settings.core_base_url}/internal/gate/verify",
         headers=_headers(settings, None, authorization),
-        json={"slug": site.slug, "path": route.path, "consume": True},
+        json={"slug": site.slug, "path": route.path, "consume": False, "charge": False},
     )
     try:
         response = await _send(client, request, settings.core_timeout)
@@ -583,7 +583,7 @@ async def unlock_without_preimage(
         "GET",
         f"{settings.core_base_url}/internal/gate/status/{payment_hash}",
         headers=_headers(settings, None, authorization),
-        params={"slug": site.slug, "path": route.path, "consume": "true"},
+        params={"slug": site.slug, "path": route.path, "consume": "false", "charge": "false"},
     )
     try:
         response = await _send(client, request, settings.core_timeout)
@@ -670,6 +670,40 @@ async def _x402_post(
         log.warning("core x402 %s failed", label)
         return CoreResult(action="unavailable", error="paywall_unavailable")
     return _x402_outcome(response, settle=settle)
+
+
+async def charge_lightning(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    site: CachedSite,
+    route: GateRoute,
+    *,
+    authorization: str,
+    payment_hash: str,
+) -> CoreResult:
+    """Take the credit only after the origin returned 2xx."""
+    request = client.build_request(
+        "POST",
+        f"{settings.core_base_url}/internal/gate/charge",
+        headers=_headers(settings, None, authorization),
+        json={"slug": site.slug, "path": route.path, "payment_hash": payment_hash},
+    )
+    try:
+        response = await _send(client, request, settings.core_timeout)
+    except httpx.TimeoutException:
+        log.warning("core charge timed out")
+        return CoreResult(action="unavailable", error="paywall_unavailable")
+    except httpx.HTTPError:
+        log.warning("core charge failed")
+        return CoreResult(action="unavailable", error="paywall_unavailable")
+    body = _json_body(response)
+    error = _error_code(body)
+    if response.status_code == 200 and body.get("settled") is True:
+        return CoreResult(action="charged", payment_hash=payment_hash)
+    if response.status_code == 401 and error in FRESH_REASONS:
+        return CoreResult(action="fresh", error=error)
+    log.warning("core charge unavailable http %s error %s", response.status_code, error or "unavailable")
+    return CoreResult(action="unavailable", error="paywall_unavailable")
 
 
 async def verify_x402(

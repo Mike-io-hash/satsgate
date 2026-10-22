@@ -2,7 +2,7 @@
 
 A reverse proxy a merchant runs beside an existing HTTP API. The buyer hits the proxy. The proxy sells the request through [satsgate](https://api.satsgate.org) and forwards only a paid request to the origin. The merchant does not write paywall code.
 
-The proxy is version **0.8.0**. It talks to the satsgate core paywall (challenge, verify, status, usage policy, buyer IP). Core is **0.14.0**. Those paywall calls are unchanged. The proxy does not sell credit packs. Top up on the core with Lightning, or with USDC at `GET /v1/topup/{plan_id}/x402` when `SATSGATE_TREASURY_EVM_ADDRESS` is set. The hosted gate is a separate program.
+The proxy is version **0.8.0**. It talks to the satsgate core paywall (challenge, verify, status, usage policy, buyer IP). Core is **0.14.1**. Those paywall calls are unchanged. The proxy does not sell credit packs. Top up on the core with Lightning, or with USDC at `GET /v1/topup/{plan_id}/x402` when `SATSGATE_TREASURY_EVM_ADDRESS` is set. The hosted gate is a separate program.
 
 ## Run it
 
@@ -123,7 +123,7 @@ The response is buffered up to `limits.max_response_bytes` (default 10 MiB, max 
 
 The proxy consumes first, then forwards. There is no un-consume. Two parallel requests cannot both pass a check and both hit the origin.
 
-If the origin then times out, refuses the connection, redirects, or returns a body over the cap, the buyer gets a proxy error with `use_spent: true`. The note is: the payment was accepted before the origin was called, this use is spent, and credits are not refunded. An origin **5xx** is passed through with the host headers removed, and that use is spent too. The 5xx body is the origin's. Do not put internal hostnames in it.
+If the origin then times out, refuses the connection, redirects, or returns a body over the cap, the buyer gets a proxy error with `use_spent: true`. The note is: the payment was accepted before the origin was called, this use is spent, and credits are not refunded. An origin **5xx** is passed through with the host headers removed, and that use is spent too. The 5xx body is the origin's. Do not put internal hostnames in it. The hosted gate 0.13.0 does not work this way: it charges a Lightning credit only after the origin returns 2xx. This proxy still charges first.
 
 A retry of the same token takes another use when the bundle still has one. A `per_request` token is then `token_used_up`, and the next call is a new 402. Pending polls do not consume.
 

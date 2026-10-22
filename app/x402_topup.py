@@ -24,8 +24,8 @@ def enabled() -> bool:
 
 
 def timeout_seconds() -> int:
-    """Short offer window. The shared setting is clamped into 60..300 for packs."""
-    return min(300, max(60, int(config.X402_OFFER_SECONDS)))
+    """Same short window the gate uses for a route offer."""
+    return x402.offer_timeout_seconds()
 
 
 def _treasury() -> str:
@@ -327,6 +327,7 @@ def settle(*, client_id: int, plan: Plan, encoded: str) -> dict:
         "credits_added": granted["credits_added"],
         "credits": granted["credits"],
         "tx": granted["tx_hash"],
+        "transaction": granted["tx_hash"],
         "network": config.X402_NETWORK,
         "amount_usd_atomic": int(offer["amount_usd_atomic"]),
         "payment_response": x402.payment_response_b64(tx=granted["tx_hash"], payer=fields["payer"]),

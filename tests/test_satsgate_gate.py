@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import threading
 import ipaddress
 import os
 import socket
@@ -323,7 +324,7 @@ def test_unknown_pending_and_disabled_are_404(tmp_path, monkeypatch):
         gate, core_client, origin_client = _open_gate(module.app, settings, origin)
         try:
             with gate as http:
-                assert http.get("/healthz").json() == {"ok": True, "component": "satsgate-gate", "version": "0.12.0"}
+                assert http.get("/healthz").json() == {"ok": True, "component": "satsgate-gate", "version": "0.13.0"}
                 missing = http.get("/no-such/blog")
                 assert missing.status_code == 404
                 assert missing.json()["error"] == "not_found"
@@ -673,20 +674,30 @@ def test_limits_redirect_timeout_and_rebinding(tmp_path, monkeypatch):
                     preimage = _pay(core, challenge.json()["payment_hash"])
                     return http.get(path, headers={**_auth(challenge.json()["macaroon"], preimage), "X-Forwarded-For": "203.0.113.8"})
 
-                redirected = paid_get("/my-shop/redirect")
+                before = core.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"]
+                challenge = http.get("/my-shop/redirect", headers={"X-Forwarded-For": "203.0.113.8"})
+                assert challenge.status_code == 402, challenge.text
+                redirect_token = challenge.json()
+                preimage = _pay(core, redirect_token["payment_hash"])
+                redirect_headers = {
+                    **_auth(redirect_token["macaroon"], preimage),
+                    "X-Forwarded-For": "203.0.113.8",
+                }
+                redirected = http.get("/my-shop/redirect", headers=redirect_headers)
                 assert redirected.status_code == 502
                 assert redirected.json()["error"] == "upstream_redirect"
-                assert redirected.json()["use_spent"] is True
+                assert redirected.json()["use_spent"] is False
                 assert "location" not in redirected.headers
 
                 slow = paid_get("/my-shop/slow")
                 assert slow.status_code == 504
                 assert slow.json()["error"] == "upstream_timeout"
-                assert slow.json()["use_spent"] is True
+                assert slow.json()["use_spent"] is False
 
                 big = paid_get("/my-shop/big")
                 assert big.status_code == 502
                 assert big.json()["error"] == "upstream_response_too_large"
+                assert big.json()["use_spent"] is False
                 assert big.content != b"x" * 200
 
                 calls = len(origin.requests)
@@ -694,9 +705,105 @@ def test_limits_redirect_timeout_and_rebinding(tmp_path, monkeypatch):
                 rebound = paid_get("/my-shop/ok")
                 assert rebound.status_code == 502, rebound.text
                 assert rebound.json()["error"] == "upstream_unavailable"
-                assert rebound.json()["use_spent"] is True
+                assert rebound.json()["use_spent"] is False
                 assert len(origin.requests) == calls
+                assert core.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"] == before
+                origin.responder = lambda request: httpx.Response(200, content=b"served")
+                settings.resolver.answers["origin.example"] = "1.1.1.1"
+                retried = http.get("/my-shop/redirect", headers=redirect_headers)
+                assert retried.status_code == 200, retried.text
+                assert retried.content == b"served"
+                assert core.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"] == before - 1
                 assert secret
+        finally:
+            _close(core_client, origin_client)
+
+
+def test_lightning_origin_error_does_not_debit_and_a_retry_does(tmp_path, monkeypatch):
+    """A 5xx or 404 leaves the credit and the macaroon. The next 2xx debits once."""
+    module = _load_app(tmp_path)
+    _patch_dns(monkeypatch, module)
+    state = {"status": 500, "body": b"origin-down"}
+    origin = Origin()
+    origin.responder = lambda request: httpx.Response(state["status"], content=state["body"])
+    with TestClient(module.app) as core:
+        key, _secret = _prepare(core, max_uses=1)
+        before = core.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"]
+        gate, core_client, origin_client = _open_gate(module.app, _settings(), origin)
+        try:
+            with gate as http:
+                challenge = http.get("/my-shop/blog/post")
+                assert challenge.status_code == 402, challenge.text
+                body = challenge.json()
+                headers = _auth(body["macaroon"], _pay(core, body["payment_hash"]))
+                failed = http.get("/my-shop/blog/post", headers=headers)
+                assert failed.status_code == 500, failed.text
+                assert failed.content == b"origin-down"
+                state["status"] = 404
+                state["body"] = b"missing"
+                missing = http.get("/my-shop/blog/post", headers=headers)
+                assert missing.status_code == 404, missing.text
+                assert missing.content == b"missing"
+                assert core.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"] == before
+                state["status"] = 200
+                state["body"] = b"origin-ok"
+                served = http.get("/my-shop/blog/post", headers=headers)
+                assert served.status_code == 200, served.text
+                assert served.content == b"origin-ok"
+                assert core.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"] == before - 1
+                again = http.get("/my-shop/blog/post", headers=headers)
+                assert again.status_code == 402, again.text
+                assert again.json()["reason"] == "token_used_up"
+                assert core.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"] == before - 1
+                with sqlite3.connect(os.environ["SATSGATE_DB_PATH"]) as conn:
+                    debits = conn.execute(
+                        "SELECT COUNT(*) FROM ledger WHERE reason = 'paywall_verify'"
+                    ).fetchone()[0]
+                assert debits == 1
+                assert len(origin.requests) == 3
+        finally:
+            _close(core_client, origin_client)
+
+
+def test_concurrent_lightning_retries_debit_once(tmp_path, monkeypatch):
+    module = _load_app(tmp_path)
+    _patch_dns(monkeypatch, module)
+    origin = Origin()
+    with TestClient(module.app) as core:
+        key, _secret = _prepare(core, max_uses=1)
+        before = core.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"]
+        gate, core_client, origin_client = _open_gate(module.app, _settings(), origin)
+        try:
+            with gate as http:
+                challenge = http.get("/my-shop/blog/post")
+                assert challenge.status_code == 402, challenge.text
+                body = challenge.json()
+                headers = _auth(body["macaroon"], _pay(core, body["payment_hash"]))
+                results: list = []
+
+                def once() -> None:
+                    results.append(http.get("/my-shop/blog/post", headers=headers))
+
+                threads = [threading.Thread(target=once) for _ in range(2)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=20)
+                assert len(results) == 2
+                statuses = sorted(response.status_code for response in results)
+                assert statuses == [200, 402], [response.status_code for response in results]
+                served = next(response for response in results if response.status_code == 200)
+                assert served.content == b"origin-ok"
+                blocked = next(response for response in results if response.status_code == 402)
+                assert blocked.json()["error"] == "payment_required"
+                assert blocked.json()["reason"] == "token_used_up"
+                assert blocked.content != b"origin-ok"
+                assert core.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"] == before - 1
+                with sqlite3.connect(os.environ["SATSGATE_DB_PATH"]) as conn:
+                    debits = conn.execute(
+                        "SELECT COUNT(*), COALESCE(SUM(delta_credits), 0) FROM ledger WHERE reason = 'paywall_verify'"
+                    ).fetchone()
+                assert debits == (1, -1)
         finally:
             _close(core_client, origin_client)
 

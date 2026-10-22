@@ -423,7 +423,12 @@ def test_verify_settle_replay_and_failures(tmp_path, monkeypatch):
         assert settled.status_code == 200, settled.text
         assert settled.json()["charged"] == 1
         assert settled.json()["credits"] == before - 1
-        assert settled.headers["payment-response"]
+        decoded = json.loads(base64.b64decode(settled.headers["payment-response"]))
+        assert decoded["success"] is True
+        assert decoded["transaction"] == _TX
+        assert decoded["tx"] == _TX
+        assert decoded["network"] == "eip155:84532"
+        assert decoded["payer"]
         assert _credits(http, key) == before - 1
         assert sum(1 for url, _body in calls if url.endswith("/settle")) == 1
 
@@ -592,7 +597,7 @@ def test_old_site_routes_keep_their_sats_price(tmp_path):
     assert row == (21, "sats", None)
     price = next(column for column in notnull if column[1] == "price_sats")
     assert price[3] == 0
-    assert module.config.APP_VERSION == "0.14.0"
+    assert module.config.APP_VERSION == "0.14.1"
 
 
 def test_address_change_clears_the_x402_rail(tmp_path, monkeypatch):

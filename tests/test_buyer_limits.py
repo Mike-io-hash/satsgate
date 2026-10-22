@@ -577,6 +577,127 @@ def test_concurrent_inserts_cannot_share_the_last_unpaid_slot(tmp_path):
     assert results.count("too_many_open_challenges_for_buyer") == 7, results
 
 
+def test_expired_offers_do_not_count_and_retry_after_is_the_soonest_expiry(tmp_path):
+    module = _load_app(
+        tmp_path,
+        SATSGATE_TRUSTED_PROXIES="testclient",
+        SATSGATE_BUYER_CHALLENGE_MAX="100",
+        SATSGATE_BUYER_MAX_OPEN_CHALLENGES="1",
+        SATSGATE_CHALLENGE_REUSE_SECONDS="0",
+    )
+    from app.client_ip import hash_buyer_ip
+
+    with TestClient(module.app) as http:
+        api_key = _buy_client(http)
+        buyer = hash_buyer_ip("203.0.113.70", secret="test-secret")
+        with sqlite3.connect(os.environ["SATSGATE_DB_PATH"]) as conn:
+            client_id = int(conn.execute("SELECT id FROM clients").fetchone()[0])
+        now = int(time.time())
+        for index in range(5):
+            module.db_x402.create_offer(
+                module.config.DB_PATH,
+                client_id=client_id,
+                resource=f"api/expired-{index}",
+                resource_url="https://gate.satsgate.org/shop/expired",
+                price_currency="usd",
+                amount_sats=None,
+                amount_usd_atomic=1000,
+                pay_to="0x1111111111111111111111111111111111111111",
+                requirements=None,
+                buyer_ip_hash=buyer,
+                max_uses=None,
+                access_seconds=None,
+                expires_at=now - 30,
+                enforce=False,
+                now=now - 90,
+            )
+        first = _challenge(http, api_key, resource="api/live", buyer_ip="203.0.113.70")
+        assert first.status_code == 200, first.text
+        soon = now + 40
+        with sqlite3.connect(os.environ["SATSGATE_DB_PATH"]) as conn:
+            conn.execute(
+                "UPDATE paywall_challenges SET expires_at = ? WHERE payment_hash = ?",
+                (soon, first.json()["payment_hash"]),
+            )
+        blocked = _challenge(http, api_key, resource="api/next", buyer_ip="203.0.113.70")
+        assert blocked.status_code == 429, blocked.text
+        assert blocked.json()["error"] == "too_many_open_challenges_for_buyer"
+        retry_after = int(blocked.headers["retry-after"])
+        assert blocked.json()["retry_after_seconds"] == retry_after
+        assert 1 <= retry_after <= 45
+
+        # The full Lightning slot does not block an x402 offer. A charged offer does not count.
+        offered = module.db_x402.create_offer(
+            module.config.DB_PATH,
+            client_id=client_id,
+            resource="api/x402",
+            resource_url="https://gate.satsgate.org/shop/x402",
+            price_currency="usd",
+            amount_sats=None,
+            amount_usd_atomic=1000,
+            pay_to="0x1111111111111111111111111111111111111111",
+            requirements=None,
+            buyer_ip_hash=buyer,
+            max_uses=None,
+            access_seconds=None,
+            expires_at=now + 25,
+            enforce=True,
+            now=now,
+        )
+        with sqlite3.connect(os.environ["SATSGATE_DB_PATH"]) as conn:
+            conn.execute(
+                """
+                INSERT INTO x402_authorizations(
+                  network, asset, payer, nonce, offer_id, value_atomic, pay_to, state,
+                  credit_charged, uses_consumed, updated_at
+                ) VALUES('eip155:84532', 'usdc', '0xabc', ?, ?, '1000', '0xabc', 'settled', 1, 1, ?)
+                """,
+                (secrets.token_hex(32), offered["id"], now),
+            )
+        second = module.db_x402.create_offer(
+            module.config.DB_PATH,
+            client_id=client_id,
+            resource="api/x402-b",
+            resource_url="https://gate.satsgate.org/shop/x402-b",
+            price_currency="usd",
+            amount_sats=None,
+            amount_usd_atomic=1000,
+            pay_to="0x1111111111111111111111111111111111111111",
+            requirements=None,
+            buyer_ip_hash=buyer,
+            max_uses=None,
+            access_seconds=None,
+            expires_at=now + 50,
+            enforce=True,
+            now=now,
+        )
+        assert second["id"] != offered["id"]
+        try:
+            module.db_x402.create_offer(
+                module.config.DB_PATH,
+                client_id=client_id,
+                resource="api/x402-c",
+                resource_url="https://gate.satsgate.org/shop/x402-c",
+                price_currency="usd",
+                amount_sats=None,
+                amount_usd_atomic=1000,
+                pay_to="0x1111111111111111111111111111111111111111",
+                requirements=None,
+                buyer_ip_hash=buyer,
+                max_uses=None,
+                access_seconds=None,
+                expires_at=now + 80,
+                enforce=True,
+                now=now,
+            )
+        except module.db.ChallengeLimit as exc:
+            limited = exc
+        else:
+            raise AssertionError("a second unexpired x402 offer should hit the cap")
+        assert limited.code == "too_many_open_challenges_for_buyer"
+        assert 1 <= limited.retry_after <= 55
+
+
 def test_migration_adds_the_hash_column_and_leaves_old_rows_unlimited(tmp_path):
     db_path = tmp_path / "satsgate_test.sqlite3"
     legacy_key = "sg_legacy-account-key-value"
@@ -615,7 +736,7 @@ def test_migration_adds_the_hash_column_and_leaves_old_rows_unlimited(tmp_path):
     assert "idx_challenges_buyer" in indexes
 
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.14.0"
+        assert http.get("/health").json()["version"] == "0.14.1"
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})
         assert balance.status_code == 200
         assert balance.json()["credits"] == 7

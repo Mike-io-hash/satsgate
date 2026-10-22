@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 
+import pytest
 from eth_account import Account
 from fastapi.testclient import TestClient
 
@@ -176,8 +178,12 @@ def test_x402_only_verifies_serves_and_settles(tmp_path, monkeypatch):
                 assert paid.headers["payment-response"]
                 settled = json.loads(base64.b64decode(paid.headers["payment-response"]))
                 assert settled["success"] is True
+                assert settled["transaction"].startswith("0x")
+                assert settled["tx"] == settled["transaction"]
                 assert settled["network"] == "eip155:84532"
                 assert settled["payer"] == buyer.address
+                document = json.loads(base64.b64decode(encoded))
+                assert document["accepts"][0]["maxTimeoutSeconds"] == 60
                 assert _credits(core, key) == before - 1
                 assert len(origin.requests) == 1
                 forwarded = origin.requests[0]
@@ -229,12 +235,42 @@ def test_both_rails_follow_the_live_quote_and_not_a_cached_one(tmp_path, monkeyp
                 assert body["x402"]["payTo"] == owner.address
                 assert first.headers["www-authenticate"].startswith("L402 ")
                 assert first.headers["payment-required"]
+                offered = json.loads(base64.b64decode(first.headers["payment-required"]))
+                assert offered["accepts"][0]["maxTimeoutSeconds"] == 60
+                assert body["invoice_expires_at"] > body["x402"]["expires_at"] + 30
+                assert body["x402"]["expires_at"] - int(time.time()) <= 60
                 _use(module, {"coinbase": "70000", "kraken": "70000", "bitstamp": "70000"})
                 second = http.get("/my-shop/blog/post")
                 assert second.status_code == 402, second.text
                 assert second.json()["amount_sats"] == 21
                 assert second.json()["x402"]["amount"] == "14700"
                 assert origin.requests == []
+        finally:
+            _close(core_client, origin_client)
+
+
+@pytest.mark.parametrize(("configured", "expected"), [("15", 60), ("120", 120)])
+def test_offer_window_is_clamped_and_independent_of_the_invoice(tmp_path, monkeypatch, configured, expected):
+    module = _load_app(tmp_path, SATSGATE_X402_OFFER_SECONDS=configured)
+    _patch_dns(monkeypatch, module)
+    owner = Account.create()
+    origin = Origin()
+    _use(module, {"coinbase": "65000", "kraken": "65000", "bitstamp": "65000"})
+    with TestClient(module.app) as core:
+        key, _secret = _prepare(core)
+        _verify_payee(core, key, owner)
+        assert core.patch("/v1/sites/my-shop", headers={"X-Api-Key": key}, json={"rail_x402": True}).status_code == 200
+        gate, core_client, origin_client = _open_gate(module.app, _settings(), origin)
+        try:
+            with gate as http:
+                response = http.get("/my-shop/blog/post")
+                assert response.status_code == 402, response.text
+                body = response.json()
+                offered = json.loads(base64.b64decode(response.headers["payment-required"]))
+                assert offered["accepts"][0]["maxTimeoutSeconds"] == expected
+                now = int(time.time())
+                assert abs((body["x402"]["expires_at"] - now) - expected) <= 2
+                assert body["invoice_expires_at"] > body["x402"]["expires_at"] + 30
         finally:
             _close(core_client, origin_client)
 
