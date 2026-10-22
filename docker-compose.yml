@@ -56,6 +56,8 @@ services:
       SATSGATE_X402_FACILITATOR_URL: ${SATSGATE_X402_FACILITATOR_URL:-https://x402.org/facilitator}
       SATSGATE_X402_NETWORK: ${SATSGATE_X402_NETWORK:-eip155:84532}
       SATSGATE_X402_OFFER_SECONDS: ${SATSGATE_X402_OFFER_SECONDS:-60}
+      # Credit packs only. Empty disables GET /v1/topup/{plan_id}/x402.
+      SATSGATE_TREASURY_EVM_ADDRESS: ${SATSGATE_TREASURY_EVM_ADDRESS:-}
 
       # BTC/USD quote. Not a conversion. Defaults match the code.
       SATSGATE_RATES_ENABLED: ${SATSGATE_RATES_ENABLED:-1}

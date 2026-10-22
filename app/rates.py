@@ -231,8 +231,12 @@ def refresh(now: int | None = None) -> dict:
     return snapshot(now)
 
 
-def usd_atomic_from_sats(sats: int, rate: Rate) -> int | None:
-    """Round up to the next USDC atomic unit. Below $0.001 is not offered."""
+# A pack is not merchant input, so the $100 route typo cap does not apply.
+# Mega is 0.1 BTC. At the highest spot this process will trust, that is $1,000,000.
+_PACK_MAX_USD_ATOMIC = 1_000_000_000_000
+
+
+def _raw_usd_atomic(sats: int, rate: Rate) -> int | None:
     sats = int(sats)
     if sats < 1:
         return None
@@ -240,8 +244,25 @@ def usd_atomic_from_sats(sats: int, rate: Rate) -> int | None:
     denominator = int(rate.rate_den) * 100_000_000
     if numerator <= 0 or denominator <= 0:
         return None
-    atomic = (numerator + denominator - 1) // denominator
-    if atomic < _MIN_DERIVED_USD_ATOMIC or atomic > int(config.X402_MAX_USD_ATOMIC):
+    return (numerator + denominator - 1) // denominator
+
+
+def usd_atomic_from_sats(sats: int, rate: Rate) -> int | None:
+    """Round up to the next USDC atomic unit. Below $0.001 is not offered."""
+    atomic = _raw_usd_atomic(sats, rate)
+    if atomic is None or atomic < _MIN_DERIVED_USD_ATOMIC or atomic > int(config.X402_MAX_USD_ATOMIC):
+        return None
+    return int(atomic)
+
+
+def usd_atomic_for_pack(sats: int, rate: Rate) -> int | None:
+    """Pack quote. Same round-up as a route. The route typo cap does not apply.
+
+    Below $0.001 or above $1,000,000 is not offered. The caller locks the
+    integer on the offer. A later median does not change it.
+    """
+    atomic = _raw_usd_atomic(sats, rate)
+    if atomic is None or atomic < _MIN_DERIVED_USD_ATOMIC or atomic > _PACK_MAX_USD_ATOMIC:
         return None
     return int(atomic)
 

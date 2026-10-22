@@ -355,6 +355,39 @@ def _migrate_x402(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_offers_buyer ON payment_offers(client_id, buyer_ip_hash, created_at)"
     )
+    _migrate_x402_topup(conn)
+
+
+def _migrate_x402_topup(conn: sqlite3.Connection) -> None:
+    """Columns for a USDC credit pack. Existing Lightning rows stay valid.
+
+    No new table. The nonce row is still x402_authorizations. A pack grant
+    sets credit_charged once, in the same write as the ledger row.
+    """
+    offer_cols = {row["name"] for row in conn.execute("PRAGMA table_info(payment_offers)").fetchall()}
+    if "resource_url" not in offer_cols:
+        conn.execute("ALTER TABLE payment_offers ADD COLUMN resource_url TEXT")
+    if "grant_credits" not in offer_cols:
+        conn.execute("ALTER TABLE payment_offers ADD COLUMN grant_credits INTEGER")
+
+    topup_cols = {row["name"] for row in conn.execute("PRAGMA table_info(topups)").fetchall()}
+    if "rail" not in topup_cols:
+        conn.execute("ALTER TABLE topups ADD COLUMN rail TEXT NOT NULL DEFAULT 'lightning'")
+    if "tx_hash" not in topup_cols:
+        conn.execute("ALTER TABLE topups ADD COLUMN tx_hash TEXT")
+    if "amount_usd_atomic" not in topup_cols:
+        conn.execute("ALTER TABLE topups ADD COLUMN amount_usd_atomic INTEGER")
+    if "network" not in topup_cols:
+        conn.execute("ALTER TABLE topups ADD COLUMN network TEXT")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_topups_tx_hash ON topups(tx_hash) WHERE tx_hash IS NOT NULL"
+    )
+
+    ledger_cols = {row["name"] for row in conn.execute("PRAGMA table_info(ledger)").fetchall()}
+    if "network" not in ledger_cols:
+        conn.execute("ALTER TABLE ledger ADD COLUMN network TEXT")
+    if "amount_usd_atomic" not in ledger_cols:
+        conn.execute("ALTER TABLE ledger ADD COLUMN amount_usd_atomic INTEGER")
 
 
 def hash_api_key(api_key: str) -> str:

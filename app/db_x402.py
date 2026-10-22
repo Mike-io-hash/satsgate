@@ -228,6 +228,7 @@ def create_offer(
     payment_hash: str | None = None,
     expires_at: int | None = None,
     enforce: bool = True,
+    grant_credits: int | None = None,
     now: int | None = None,
 ) -> dict:
     now = int(time.time()) if now is None else int(now)
@@ -267,8 +268,9 @@ def create_offer(
             INSERT INTO payment_offers(
               id, client_id, resource, api_key_id, price_currency, amount_sats, amount_usd_atomic,
               rate_num, rate_den, rate_fetched_at, expires_at, max_uses, access_seconds, payment_hash,
-              scheme, network, asset, pay_to, requirements_json, buyer_ip_hash, created_at
-            ) VALUES(?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              scheme, network, asset, pay_to, requirements_json, buyer_ip_hash, created_at,
+              resource_url, grant_credits
+            ) VALUES(?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 offer_id,
@@ -291,6 +293,8 @@ def create_offer(
                 None if stored is None else json.dumps(stored, separators=(",", ":"), sort_keys=True),
                 buyer_ip_hash,
                 now,
+                resource_url,
+                int(grant_credits) if grant_credits is not None else None,
             ),
         )
         row = conn.execute("SELECT * FROM payment_offers WHERE id = ?", (offer_id,)).fetchone()
@@ -378,6 +382,8 @@ def _offer_dict(row) -> dict:
         "asset": row["asset"],
         "pay_to": row["pay_to"],
         "requirements": requirements,
+        "resource_url": row["resource_url"],
+        "grant_credits": None if row["grant_credits"] is None else int(row["grant_credits"]),
         "created_at": int(row["created_at"]),
     }
 
@@ -573,6 +579,137 @@ def mark_settled_and_charge(
         new_balance = conn.execute("SELECT credits FROM clients WHERE id = ?", (int(client_id),)).fetchone()
         conn.execute("COMMIT")
     return {"charged": int(cost), "credits": int(new_balance[0]), "tx_hash": tx_hash}
+
+
+def find_topup_offer(
+    db_path: str,
+    *,
+    client_id: int,
+    resource: str,
+    pay_to: str,
+    amount_usd_atomic: int,
+    grant_credits: int,
+    now: int,
+) -> dict | None:
+    """An unexpired pack quote with the same locked amount. A new median is a new row."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM payment_offers
+            WHERE client_id = ? AND resource = ? AND pay_to = ? AND amount_usd_atomic = ?
+              AND grant_credits = ? AND expires_at > ? AND resource_url IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (int(client_id), resource, pay_to, int(amount_usd_atomic), int(grant_credits), int(now)),
+        ).fetchone()
+    return None if row is None else _offer_dict(row)
+
+
+def grant_topup_credits(
+    db_path: str,
+    *,
+    network: str,
+    asset: str,
+    payer: str,
+    nonce: str,
+    tx_hash: str,
+    client_id: int,
+    offer_id: str,
+    plan_id: str,
+    credits: int,
+    sats: int,
+    amount_usd_atomic: int,
+    pay_to: str,
+    expires_at: int,
+    now: int,
+) -> dict:
+    """Add the pack once. A second caller sees credit_charged and adds nothing.
+
+    The ledger row, the top-up row, and credit_charged commit together.
+    """
+    now = int(now)
+    payment_hash = str(nonce).removeprefix("0x").lower()
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT * FROM x402_authorizations
+            WHERE network = ? AND asset = ? AND payer = ? AND nonce = ?
+            """,
+            (network, asset, payer, nonce),
+        ).fetchone()
+        if row is None or row["offer_id"] != offer_id:
+            conn.execute("ROLLBACK")
+            raise x402.X402Error("bad_signature")
+        if str(row["value_atomic"]) != str(int(amount_usd_atomic)) or row["pay_to"] != pay_to:
+            conn.execute("ROLLBACK")
+            raise x402.X402Error("amount_mismatch")
+        if int(row["credit_charged"] or 0) == 1:
+            conn.execute("ROLLBACK")
+            raise x402.X402Error("x402_replay", status=409)
+        bal = conn.execute("SELECT credits FROM clients WHERE id = ?", (int(client_id),)).fetchone()
+        if bal is None:
+            conn.execute("ROLLBACK")
+            raise ValueError("client does not exist")
+        conn.execute(
+            "UPDATE clients SET credits = credits + ? WHERE id = ?",
+            (int(credits), int(client_id)),
+        )
+        conn.execute(
+            """
+            INSERT INTO ledger(
+              client_id, delta_credits, reason, ref, created_at, resource, network, amount_usd_atomic
+            ) VALUES(?, ?, 'topup_x402', ?, ?, ?, ?, ?)
+            """,
+            (
+                int(client_id),
+                int(credits),
+                tx_hash,
+                now,
+                f"v1/topup/{plan_id}",
+                network,
+                int(amount_usd_atomic),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO topups(
+              payment_hash, invoice, sats, credits, status, client_id, created_at, settled_at,
+              expires_at, rail, tx_hash, amount_usd_atomic, network
+            ) VALUES(?, 'x402', ?, ?, 'settled', ?, ?, ?, ?, 'x402', ?, ?, ?)
+            """,
+            (
+                payment_hash,
+                int(sats),
+                int(credits),
+                int(client_id),
+                now,
+                now,
+                int(expires_at),
+                tx_hash,
+                int(amount_usd_atomic),
+                network,
+            ),
+        )
+        cur = conn.execute(
+            """
+            UPDATE x402_authorizations
+            SET state = 'settled', tx_hash = ?, settled_at = ?, credit_charged = 1, updated_at = ?
+            WHERE network = ? AND asset = ? AND payer = ? AND nonce = ? AND credit_charged = 0
+            """,
+            (tx_hash, now, now, network, asset, payer, nonce),
+        )
+        if cur.rowcount != 1:
+            conn.execute("ROLLBACK")
+            raise x402.X402Error("x402_replay", status=409)
+        new_balance = conn.execute("SELECT credits FROM clients WHERE id = ?", (int(client_id),)).fetchone()
+        conn.execute("COMMIT")
+    return {
+        "credits_added": int(credits),
+        "credits": int(new_balance[0]),
+        "tx_hash": tx_hash,
+    }
 
 
 def client_credits(db_path: str, client_id: int) -> int:

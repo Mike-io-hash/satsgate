@@ -20,7 +20,8 @@ def list_ledger(
 
     sql = (
         "SELECT l.id, l.delta_credits, l.reason, l.ref, l.created_at, "
-        "l.api_key_id, l.resource, k.label AS api_key_label, k.key_prefix AS api_key_prefix "
+        "l.api_key_id, l.resource, l.network, l.amount_usd_atomic, "
+        "k.label AS api_key_label, k.key_prefix AS api_key_prefix "
         "FROM ledger l "
         "LEFT JOIN api_keys k ON k.id = l.api_key_id "
         "WHERE l.client_id = ? "
@@ -53,6 +54,8 @@ def list_ledger(
                 "api_key_label": r["api_key_label"],
                 "api_key_prefix": r["api_key_prefix"],
                 "resource": r["resource"],
+                "network": r["network"],
+                "amount_usd_atomic": None if r["amount_usd_atomic"] is None else int(r["amount_usd_atomic"]),
             }
         )
     return out
@@ -74,7 +77,7 @@ def usage_summary(
               COALESCE(SUM(CASE WHEN delta_credits < 0 THEN -delta_credits ELSE 0 END), 0) AS credits_out,
               COALESCE(SUM(delta_credits), 0) AS net_credits,
               COALESCE(SUM(CASE WHEN reason = 'paywall_verify' THEN 1 ELSE 0 END), 0) AS verify_events,
-              COALESCE(SUM(CASE WHEN reason = 'topup_settled' THEN 1 ELSE 0 END), 0) AS topup_events
+              COALESCE(SUM(CASE WHEN reason IN ('topup_settled', 'topup_x402') THEN 1 ELSE 0 END), 0) AS topup_events
             FROM ledger
             WHERE client_id = ? AND created_at >= ?
             """,
@@ -191,7 +194,7 @@ def usage_daily(
               COALESCE(SUM(CASE WHEN delta_credits < 0 THEN -delta_credits ELSE 0 END), 0) AS credits_out,
               COALESCE(SUM(delta_credits), 0) AS net_credits,
               COALESCE(SUM(CASE WHEN reason = 'paywall_verify' THEN 1 ELSE 0 END), 0) AS verify_events,
-              COALESCE(SUM(CASE WHEN reason = 'topup_settled' THEN 1 ELSE 0 END), 0) AS topup_events
+              COALESCE(SUM(CASE WHEN reason IN ('topup_settled', 'topup_x402') THEN 1 ELSE 0 END), 0) AS topup_events
             FROM ledger
             WHERE client_id = ? AND created_at >= ? AND created_at < ?
             GROUP BY day

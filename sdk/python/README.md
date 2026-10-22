@@ -2,6 +2,8 @@
 
 Minimal Python SDK to integrate **satsgate** (L402 paywall + prepaid payment verifications (credits)) into your backend.
 
+Lightning top-up stays `GET /v1/topup/{plan_id}`. USDC top-up, when the server has a treasury address, is `GET /v1/topup/{plan_id}/x402` with the account key. See `scripts/x402_topup_example.py`. Credits bought either way are not redeemable.
+
 ## Install (editable, from this repo)
 
 ```bash

@@ -275,6 +275,8 @@ def test_migration_adds_tables_and_leaves_a_realistic_database(tmp_path, monkeyp
     ]
     expected = dict(before)
     expected["clients"] = before["clients"] + payee_columns
+    expected["ledger"] = before["ledger"] + ["network", "amount_usd_atomic"]
+    expected["topups"] = before["topups"] + ["rail", "tx_hash", "amount_usd_atomic", "network"]
     assert after == expected
     assert {"sites", "site_routes", "payment_offers", "x402_authorizations"} <= tables
     assert credits == 42
@@ -285,10 +287,15 @@ def test_migration_adds_tables_and_leaves_a_realistic_database(tmp_path, monkeyp
     assert site_count == 0
 
     with TestClient(module.app) as http:
-        assert http.get("/health").json() == {"ok": True, "version": "0.13.1"}
+        assert http.get("/health").json() == {"ok": True, "version": "0.14.0"}
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})
         assert balance.status_code == 200
         assert balance.json()["credits"] == 42
+        old_ledger = http.get("/v1/ledger", headers={"X-Api-Key": legacy_key}).json()["entries"]
+        settled = next(row for row in old_ledger if row["reason"] == "topup_settled")
+        assert settled["ref"] == "old-payment"
+        assert settled["network"] is None
+        assert settled["amount_usd_atomic"] is None
 
 
 def test_origin_urls_reject_private_and_trick_targets(tmp_path, monkeypatch):
@@ -581,14 +588,14 @@ def test_admin_routes_hide_when_the_token_is_unset(tmp_path, monkeypatch):
     with TestClient(module.app) as http:
         assert http.post("/v1/admin/sites/my-shop/approve").status_code == 404
         assert http.get("/v1/admin/sites").status_code == 404
-        assert http.get("/health").json()["version"] == "0.13.1"
+        assert http.get("/health").json()["version"] == "0.14.0"
 
 
 def test_missing_site_secret_key_refuses_create_and_boots(tmp_path, monkeypatch):
     module = _load_app(tmp_path, SATSGATE_SITE_SECRET_KEY="")
     _patch_dns(monkeypatch, module)
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.13.1"
+        assert http.get("/health").json()["version"] == "0.14.0"
         account = _buy(http)
         response = http.post(
             "/v1/sites",

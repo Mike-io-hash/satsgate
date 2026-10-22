@@ -2,7 +2,7 @@
 
 A reverse proxy a merchant runs beside an existing HTTP API. The buyer hits the proxy. The proxy sells the request through [satsgate](https://api.satsgate.org) and forwards only a paid request to the origin. The merchant does not write paywall code.
 
-The proxy is version **0.8.0**. It talks to the satsgate core paywall (challenge, verify, status, usage policy, buyer IP). Core is **0.13.1**. Those paywall calls are unchanged. The hosted gate is a separate program.
+The proxy is version **0.8.0**. It talks to the satsgate core paywall (challenge, verify, status, usage policy, buyer IP). Core is **0.14.0**. Those paywall calls are unchanged. The proxy does not sell credit packs. Top up on the core with Lightning, or with USDC at `GET /v1/topup/{plan_id}/x402` when `SATSGATE_TREASURY_EVM_ADDRESS` is set. The hosted gate is a separate program.
 
 ## Run it
 
