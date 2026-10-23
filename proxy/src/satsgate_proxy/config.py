@@ -25,9 +25,11 @@ _CORE_KEYS = frozenset({"base_url", "api_key_env", "timeout_seconds"})
 _UPSTREAM_KEYS = frozenset({"base_url", "timeout_seconds", "inject_headers"})
 _ORIGIN_KEYS = frozenset({"secret_env", "max_skew_seconds"})
 _PRICING_KEYS = frozenset({"sats_per_credit"})
-_SERVER_KEYS = frozenset({"host", "port", "listen", "trusted_proxies", "pending_retry_after_seconds"})
+_SERVER_KEYS = frozenset({"host", "port", "listen", "trusted_proxies", "pending_retry_after_seconds", "public_base"})
 _LIMIT_KEYS = frozenset({"max_request_bytes", "max_response_bytes"})
-_ROUTE_KEYS = frozenset({"name", "methods", "path", "path_regex", "price_sats", "access", "scope", "description"})
+_ROUTE_KEYS = frozenset(
+    {"name", "methods", "path", "path_regex", "price_sats", "access", "scope", "description", "x402"}
+)
 _INJECT_KEYS = frozenset({"name", "value_env"})
 _HOP = frozenset(
     {
@@ -90,6 +92,7 @@ class Route:
     scope: str
     resource: str
     description: str | None
+    x402: bool = False
 
     def __repr__(self) -> str:
         return f"Route({self.name} {self.access.label()} {self.price_sats}sats {self.scope})"
@@ -115,6 +118,7 @@ class Settings:
     free_patterns: tuple[re.Pattern[str], ...]
     routes: tuple[Route, ...]
     warnings: tuple[str, ...]
+    public_base: str = ""
 
     def __repr__(self) -> str:
         return (
@@ -351,6 +355,8 @@ def _routes(value: object) -> tuple[Route, ...]:
             elif site != (price, access):
                 raise ConfigError("site-scoped routes must share price_sats and access")
         resource = "site" if scope == "site" else f"route:{name}"
+        if "x402" in data and data["x402"] is not None and not isinstance(data["x402"], bool):
+            raise ConfigError(f"route {name} x402 must be true or false")
         routes.append(
             Route(
                 name=name,
@@ -361,6 +367,7 @@ def _routes(value: object) -> tuple[Route, ...]:
                 scope=scope,
                 resource=resource,
                 description=_description(data.get("description")),
+                x402=bool(data.get("x402", False)),
             )
         )
     return tuple(routes)
@@ -456,6 +463,12 @@ def load_settings(path: str | Path) -> Settings:
         host = _as_str(server.get("host", "127.0.0.1"), "host")
         port = _as_int(server.get("port", 8080), "port", lo=1, hi=65535)
 
+    public_base = ""
+    if server.get("public_base"):
+        public_base = _http_base(server["public_base"], "public_base")
+    if any(route.x402 for route in routes) and not public_base:
+        raise ConfigError("server.public_base is required when a route sets x402: true")
+
     warnings = _cheap_warnings(routes, sats_per_credit)
     if secret_warning:
         warnings.append(secret_warning)
@@ -497,4 +510,5 @@ def load_settings(path: str | Path) -> Settings:
         free_patterns=_free_patterns(data.get("free_paths")),
         routes=routes,
         warnings=tuple(warnings),
+        public_base=public_base,
     )

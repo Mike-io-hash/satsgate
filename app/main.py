@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from urllib.parse import urlsplit
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from math import ceil
@@ -26,7 +27,7 @@ from . import x402_topup
 from . import ssrf
 from . import wallet_lnaddr
 from .admin import router as admin_router
-from .internal_gate import router as internal_gate_router
+from .internal_gate import _lock_lightning_offer, router as internal_gate_router
 from .client_ip import buyer_ip_from_trusted_proxy, hash_buyer_ip, resolve_client_ip
 from .invoices import InvoiceValidationError, bolt11_expiry_unix
 from .l402 import (
@@ -1609,6 +1610,18 @@ class PaywallChallengeIn(BaseModel):
             "A max_uses bundle that omits this still ends at that cap."
         ),
     )
+    x402: bool = Field(
+        default=False,
+        description=(
+            "Also attach an x402 USDC offer for resource_url. "
+            "Requires a verified EVM payee. Lightning is still issued."
+        ),
+    )
+    resource_url: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Public http(s) URL the buyer will pay. Required when x402 is true.",
+    )
 
 
 class PaywallVerifyIn(BaseModel):
@@ -1630,6 +1643,26 @@ class PaywallVerifyIn(BaseModel):
             "False leaves the counter unchanged and still settles a first unlock."
         ),
     )
+    charge: bool = Field(
+        default=True,
+        description=(
+            "When true, debit on this call, which is what proxy 0.8.0 does before it forwards. "
+            "When false, confirm the payment and leave the credit. "
+            "POST /v1/paywall/charge debits after the origin returns 2xx."
+        ),
+    )
+
+
+class PaywallChargeIn(BaseModel):
+    expected_resource: str = Field(min_length=1, max_length=200)
+    payment_hash: str = Field(min_length=64, max_length=64)
+    cost_credits: int = Field(default=1, ge=1, le=10_000)
+
+
+class PaywallX402In(BaseModel):
+    resource: str = Field(min_length=1, max_length=200)
+    resource_url: str = Field(min_length=8, max_length=500)
+    payment_signature: str = Field(min_length=1, max_length=12000)
 
 
 # Simple cache of LNURL-pay wallets by Lightning Address
@@ -1816,6 +1849,86 @@ def _capacity_kwargs(
     }
 
 
+def _http_resource_url(value: str | None) -> str | None:
+    """A public http(s) URL with no userinfo and no fragment."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or len(text) > 500 or any(char in text for char in "\r\n\0 "):
+        return None
+    parts = urlsplit(text)
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        return None
+    if parts.username or parts.password or parts.fragment:
+        return None
+    return text
+
+
+def _buyer_hash_for(request: Request, header: str | None) -> str | None:
+    peer = request.client.host if request.client else None
+    buyer_ip = buyer_ip_from_trusted_proxy(
+        peer=peer,
+        header=header,
+        trusted_proxies=config.TRUSTED_PROXIES,
+    )
+    if not buyer_ip:
+        return None
+    return hash_buyer_ip(buyer_ip, secret=config.MACAROON_SECRET)
+
+
+def _attach_x402_quote(
+    lightning_body: dict,
+    body: PaywallChallengeIn,
+    request: Request,
+    auth: db_keys.Principal,
+    buyer_header: str | None,
+) -> JSONResponse | dict:
+    """Keep the Lightning challenge and attach the locked USDC quote when a rate exists."""
+    from . import x402_service
+
+    pay_to = db_x402.payee_verified(config.DB_PATH, client_id=auth.client.id)
+    if not pay_to:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": "payee_evm_not_verified"},
+            headers={"Cache-Control": "no-store"},
+        )
+    plan = x402_service.quote_plan(
+        {"rail_lightning": 1, "rail_x402": 1},
+        {
+            "price_currency": "sats",
+            "price_sats": int(lightning_body["amount_sats"]),
+            "price_usd_atomic": None,
+        },
+    )
+    try:
+        buyer_hash = _buyer_hash_for(request, buyer_header)
+    except ValueError:
+        buyer_hash = None
+    resource_url = _http_resource_url(body.resource_url)
+    if resource_url is None:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": "invalid_resource_url"},
+            headers={"Cache-Control": "no-store"},
+        )
+    merged = _lock_lightning_offer(
+        lightning_body,
+        plan=plan,
+        pay_to=pay_to,
+        client_id=auth.client.id,
+        resource=body.resource,
+        resource_url=resource_url,
+        buyer_ip_hash=buyer_hash,
+        max_uses=body.max_uses,
+        access_seconds=body.access_seconds,
+    )
+    response = JSONResponse(content=merged, headers={"Cache-Control": "no-store"})
+    if merged.get("payment_required"):
+        response.headers["PAYMENT-REQUIRED"] = str(merged["payment_required"])
+    return response
+
+
 @app.post("/v1/paywall/challenge")
 def v1_paywall_challenge(
     body: PaywallChallengeIn,
@@ -1843,7 +1956,23 @@ def v1_paywall_challenge(
     auth = _paywall_principal(x_api_key, body.resource)
     if isinstance(auth, JSONResponse):
         return auth
-    return _issue_paywall_challenge(body, request, auth, x_satsgate_buyer_ip)
+    if body.x402:
+        if _http_resource_url(body.resource_url) is None:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "invalid_resource_url"},
+                headers={"Cache-Control": "no-store"},
+            )
+        if not db_x402.payee_verified(config.DB_PATH, client_id=auth.client.id):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "payee_evm_not_verified"},
+                headers={"Cache-Control": "no-store"},
+            )
+    issued = _issue_paywall_challenge(body, request, auth, x_satsgate_buyer_ip)
+    if isinstance(issued, JSONResponse) or not body.x402:
+        return issued
+    return _attach_x402_quote(issued, body, request, auth, x_satsgate_buyer_ip)
 
 
 def _issue_paywall_challenge(
@@ -2345,6 +2474,7 @@ def v1_paywall_verify(
             client=auth.client,
             api_key_id=auth.api_key_id,
             consume=bool(body.consume),
+            mode="confirm" if body.charge is False else "settle",
         )
     except L402Error as e:
         return _paywall_auth_error(e, expected_resource=body.expected_resource)
@@ -2368,6 +2498,10 @@ def v1_paywall_status(
     consume: bool = Query(
         default=False,
         description="When true, atomically take one use of this payment. False checks without consuming.",
+    ),
+    charge: bool = Query(
+        default=True,
+        description="When false, confirm without debiting. The default still debits on the first settled call.",
     ),
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
@@ -2398,6 +2532,7 @@ def v1_paywall_status(
             poll=True,
             api_key_id=auth.api_key_id,
             consume=bool(consume),
+            mode="confirm" if charge is False else "settle",
         )
     except L402Error as e:
         return _paywall_auth_error(e, expected_resource=expected_resource)
@@ -2410,6 +2545,118 @@ def v1_paywall_status(
                 "hint": "Top up payment verifications (credits): GET /v1/plans then /v1/topup/{plan_id}",
             },
         )
+
+
+@app.post("/v1/paywall/charge")
+def v1_paywall_charge(
+    body: PaywallChargeIn,
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+):
+    """Debit after the origin returned 2xx. A confirm call does not debit.
+
+    Old clients omit this route. They keep sending charge=true on verify, which
+    still debits before they forward.
+    """
+    normalized = _payment_hash_or_none(body.payment_hash)
+    if normalized is None:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_payment_hash"})
+    auth = _paywall_principal(x_api_key, body.expected_resource)
+    if isinstance(auth, JSONResponse):
+        return auth
+    try:
+        return _unlock_paywall(
+            authorization=authorization,
+            expected_resource=body.expected_resource,
+            cost_credits=int(body.cost_credits),
+            client=auth.client,
+            payment_hash=normalized,
+            api_key_id=auth.api_key_id,
+            consume=False,
+            mode="deliver",
+        )
+    except L402Error as e:
+        return _paywall_auth_error(e, expected_resource=body.expected_resource)
+    except ValueError as e:
+        return JSONResponse(
+            status_code=402,
+            content={
+                "ok": False,
+                "error": str(e),
+                "hint": "Top up payment verifications (credits): GET /v1/plans then /v1/topup/{plan_id}",
+            },
+        )
+
+
+def _paywall_x402(body: PaywallX402In, x_api_key: str | None, *, settle: bool):
+    auth = _paywall_principal(x_api_key, body.resource)
+    if isinstance(auth, JSONResponse):
+        return auth
+    resource_url = _http_resource_url(body.resource_url)
+    if resource_url is None:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": "invalid_resource_url"},
+            headers={"Cache-Control": "no-store"},
+        )
+    from . import x402_service
+
+    try:
+        if settle:
+            result = x402_service.settle_payment(
+                client_id=auth.client.id,
+                slug="",
+                path="",
+                resource=body.resource,
+                encoded=body.payment_signature,
+                resource_url=resource_url,
+            )
+        else:
+            result = x402_service.verify_payment(
+                client_id=auth.client.id,
+                slug="",
+                path="",
+                resource=body.resource,
+                encoded=body.payment_signature,
+                resource_url=resource_url,
+            )
+    except x402_mod.X402Error as exc:
+        content: dict[str, object] = {"ok": False, "error": exc.code}
+        if exc.reason:
+            content["reason"] = exc.reason
+        return JSONResponse(status_code=exc.status, content=content, headers={"Cache-Control": "no-store"})
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=402,
+            content={
+                "ok": False,
+                "error": str(exc),
+                "hint": "Top up payment verifications (credits): GET /v1/plans then /v1/topup/{plan_id}",
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+    response = JSONResponse(content=result, headers={"Cache-Control": "no-store"})
+    if result.get("payment_response"):
+        response.headers["PAYMENT-RESPONSE"] = str(result["payment_response"])
+    return response
+
+
+@app.post("/v1/paywall/x402/verify")
+def v1_paywall_x402_verify(
+    body: PaywallX402In,
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+):
+    """Check a PAYMENT-SIGNATURE. serve=true means the caller may call the origin. No credit moves."""
+    return _paywall_x402(body, x_api_key, settle=False)
+
+
+@app.post("/v1/paywall/x402/settle")
+def v1_paywall_x402_settle(
+    body: PaywallX402In,
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+):
+    """Call only after the origin returned 2xx. The facilitator settles, then one credit is taken."""
+    return _paywall_x402(body, x_api_key, settle=True)
 
 
 @app.get("/v1/tickets", include_in_schema=config.dev_endpoints_enabled())

@@ -2,7 +2,7 @@
 
 A buyer-side MCP server. An agent (Claude Desktop, Cursor, or any stdio MCP client) can see the price of a Satsgate-paywalled URL, pay it, and read the response.
 
-This package is version **0.10.0**. It talks to whatever URL returned the 402. Core is **0.14.1**. The self-hosted proxy stays **0.8.0**. The hosted gate speaks the same Lightning 402. A public route priced only in USD is omitted from `list_sites` until a later release. This process cannot buy Satsgate credits. An account tops up on the core: Lightning at `GET /v1/topup/{plan_id}`, or USDC at `GET /v1/topup/{plan_id}/x402` when the operator has set `SATSGATE_TREASURY_EVM_ADDRESS`. The USDC path is not an MCP tool.
+This package is version **0.10.0**. It talks to whatever URL returned the 402. Core is **0.14.2**. The self-hosted proxy is **0.12.0**. The hosted gate speaks the same Lightning 402. A public route priced only in USD is omitted from `list_sites` until a later release. This process cannot buy Satsgate credits. An account tops up on the core: Lightning at `GET /v1/topup/{plan_id}`, or USDC at `GET /v1/topup/{plan_id}/x402` when the operator has set `SATSGATE_TREASURY_EVM_ADDRESS`. The USDC path is not an MCP tool.
 
 `list_sites` reads `GET /v1/sites` on `SATSGATE_MCP_CORE_URL` (default `https://api.satsgate.org`). That is the public directory: approved sites that opted in. Set `SATSGATE_MCP_REGISTRY` only to replace it with a JSON file or another URL.
 

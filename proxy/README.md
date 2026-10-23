@@ -2,7 +2,7 @@
 
 A reverse proxy a merchant runs beside an existing HTTP API. The buyer hits the proxy. The proxy sells the request through [satsgate](https://api.satsgate.org) and forwards only a paid request to the origin. The merchant does not write paywall code.
 
-The proxy is version **0.8.0**. It talks to the satsgate core paywall (challenge, verify, status, usage policy, buyer IP). Core is **0.14.1**. Those paywall calls are unchanged. The proxy does not sell credit packs. Top up on the core with Lightning, or with USDC at `GET /v1/topup/{plan_id}/x402` when `SATSGATE_TREASURY_EVM_ADDRESS` is set. The hosted gate is a separate program.
+The proxy is version **0.12.0**. It talks to the satsgate core paywall (challenge, verify, status, charge, and x402 verify/settle). Core is **0.14.2**. The proxy does not sell credit packs and does not call the facilitator. Top up on the core with Lightning, or with USDC at `GET /v1/topup/{plan_id}/x402` when `SATSGATE_TREASURY_EVM_ADDRESS` is set. The hosted gate is a separate program. Buyer USDC on a proxied route goes to the merchant's verified `payTo`.
 
 ## Run it
 
@@ -31,7 +31,7 @@ The proxy is version **0.8.0**. It talks to the satsgate core paywall (challenge
    docker compose -f proxy/docker-compose.yml up --build
    ```
 
-   Buyers use the proxy's published port. `GET /healthz` is the proxy (`{"ok":true,"component":"satsgate-proxy","version":"0.8.0"}`). It is not forwarded.
+   Buyers use the proxy's published port. `GET /healthz` is the proxy (`{"ok":true,"component":"satsgate-proxy","version":"0.12.0"}`). It is not forwarded.
 
 Without Docker, from a checkout:
 
@@ -40,7 +40,7 @@ pip install -r proxy/requirements.txt
 PYTHONPATH=proxy/src python -m satsgate_proxy --config proxy/satsgate-proxy.yaml
 ```
 
-The image listens as uid 65532. Build it from the repo root: `docker build -f proxy/Dockerfile -t satsgate-proxy:0.8.0 .`
+The image listens as uid 65532. Build it from the repo root: `docker build -f proxy/Dockerfile -t satsgate-proxy:0.12.0 .`
 
 ## What a buyer sees
 
@@ -123,7 +123,9 @@ The response is buffered up to `limits.max_response_bytes` (default 10 MiB, max 
 
 The proxy consumes first, then forwards. There is no un-consume. Two parallel requests cannot both pass a check and both hit the origin.
 
-If the origin then times out, refuses the connection, redirects, or returns a body over the cap, the buyer gets a proxy error with `use_spent: true`. The note is: the payment was accepted before the origin was called, this use is spent, and credits are not refunded. An origin **5xx** is passed through with the host headers removed, and that use is spent too. The 5xx body is the origin's. Do not put internal hostnames in it. The hosted gate 0.13.0 does not work this way: it charges a Lightning credit only after the origin returns 2xx. This proxy still charges first.
+The proxy confirms the payment first and calls the origin next. A credit is taken only when that response is 2xx. An origin **4xx** or **5xx** is passed through with the host headers removed, and nothing is debited. The same macaroon can be retried. If the origin times out, refuses the connection, redirects, or returns a body over the cap, the buyer gets a proxy error with `use_spent: false`. Do not put internal hostnames in an origin error body.
+
+A route may set `x402: true`. That also requires `server.public_base`, the `http://` or `https://` origin buyers pay (no path). The account needs a verified EVM payee, the same challenge used by the hosted gate. The 402 then includes `PAYMENT-REQUIRED`. `PAYMENT-SIGNATURE` is verified, the origin is called with `X-Satsgate-Paid-Usd-Atomic` and no `X-Satsgate-Paid-Sats`, and settle runs only after a 2xx. `PAYMENT-RESPONSE` carries `success`, `transaction`, `network`, `payer`, and `tx`. Sending both `Authorization: L402` and `PAYMENT-SIGNATURE` is 400 `one_rail_only`. The proxy never calls the facilitator.
 
 A retry of the same token takes another use when the bundle still has one. A `per_request` token is then `token_used_up`, and the next call is a new 402. Pending polls do not consume.
 
@@ -135,7 +137,7 @@ A retry of the same token takes another use when the bundle still has one. A `pe
 - There is no CORS middleware. A browser preflight needs `OPTIONS` on the route or a free path.
 - `Accept-Encoding` is forced to `identity`. The proxy does not gzip.
 - `Location` is always removed. An origin that redirects the buyer has to use a URL in the body, or not redirect.
-- One use is burned if the origin fails after consume. Credits are never refunded. There is no idempotency key: a retry after a lost response consumes another use.
+- An origin failure does not burn the use. A retry after a lost 2xx can take another use if the first charge succeeded and the buyer did not see it. Credits are never refunded. There is no idempotency key.
 - Aperture cannot verify satsgate macaroons. lnget and `fetch402` can, using the 402 header and `mac:preimage`. A phone wallet uses the macaroon-only poll.
 - Replicas of the proxy do not need shared state. Uses, buyer limits, and challenge reuse live in the core database. The core's in-memory challenge rate limit is per core process.
 - The macaroon-only path decodes the macaroon to learn the payment hash. A garbage token becomes a fresh 402.
