@@ -736,7 +736,7 @@ def test_migration_adds_the_hash_column_and_leaves_old_rows_unlimited(tmp_path):
     assert "idx_challenges_buyer" in indexes
 
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.14.1"
+        assert http.get("/health").json()["version"] == "0.14.2"
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})
         assert balance.status_code == 200
         assert balance.json()["credits"] == 7
@@ -747,6 +747,85 @@ def test_migration_adds_the_hash_column_and_leaves_old_rows_unlimited(tmp_path):
         assert first.json()["buyer_ip_accepted"] is False
         assert second.json()["payment_hash"] != first.json()["payment_hash"]
         assert _hash_column(first.json()["payment_hash"]) is None
+
+
+def test_unpaid_price_quotes_stop_counting_after_the_short_window(tmp_path, monkeypatch):
+    """Six unpaid price requests do not 429 once the short slot has passed.
+
+    The BOLT11 invoice stays payable, and a LUD-21 status check still runs.
+    """
+    module = _load_app(
+        tmp_path,
+        SATSGATE_TRUSTED_PROXIES="testclient",
+        SATSGATE_BUYER_CHALLENGE_MAX="100",
+        SATSGATE_BUYER_MAX_OPEN_CHALLENGES="5",
+        SATSGATE_CHALLENGE_REUSE_SECONDS="0",
+        SATSGATE_X402_OFFER_SECONDS="60",
+    )
+    from app.invoices import InvoiceValidationError
+
+    with TestClient(module.app) as http:
+        api_key = _buy_client(http)
+        issued = []
+        for index in range(5):
+            response = _challenge(http, api_key, resource=f"api/price-{index}", buyer_ip="203.0.113.80")
+            assert response.status_code == 200, response.text
+            body = response.json()
+            assert body["invoice_expires_at"] - int(time.time()) > 300
+            issued.append(body)
+        blocked = _challenge(http, api_key, resource="api/price-blocked", buyer_ip="203.0.113.80")
+        assert blocked.status_code == 429, blocked.text
+        assert blocked.json()["error"] == "too_many_open_challenges_for_buyer"
+        retry_after = int(blocked.headers["retry-after"])
+        assert blocked.json()["retry_after_seconds"] == retry_after
+        assert 1 <= retry_after <= 65
+
+        aged = int(time.time()) - 120
+        with sqlite3.connect(os.environ["SATSGATE_DB_PATH"]) as conn:
+            conn.execute("UPDATE paywall_challenges SET created_at = ?", (aged,))
+        again = _challenge(http, api_key, resource="api/price-again", buyer_ip="203.0.113.80")
+        assert again.status_code == 200, again.text
+
+        def not_settled(**_kwargs):
+            raise InvoiceValidationError("lud21_not_settled")
+
+        monkeypatch.setattr(module.wallet_lnaddr, "confirm_lud21", not_settled)
+        first = issued[0]
+        with sqlite3.connect(os.environ["SATSGATE_DB_PATH"]) as conn:
+            conn.execute(
+                "UPDATE paywall_challenges SET verify_url = ? WHERE payment_hash = ?",
+                ("https://pay.example/verify", first["payment_hash"]),
+            )
+            stored = conn.execute(
+                "SELECT expires_at FROM paywall_challenges WHERE payment_hash = ?",
+                (first["payment_hash"],),
+            ).fetchone()
+        assert int(stored[0]) > int(time.time()) + 300
+        pending = http.get(
+            f"/v1/paywall/status/{first['payment_hash']}",
+            headers={"X-Api-Key": api_key, "Authorization": f"L402 {first['macaroon']}"},
+            params={"expected_resource": "api/price-0", "charge": "false"},
+        )
+        assert pending.status_code == 200, pending.text
+        assert pending.json()["status"] == "pending"
+        assert pending.json()["charged_credits"] == 0
+
+        confirmed = http.post(
+            "/v1/paywall/verify",
+            headers={"X-Api-Key": api_key, "Authorization": _pay(http, issued[1])},
+            json={"expected_resource": "api/price-1", "charge": False},
+        )
+        assert confirmed.status_code == 200, confirmed.text
+        assert confirmed.json()["charged_credits"] == 0
+        before = http.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+        charged = http.post(
+            "/v1/paywall/charge",
+            headers={"X-Api-Key": api_key, "Authorization": _pay(http, issued[1])},
+            json={"expected_resource": "api/price-1", "payment_hash": issued[1]["payment_hash"]},
+        )
+        assert charged.status_code == 200, charged.text
+        assert charged.json()["charged_credits"] == 1
+        assert http.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before - 1
 
 
 class _TestClientTransport(httpx.BaseTransport):

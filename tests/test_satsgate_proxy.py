@@ -124,6 +124,8 @@ class World(httpx.AsyncBaseTransport):
         self.core_calls.append(snap)
         if request.url.path.endswith("/challenge"):
             return self._challenge(snap)
+        if request.url.path.endswith("/charge"):
+            return self._unlock(snap)
         if request.url.path.endswith("/verify") or "/status/" in request.url.path:
             return self._unlock(snap)
         return httpx.Response(500, json={"ok": False, "error": "unexpected"})
@@ -238,8 +240,8 @@ def test_example_config_loads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_versions() -> None:
-    assert __version__ == "0.8.0"
-    assert 'APP_VERSION = "0.14.1"' in (ROOT / "app" / "config.py").read_text(encoding="utf-8")
+    assert __version__ == "0.12.0"
+    assert 'APP_VERSION = "0.14.2"' in (ROOT / "app" / "config.py").read_text(encoding="utf-8")
 
 
 def test_globs() -> None:
@@ -411,7 +413,7 @@ def test_health_and_free_and_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     with _client(settings, world) as client:
         health = client.get("/healthz")
         assert health.status_code == 200
-        assert health.json() == {"ok": True, "component": "satsgate-proxy", "version": "0.8.0"}
+        assert health.json() == {"ok": True, "component": "satsgate-proxy", "version": "0.12.0"}
         assert client.head("/healthz").status_code == 200
         free = client.get("/health", headers={"Authorization": "Bearer keep-me", "X-Satsgate-Payment-Hash": "forged"})
         missing = client.get("/nope")
@@ -507,7 +509,9 @@ def test_paid_preimage_forwards_and_signs(tmp_path: Path, monkeypatch: pytest.Mo
     verify = world.core_calls[0]
     assert verify["path"].endswith("/verify")
     assert verify["body"]["consume"] is True
+    assert verify["body"]["charge"] is False
     assert verify["body"]["expected_resource"] == "route:article"
+    assert world.core_calls[1]["path"].endswith("/charge")
     assert verify["headers"]["authorization"] == f"L402 {mac}:{PREIMAGE}"
     upstream = world.up_calls[0]
     assert upstream["raw_path"] == "/blog/post?file=a%20b"
@@ -547,11 +551,11 @@ def test_lsat_and_mac_only_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert "www-authenticate" not in pending.headers
     assert pending.headers["retry-after"] == "2"
     assert pending.json()["hint"]
-    status_call = world.core_calls[1]
-    assert "/status/" in status_call["path"]
+    status_call = next(call for call in world.core_calls if "/status/" in call["path"])
     assert ":" not in status_call["headers"]["authorization"].split(" ", 1)[1]
     query = parse_qs(status_call["query"])
     assert query["consume"] == ["true"]
+    assert query["charge"] == ["false"]
     assert query["expected_resource"] == ["route:article"]
     assert paid.status_code == 200
     assert len(world.up_calls) == 2
@@ -617,8 +621,8 @@ def test_upstream_failures_spend_the_use(tmp_path: Path, monkeypatch: pytest.Mon
         timeout = client.get("/blog/a", headers=header)
     assert timeout.status_code == 504
     assert timeout.json()["error"] == "upstream_timeout"
-    assert timeout.json()["use_spent"] is True
-    assert "not refunded" in timeout.json()["note"]
+    assert timeout.json()["use_spent"] is False
+    assert "note" not in timeout.json()
     assert "secret-upstream" not in timeout.text
     assert len(world.core_calls) == 1
 
@@ -628,7 +632,7 @@ def test_upstream_failures_spend_the_use(tmp_path: Path, monkeypatch: pytest.Mon
         down = client.get("/blog/a", headers=header)
     assert down.status_code == 502
     assert down.json()["error"] == "upstream_unavailable"
-    assert down.json()["use_spent"] is True
+    assert down.json()["use_spent"] is False
     assert "secret-upstream" not in down.text
 
     world = World()
@@ -639,7 +643,7 @@ def test_upstream_failures_spend_the_use(tmp_path: Path, monkeypatch: pytest.Mon
     assert redirect.json()["error"] == "upstream_redirect"
     assert "location" not in redirect.headers
     assert "secret-upstream" not in redirect.text
-    assert redirect.json()["use_spent"] is True
+    assert redirect.json()["use_spent"] is False
 
     world = World()
     world.upstream = "huge"
@@ -648,7 +652,7 @@ def test_upstream_failures_spend_the_use(tmp_path: Path, monkeypatch: pytest.Mon
     assert huge.status_code == 502
     assert huge.json()["error"] == "upstream_response_too_large"
     assert "Z" * 20 not in huge.text
-    assert huge.json()["use_spent"] is True
+    assert huge.json()["use_spent"] is False
 
     world = World()
     world.upstream = "error"

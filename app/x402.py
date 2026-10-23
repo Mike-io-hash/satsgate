@@ -122,6 +122,7 @@ def offer_timeout_seconds() -> int:
     ``SATSGATE_X402_OFFER_SECONDS`` is clamped into 60..300 here. A Lightning
     invoice and its macaroon keep their own lifetime. This window does not
     shorten that invoice, and the invoice expiry does not stretch this offer.
+    An unpaid Lightning quote occupies the buyer cap only for this same window.
     """
     return min(300, max(60, int(config.X402_OFFER_SECONDS)))
 

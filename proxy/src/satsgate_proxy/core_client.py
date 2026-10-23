@@ -76,6 +76,12 @@ class Challenge:
     amount_sats: int
     www_authenticate: str
     resource: str
+    payment_required: str = ""
+    x402: dict | None = None
+
+    @property
+    def offers_x402(self) -> bool:
+        return bool(self.payment_required and self.x402)
 
 
 @dataclass(frozen=True)
@@ -85,7 +91,11 @@ class CoreResult:
     retry_after: int | None = None
     payment_hash: str = ""
     amount_sats: int | None = None
+    amount_usd_atomic: int | None = None
     challenge: Challenge | None = None
+    payment_response: str = ""
+    reason: str = ""
+    http_status: int = 0
 
 
 def _json_body(response: httpx.Response) -> dict:
@@ -200,11 +210,20 @@ async def _send(client: httpx.AsyncClient, request: httpx.Request, timeout: floa
     return await client.send(request, follow_redirects=False)
 
 
+def _resource_url(settings: Settings, path: str) -> str:
+    base = settings.public_base.rstrip("/")
+    if not path.startswith("/"):
+        path = "/" + path
+    return base + path
+
+
 async def create_challenge(
     client: httpx.AsyncClient,
     settings: Settings,
     route: Route,
     buyer_ip: str | None,
+    *,
+    request_path: str,
 ) -> CoreResult:
     max_uses, access_seconds = route.access.policy()
     payload: dict[str, object] = {
@@ -217,6 +236,9 @@ async def create_challenge(
         payload["max_uses"] = max_uses
     if access_seconds is not None:
         payload["access_seconds"] = access_seconds
+    if route.x402:
+        payload["x402"] = True
+        payload["resource_url"] = _resource_url(settings, request_path)
     request = client.build_request(
         "POST",
         f"{settings.core_base_url}/v1/paywall/challenge",
@@ -249,31 +271,65 @@ async def create_challenge(
     invoice = body.get("invoice")
     payment_hash = body.get("payment_hash")
     expires = body.get("invoice_expires_at")
-    if not isinstance(macaroon, str) or not isinstance(invoice, str) or not isinstance(payment_hash, str):
+    offers_x402 = bool(body.get("payment_required")) and isinstance(body.get("x402"), dict)
+    if not offers_x402 and (
+        not isinstance(macaroon, str) or not isinstance(invoice, str) or not isinstance(payment_hash, str)
+    ):
         log.warning("core challenge missing macaroon, invoice, or payment_hash")
         return CoreResult(action="unavailable", error="paywall_unavailable")
+    if offers_x402 and not isinstance(macaroon, str):
+        macaroon = ""
+        invoice = ""
+        payment_hash = ""
     amount = body.get("amount_sats")
-    if not _HEX64.fullmatch(payment_hash) or isinstance(expires, bool) or not isinstance(expires, int):
+    if (
+        not isinstance(payment_hash, str)
+        or not _HEX64.fullmatch(payment_hash)
+        or isinstance(expires, bool)
+        or not isinstance(expires, int)
+    ):
         log.warning("core challenge has a bad payment_hash or expiry")
         return CoreResult(action="unavailable", error="paywall_unavailable")
-    if amount != route.price_sats:
+    if isinstance(amount, int) and not isinstance(amount, bool) and amount != route.price_sats:
         log.warning("core challenge amount did not match the route")
         return CoreResult(action="unavailable", error="paywall_unavailable")
-    try:
-        header = _www_authenticate(macaroon, invoice, body.get("www_authenticate"))
-    except ValueError:
-        log.warning("core challenge header was rejected")
+    header = ""
+    if isinstance(macaroon, str) and macaroon and isinstance(invoice, str) and invoice:
+        try:
+            header = _www_authenticate(macaroon, invoice, body.get("www_authenticate"))
+        except ValueError:
+            log.warning("core challenge header was rejected")
+            return CoreResult(action="unavailable", error="paywall_unavailable")
+    payment_required = ""
+    x402_body = None
+    if offers_x402:
+        encoded = body.get("payment_required")
+        quoted = body.get("x402")
+        if not isinstance(encoded, str) or not encoded or any(char in encoded for char in "\r\n"):
+            log.warning("core challenge x402 header was rejected")
+            return CoreResult(action="unavailable", error="paywall_unavailable")
+        if not isinstance(quoted, dict):
+            return CoreResult(action="unavailable", error="paywall_unavailable")
+        payment_required = encoded
+        x402_body = quoted
+    if not header and not payment_required:
         return CoreResult(action="unavailable", error="paywall_unavailable")
+    if not isinstance(payment_hash, str):
+        payment_hash = ""
+    if not isinstance(expires, int) or isinstance(expires, bool):
+        expires = 0
     return CoreResult(
         action="challenge",
         challenge=Challenge(
-            macaroon=macaroon,
-            invoice=invoice,
+            macaroon=macaroon if isinstance(macaroon, str) else "",
+            invoice=invoice if isinstance(invoice, str) else "",
             payment_hash=payment_hash.lower(),
             invoice_expires_at=expires,
             amount_sats=route.price_sats,
             www_authenticate=header,
             resource=route.resource,
+            payment_required=payment_required,
+            x402=x402_body,
         ),
     )
 
@@ -288,7 +344,7 @@ async def unlock_with_preimage(
         "POST",
         f"{settings.core_base_url}/v1/paywall/verify",
         headers=_auth_headers(settings, None, authorization),
-        json={"expected_resource": route.resource, "cost_credits": 1, "consume": True},
+        json={"expected_resource": route.resource, "cost_credits": 1, "consume": True, "charge": False},
     )
     try:
         response = await _send(client, request, settings.core_timeout)
@@ -313,7 +369,7 @@ async def unlock_without_preimage(
         "GET",
         f"{settings.core_base_url}/v1/paywall/status/{payment_hash}",
         headers=_auth_headers(settings, None, authorization),
-        params={"expected_resource": route.resource, "cost_credits": 1, "consume": "true"},
+        params={"expected_resource": route.resource, "cost_credits": 1, "consume": "true", "charge": "false"},
     )
     try:
         response = await _send(client, request, settings.core_timeout)
@@ -324,3 +380,132 @@ async def unlock_without_preimage(
         log.warning("core status failed")
         return CoreResult(action="unavailable", error="paywall_unavailable")
     return _unlock_result(response, default_retry=settings.pending_retry_after)
+
+
+def _nonce_hex(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("nonce")
+    text = value.strip().lower()
+    if text.startswith("0x"):
+        text = text[2:]
+    if not _HEX64.fullmatch(text):
+        raise ValueError("nonce")
+    return text
+
+
+async def charge_lightning(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    route: Route,
+    *,
+    authorization: str,
+    payment_hash: str,
+) -> CoreResult:
+    """Take the credit only after the origin returned 2xx."""
+    request = client.build_request(
+        "POST",
+        f"{settings.core_base_url}/v1/paywall/charge",
+        headers=_auth_headers(settings, None, authorization),
+        json={"expected_resource": route.resource, "payment_hash": payment_hash, "cost_credits": 1},
+    )
+    try:
+        response = await _send(client, request, settings.core_timeout)
+    except httpx.TimeoutException:
+        log.warning("core charge timed out")
+        return CoreResult(action="unavailable", error="paywall_unavailable")
+    except httpx.HTTPError:
+        log.warning("core charge failed")
+        return CoreResult(action="unavailable", error="paywall_unavailable")
+    body = _json_body(response)
+    error = _error_code(body)
+    if response.status_code == 200 and body.get("settled") is True:
+        return CoreResult(action="charged", payment_hash=payment_hash)
+    if response.status_code == 401 and error in FRESH_REASONS:
+        return CoreResult(action="fresh", error=error)
+    log.warning("core charge unavailable http %s error %s", response.status_code, error or "unavailable")
+    return CoreResult(action="unavailable", error="paywall_unavailable")
+
+
+def _x402_outcome(response: httpx.Response, *, settle: bool) -> CoreResult:
+    body = _json_body(response)
+    error = _error_code(body)
+    status = response.status_code
+    if status == 200 and not settle and body.get("serve") is True:
+        try:
+            amount = body.get("amount_usd_atomic")
+            if isinstance(amount, bool) or not isinstance(amount, int) or amount < 1:
+                raise ValueError("amount")
+            nonce = _nonce_hex(body.get("nonce"))
+        except ValueError:
+            log.warning("x402 verify response was missing the locked amount or nonce")
+            return CoreResult(action="unavailable", error="paywall_unavailable")
+        return CoreResult(action="serve", payment_hash=nonce, amount_usd_atomic=amount)
+    if status == 200 and settle:
+        header = response.headers.get("payment-response")
+        encoded = header.strip() if isinstance(header, str) and header.strip() else body.get("payment_response")
+        if not isinstance(encoded, str) or not encoded.strip() or any(char in encoded for char in "\r\n"):
+            log.warning("x402 settle response had no PAYMENT-RESPONSE")
+            return CoreResult(action="unavailable", error="paywall_unavailable")
+        return CoreResult(action="settled", payment_response=encoded.strip())
+    reason = body.get("reason")
+    if not isinstance(reason, str) or not _PUBLIC_CODE.fullmatch(reason):
+        reason = ""
+    if status in {400, 402, 409} and _PUBLIC_CODE.fullmatch(error):
+        log.info("x402 core rejected http %s error %s", status, error)
+        return CoreResult(action="rejected", error=error, reason=reason, http_status=status)
+    log.warning("x402 core unavailable http %s error %s", status, error or "unavailable")
+    return CoreResult(action="unavailable", error="paywall_unavailable")
+
+
+async def _x402_post(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    route: Route,
+    payment_signature: str,
+    *,
+    request_path: str,
+    settle: bool,
+) -> CoreResult:
+    path = "/v1/paywall/x402/settle" if settle else "/v1/paywall/x402/verify"
+    request = client.build_request(
+        "POST",
+        f"{settings.core_base_url}{path}",
+        headers=_auth_headers(settings, None),
+        json={
+            "resource": route.resource,
+            "resource_url": _resource_url(settings, request_path),
+            "payment_signature": payment_signature,
+        },
+    )
+    label = "settle" if settle else "verify"
+    try:
+        response = await _send(client, request, settings.core_timeout)
+    except httpx.TimeoutException:
+        log.warning("core x402 %s timed out", label)
+        return CoreResult(action="unavailable", error="paywall_unavailable")
+    except httpx.HTTPError:
+        log.warning("core x402 %s failed", label)
+        return CoreResult(action="unavailable", error="paywall_unavailable")
+    return _x402_outcome(response, settle=settle)
+
+
+async def verify_x402(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    route: Route,
+    payment_signature: str,
+    *,
+    request_path: str,
+) -> CoreResult:
+    return await _x402_post(client, settings, route, payment_signature, request_path=request_path, settle=False)
+
+
+async def settle_x402(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    route: Route,
+    payment_signature: str,
+    *,
+    request_path: str,
+) -> CoreResult:
+    return await _x402_post(client, settings, route, payment_signature, request_path=request_path, settle=True)

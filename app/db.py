@@ -820,6 +820,17 @@ def _sum_counts(left, right) -> tuple[int, int | None]:
     return count, (min(int(stamp) for stamp in stamps) if stamps else None)
 
 
+def _lightning_slot_seconds() -> int:
+    """How long an unpaid Lightning quote holds a cap slot.
+
+    The BOLT11 invoice can stay payable much longer. The slot matches the x402
+    offer window, so asking for the price does not occupy the cap for a day.
+    """
+    from .x402 import offer_timeout_seconds
+
+    return offer_timeout_seconds()
+
+
 def _buyer_open_row(
     conn: sqlite3.Connection,
     *,
@@ -828,36 +839,45 @@ def _buyer_open_row(
     now: int,
     scope: str,
     api_key_id: int | None,
+    slot_seconds: int,
 ):
-    """Unpaid Lightning challenges that have not expired. The second column is the soonest expiry."""
+    """Unpaid Lightning quotes still inside the short cap slot.
+
+    The second column is the soonest of the invoice expiry and the slot end.
+    A longer invoice that has left the slot does not count.
+    """
+    window = int(slot_seconds)
     if scope == "key" and api_key_id is None:
         return conn.execute(
             """
-            SELECT COUNT(*), MIN(expires_at)
+            SELECT COUNT(*),
+                   MIN(CASE WHEN expires_at < created_at + ? THEN expires_at ELSE created_at + ? END)
             FROM paywall_challenges
             WHERE client_id = ? AND buyer_ip_hash = ? AND settled_at IS NULL
-              AND expires_at > ? AND api_key_id IS NULL
+              AND expires_at > ? AND created_at + ? > ? AND api_key_id IS NULL
             """,
-            (client_id, buyer_ip_hash, now),
+            (window, window, client_id, buyer_ip_hash, now, window, now),
         ).fetchone()
     if scope == "key":
         return conn.execute(
             """
-            SELECT COUNT(*), MIN(expires_at)
+            SELECT COUNT(*),
+                   MIN(CASE WHEN expires_at < created_at + ? THEN expires_at ELSE created_at + ? END)
             FROM paywall_challenges
             WHERE client_id = ? AND buyer_ip_hash = ? AND settled_at IS NULL
-              AND expires_at > ? AND api_key_id = ?
+              AND expires_at > ? AND created_at + ? > ? AND api_key_id = ?
             """,
-            (client_id, buyer_ip_hash, now, int(api_key_id)),
+            (window, window, client_id, buyer_ip_hash, now, window, now, int(api_key_id)),
         ).fetchone()
     return conn.execute(
         """
-        SELECT COUNT(*), MIN(expires_at)
+        SELECT COUNT(*),
+               MIN(CASE WHEN expires_at < created_at + ? THEN expires_at ELSE created_at + ? END)
         FROM paywall_challenges
         WHERE client_id = ? AND buyer_ip_hash = ? AND settled_at IS NULL
-          AND expires_at > ?
+          AND expires_at > ? AND created_at + ? > ?
         """,
-        (client_id, buyer_ip_hash, now),
+        (window, window, client_id, buyer_ip_hash, now, window, now),
     ).fetchone()
 
 
@@ -883,7 +903,10 @@ def enforce_challenge_capacity(
 
     The per-buyer open cap counts one rail. Lightning invoices do not fill the
     x402 budget, and x402 offers do not fill the Lightning budget. An expired
-    row does not count. Retry-After is the soonest expiry of the rows that do.
+    row does not count. An unpaid Lightning invoice counts only until the short
+    offer window (the same clamp as an x402 offer), even when the BOLT11 lives
+    longer. Paying it, or checking LUD-21, still uses the real invoice expiry.
+    Retry-After is the soonest slot end of the rows that still count.
     The per-minute rate still counts recent creates on both rails together.
     """
     if buyer_ip_hash and int(buyer_rate_max) > 0:
@@ -908,9 +931,11 @@ def enforce_challenge_capacity(
         if total >= int(buyer_rate_max):
             raise ChallengeLimit("buyer_rate_limited", _retry_after((earliest or now) + window, now))
 
+    slot_seconds = _lightning_slot_seconds()
     if buyer_ip_hash and int(buyer_max_open) > 0:
         # Unpaid and still inside its own expiry. Grace and the claim cap do
-        # not keep an expired offer in this count.
+        # not keep an expired offer in this count. Lightning also leaves the
+        # count when the short offer window passes.
         if rail == "x402":
             open_row = _offer_open_row(
                 conn,
@@ -928,6 +953,7 @@ def enforce_challenge_capacity(
                 now=int(now),
                 scope=buyer_limit_scope,
                 api_key_id=api_key_id,
+                slot_seconds=slot_seconds,
             )
         open_count = int(open_row[0] or 0) if open_row else 0
         open_deadline = None if open_row is None or open_row[1] is None else int(open_row[1])
@@ -936,11 +962,12 @@ def enforce_challenge_capacity(
 
     open_rows = conn.execute(
         """
-        SELECT COUNT(*), MIN(expires_at)
+        SELECT COUNT(*),
+               MIN(CASE WHEN expires_at < created_at + ? THEN expires_at ELSE created_at + ? END)
         FROM paywall_challenges
-        WHERE client_id = ? AND settled_at IS NULL AND expires_at > ?
+        WHERE client_id = ? AND settled_at IS NULL AND expires_at > ? AND created_at + ? > ?
         """,
-        (int(client_id), int(now)),
+        (slot_seconds, slot_seconds, int(client_id), int(now), slot_seconds, int(now)),
     ).fetchone()
     offer_rows = conn.execute(
         """

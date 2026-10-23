@@ -52,6 +52,8 @@ def filter_request_headers(
         lower = name.lower()
         if lower in blocked or lower.startswith("x-satsgate-"):
             continue
+        if lower in {"payment-signature", "payment-required", "payment-response"}:
+            continue
         text = value.decode("latin-1")
         if not _safe_text(text):
             continue

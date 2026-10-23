@@ -574,6 +574,7 @@ def mark_settled_and_charge(
     max_uses: int | None,
     cost: int,
     now: int,
+    amount_usd_atomic: int,
 ) -> dict:
     """Store the tx and debit one credit. A second call does not debit again."""
     now = int(now)
@@ -626,10 +627,11 @@ def mark_settled_and_charge(
         conn.execute(
             """
             INSERT INTO ledger(
-              client_id, delta_credits, reason, ref, created_at, api_key_id, resource
-            ) VALUES(?, ?, 'paywall_verify', ?, ?, NULL, ?)
+              client_id, delta_credits, reason, ref, created_at, api_key_id, resource,
+              network, amount_usd_atomic
+            ) VALUES(?, ?, 'paywall_verify', ?, ?, NULL, ?, ?, ?)
             """,
-            (int(client_id), -int(cost), tx_hash, now, resource),
+            (int(client_id), -int(cost), tx_hash, now, resource, network, int(amount_usd_atomic)),
         )
         conn.execute(
             """

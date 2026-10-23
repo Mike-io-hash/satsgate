@@ -597,7 +597,7 @@ def test_old_site_routes_keep_their_sats_price(tmp_path):
     assert row == (21, "sats", None)
     price = next(column for column in notnull if column[1] == "price_sats")
     assert price[3] == 0
-    assert module.config.APP_VERSION == "0.14.1"
+    assert module.config.APP_VERSION == "0.14.2"
 
 
 def test_address_change_clears_the_x402_rail(tmp_path, monkeypatch):

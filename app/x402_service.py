@@ -102,6 +102,12 @@ def _store_kwargs(plan: dict, *, pay_to: str | None, requirements: dict | None) 
     }
 
 
+def _bound_url(slug: str, path: str, resource_url: str | None) -> str:
+    if resource_url:
+        return resource_url
+    return x402.resource_url(slug, path)
+
+
 def issue_offer(
     *,
     client_id: int,
@@ -113,9 +119,10 @@ def issue_offer(
     max_uses: int | None,
     access_seconds: int | None,
     buyer_ip_hash: str | None,
+    resource_url: str | None = None,
 ) -> dict:
     now = int(time.time())
-    url = x402.resource_url(slug, path)
+    url = _bound_url(slug, path, resource_url)
     amount = int(plan["x402_atomic"])
     existing = db_x402.find_reusable_offer(
         config.DB_PATH,
@@ -192,9 +199,18 @@ def _require_credit(client_id: int) -> int:
     return credits
 
 
-def verify_payment(*, client_id: int, slug: str, path: str, resource: str, encoded: str) -> dict:
+def verify_payment(
+    *,
+    client_id: int,
+    slug: str,
+    path: str,
+    resource: str,
+    encoded: str,
+    resource_url: str | None = None,
+) -> dict:
     now = int(time.time())
-    payload, offer, fields = _bind(encoded, client_id=client_id, resource=resource, resource_url=x402.resource_url(slug, path))
+    url = _bound_url(slug, path, resource_url)
+    payload, offer, fields = _bind(encoded, client_id=client_id, resource=resource, resource_url=url)
     _require_credit(client_id)
     state = db_x402.insert_pending(
         config.DB_PATH,
@@ -283,10 +299,19 @@ def _serve(offer: dict, payer: str, *, nonce: str) -> dict:
     }
 
 
-def settle_payment(*, client_id: int, slug: str, path: str, resource: str, encoded: str) -> dict:
+def settle_payment(
+    *,
+    client_id: int,
+    slug: str,
+    path: str,
+    resource: str,
+    encoded: str,
+    resource_url: str | None = None,
+) -> dict:
     """Called only after the origin returned 2xx. A failed settle does not debit."""
     now = int(time.time())
-    payload, offer, fields = _bind(encoded, client_id=client_id, resource=resource, resource_url=x402.resource_url(slug, path))
+    url = _bound_url(slug, path, resource_url)
+    payload, offer, fields = _bind(encoded, client_id=client_id, resource=resource, resource_url=url)
     row = db_x402.authorization_row(
         config.DB_PATH,
         network=fields["network"],
@@ -300,7 +325,7 @@ def settle_payment(*, client_id: int, slug: str, path: str, resource: str, encod
         bound = db_x402.get_offer(config.DB_PATH, row["offer_id"])
         if bound is None:
             raise x402.X402Error("bad_signature")
-        bound["resource_url"] = x402.resource_url(slug, path)
+        bound["resource_url"] = url
         fields = x402.validate_payload(payload, offer=bound)
         offer = bound
     if int(row["credit_charged"] or 0) == 1:
@@ -324,6 +349,7 @@ def settle_payment(*, client_id: int, slug: str, path: str, resource: str, encod
             max_uses=offer["max_uses"],
             cost=_COST,
             now=now,
+            amount_usd_atomic=int(offer["amount_usd_atomic"]),
         )
         return _settled_body(charged, fields["payer"])
     locked = db_x402.set_authorization_state(
@@ -420,6 +446,7 @@ def settle_payment(*, client_id: int, slug: str, path: str, resource: str, encod
         max_uses=offer["max_uses"],
         cost=_COST,
         now=now,
+        amount_usd_atomic=int(offer["amount_usd_atomic"]),
     )
     return _settled_body(charged, fields["payer"])
 
