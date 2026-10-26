@@ -42,12 +42,14 @@ The residual risk is accepted. `/settle` can fail after the origin has already r
 
 Lightning money already moves when the invoice is paid, to `clients.payee_lightning_address`, before the origin runs. The Lightning PR does not change that. It changes only when the Satsgate credit and the use counter move.
 
-The facilitator is not us. Testnet calls the public x402.org facilitator, which must advertise `exact` on `eip155:84532` from `GET /supported`. Mainnet calls the Coinbase CDP facilitator only when `SATSGATE_X402_CDP=1`. The default is off. Core is the only process that holds facilitator credentials and the only process that calls `/verify` or `/settle`. The gate and the proxy call core, the same way they call `_unlock_paywall` today.
+The facilitator is not us. Testnet calls the public x402.org facilitator, which must advertise `exact` on `eip155:84532` from `GET /supported`. Mainnet calls the Coinbase CDP facilitator only when `SATSGATE_X402_CDP=1`. The default is off. That switch is not in the shipped code. Core refuses to boot on any network other than `eip155:84532`. Core is the only process that holds facilitator credentials and the only process that calls `/verify` or `/settle`. The gate and the proxy call core, the same way they call `_unlock_paywall` today.
 
-USDC contracts are fixed in config, not taken from the buyer or the merchant:
+USDC contracts are fixed in config, not taken from the buyer or the merchant. Ethereum mainnet, Polygon, Solana, Arbitrum, and any other chain are not accepted.
 
-- Base Sepolia `eip155:84532`: `0x036CbD53842c5426634e7929541eC2318f3dCF7e` (the address in the v2 exact-EVM examples).
-- Base `eip155:8453`: `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`.
+- Base Sepolia `eip155:84532`: [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e) (Circle USDC, the address in the v2 exact-EVM examples). Live today.
+- Base `eip155:8453`: [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) (Circle USDC). Not live. The mainnet switch above is not in this tree.
+
+`payTo` is an address the merchant controls on Base. USDC sent on another network will not be accepted. Satsgate never custodies, receives, forwards, or refunds buyer funds.
 
 `extra.name` is `USDC` and `extra.version` is `2`. `extra.assetTransferMethod` is `eip3009`.
 

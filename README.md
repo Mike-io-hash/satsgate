@@ -22,6 +22,19 @@ It’s a hosted + self-hostable FastAPI service that gives you:
 
 Your users pay **your** Lightning Address (LNURL-pay). satsgate is **non-custodial** (we never hold your funds) and doesn’t require end-user accounts or KYC.
 
+## USDC payments: Base network only
+
+USDC payments use Base only. Ethereum mainnet, Polygon, Solana, Arbitrum, and any other chain are not accepted.
+
+| Network | Network id | Circle USDC contract | Status |
+| --- | --- | --- | --- |
+| Base Sepolia (testnet) | `eip155:84532` | [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e) | Live today. When a merchant turns x402 on, the 402 asks for this USDC. |
+| Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | Not live. Base mainnet comes later, behind a switch. This version has no switch. The process starts only when `SATSGATE_X402_NETWORK` is `eip155:84532`. |
+
+Merchants: `payTo` must be an address you control on Base. The USDC is paid to that address on the network in the table. Buyers: USDC sent on another network will not be accepted. A balance on Ethereum, Polygon, Solana, or Arbitrum does not pay a Satsgate 402.
+
+Satsgate never custodies, receives, forwards, or refunds buyer funds. The USDC moves from the buyer to the merchant's `payTo`. Satsgate does not hold a buyer wallet and does not run its own facilitator.
+
 Hosted beta: https://api.satsgate.org (start in [`CUSTOMER_QUICKSTART.md`](./CUSTOMER_QUICKSTART.md)). Minimum top-up: **1000 sats → 200 payment verifications** (anti-abuse; no expiry).
 
 No LLM in the hot path: satsgate is a lightweight, low-latency “cashier/turnstile” that sits in front of your agent.
@@ -49,7 +62,7 @@ See [`STATUS.md`](./STATUS.md).
 - Contributing: [`CONTRIBUTING.md`](./CONTRIBUTING.md)
 - Changelog: [`CHANGELOG.md`](./CHANGELOG.md)
 - Security: [`SECURITY.md`](./SECURITY.md)
-- x402 design (not implemented): [`docs/x402-design.md`](./docs/x402-design.md)
+- x402 design: [`docs/x402-design.md`](./docs/x402-design.md)
 
 ## Manifest (.well-known)
 
@@ -330,7 +343,7 @@ The gate offers Lightning, x402, or both, matching the site. A Lightning-only 40
 
 `PAYMENT-SIGNATURE` is checked by core (verify, then the origin, then settle). Both payment headers on one request is `400 one_rail_only`. The origin does not see `PAYMENT-SIGNATURE`. A USDC payment is signed with `X-Satsgate-Paid-Usd-Atomic`. The payment-hash header is the EIP-3009 nonce, because the transaction id does not exist until settle, and settle runs after the origin.
 
-Enable it with the account key, not a restricted `sgr_` key:
+Enable it with the account key, not a restricted `sgr_` key. Set `payTo` to an address you control on Base. The live network is Base Sepolia. See [USDC payments: Base network only](#usdc-payments-base-network-only).
 
 1. `POST /v1/client/payee/evm/challenge` with `{"address":"0x..."}`. The response is an EIP-191 message. Nothing is written on chain.
 2. Sign that exact text with `personal_sign` and `POST /v1/client/payee/evm` with `{"address","signature"}`. A bad signature does not replace a stored address.

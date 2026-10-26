@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Core 0.14.3 stores `api_key_id` on a new x402 ledger debit when the settle caller authenticated with a restricted `sgr_` key. That is the proxy's public `POST /v1/paywall/x402/settle`. The hosted gate authenticates with `GATE_TOKEN` and still leaves the column null, as does an account key. Existing rows are not rewritten. No new column and no new table. `payment_offers.api_key_id` stays null. That column is the buyer-limit scope, not this debit.
 - `satsgate-proxy` 0.12.1 logs `key fp` and the first 12 hex characters of SHA-256 of the API key at startup. It does not log any part of the key. `proxy/docker-compose.yml` tags the image `satsgate-proxy:0.12.1`.
+- Docs state the USDC network in plain language: Base only, with `eip155:84532` (Base Sepolia, live) and `eip155:8453` (Base, not live in this version). The Circle contract addresses link to BaseScan. `payTo` has to be an address the merchant controls on Base. USDC sent on another chain is not accepted. No behaviour change.
 
 The MCP package is 0.11.0. The self-hosted proxy is 0.12.1. The hosted gate is 0.13.0. Core health is 0.14.3. No core migration. Copy `satsgate.sqlite3` before restart if you want a rollback point. Rebuild the proxy image and the core image. The gate image stays 0.13.0. An agent that pays USDC sets both USD caps and brings a `PAYMENT-SIGNATURE` from its own wallet. Leave the facilitator at `https://x402.org/facilitator`.
 
