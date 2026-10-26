@@ -48,13 +48,14 @@ def _document(accepts: list[dict]) -> str:
 
 
 def _accept(network: str, asset: str) -> dict:
+    name = "USD Coin" if network == "eip155:8453" else "USDC"
     return {
         "scheme": "exact",
         "network": network,
         "amount": "10000",
         "asset": asset,
         "payTo": _TREASURY,
-        "extra": {"name": "USDC", "version": "2", "assetTransferMethod": "eip3009"},
+        "extra": {"name": name, "version": "2", "assetTransferMethod": "eip3009"},
     }
 
 
@@ -118,11 +119,11 @@ def test_unusable_secret_keeps_mainnet_off_and_does_not_log_the_value(tmp_path, 
         SATSGATE_X402_CDP_KEY_SECRET=secret,
     )
     assert module.config.X402_MAINNET_ENABLED is False
-    assert module.config.APP_VERSION == "0.15.0"
+    assert module.config.APP_VERSION == "0.15.1"
     assert secret not in caplog.text
     assert "USDC mainnet disabled" in caplog.text
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.15.0"
+        assert http.get("/health").json()["version"] == "0.15.1"
         status = http.get("/v1/admin/x402", headers={"X-Admin-Token": "test-admin-token"}).json()
         assert status["mainnet_enabled"] is False
         assert status["cdp"]["reason"] == "credentials"
@@ -171,6 +172,11 @@ def test_new_site_defaults_to_test_and_live_is_rejected_while_the_switch_is_off(
         document = json.loads(base64.b64decode(issued.headers["payment-required"]))
         assert document["accepts"][0]["network"] == "eip155:84532"
         assert len(document["accepts"]) == 1
+        assert document["accepts"][0]["extra"] == {
+            "name": "USDC",
+            "version": "2",
+            "assetTransferMethod": "eip3009",
+        }
         assert body["testing"] is True
         assert body["x402_mode"] == "test"
         assert "testing" not in document["accepts"][0]["extra"]
@@ -209,6 +215,11 @@ def test_live_offer_uses_cdp_and_test_mode_stays_on_x402_org(tmp_path, monkeypat
         document = json.loads(base64.b64decode(issued.headers["payment-required"]))
         assert [item["network"] for item in document["accepts"]] == ["eip155:8453"]
         assert document["accepts"][0]["asset"] == _BASE_USDC
+        assert document["accepts"][0]["extra"] == {
+            "name": "USD Coin",
+            "version": "2",
+            "assetTransferMethod": "eip3009",
+        }
         assert document["resource"]["description"] == ""
         assert issued.json()["testing"] is False
         assert issued.json()["x402_mode"] == "live"
@@ -235,6 +246,7 @@ def test_live_offer_uses_cdp_and_test_mode_stays_on_x402_org(tmp_path, monkeypat
         test_doc = json.loads(base64.b64decode(again.headers["payment-required"]))
         assert test_doc["accepts"][0]["network"] == "eip155:84532"
         assert test_doc["accepts"][0]["asset"] == _SEPOLIA_USDC
+        assert test_doc["accepts"][0]["extra"]["name"] == "USDC"
         assert test_doc["resource"]["description"] == "Test payment on Base Sepolia. Not Base mainnet."
         assert again.json()["testing"] is True
         encoded = _payload(again.headers["payment-required"], buyer, again.json()["expires_at"])
@@ -247,6 +259,51 @@ def test_live_offer_uses_cdp_and_test_mode_stays_on_x402_org(tmp_path, monkeypat
         assert tested.status_code == 200, tested.text
         assert calls[0][0] == "https://x402.org/facilitator/verify"
         assert "Authorization" not in calls[0][1]
+
+
+def test_mainnet_offer_rejects_the_sepolia_eip712_name(tmp_path, monkeypatch) -> None:
+    key_id, secret, _key = _material()
+    module = _load_app(tmp_path, **_cdp_env(key_id, secret))
+    _patch_dns(monkeypatch, module)
+    owner = Account.create()
+    buyer = Account.create()
+    calls = []
+
+    def _post(url, body, headers):
+        calls.append(url)
+        return {"isValid": True}
+
+    with TestClient(module.app) as http:
+        key = _buy(http)
+        _site(http, key, path="/paid", body={"price_currency": "usd", "price_usd_atomic": 10_000})
+        _verify_payee(http, key, owner)
+        live = http.patch(
+            "/v1/sites/my-shop",
+            headers={"X-Api-Key": key},
+            json={"rail_x402": True, "rail_lightning": False, "x402_mode": "live"},
+        )
+        assert live.status_code == 200, live.text
+        importlib.import_module("app.x402_facilitator").poster = _post
+        issued = _gate(http, "POST", "/internal/gate/challenge", json={"slug": "my-shop", "path": "/paid"})
+        document = json.loads(base64.b64decode(issued.headers["payment-required"]))
+        assert document["accepts"][0]["extra"]["name"] == "USD Coin"
+        from test_x402 import _payload
+
+        encoded = _payload(
+            issued.headers["payment-required"],
+            buyer,
+            issued.json()["expires_at"],
+            accepted={"extra": {"name": "USDC", "version": "2", "assetTransferMethod": "eip3009"}},
+        )
+        rejected = _gate(
+            http,
+            "POST",
+            "/internal/gate/x402/verify",
+            json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
+        )
+        assert rejected.status_code == 402, rejected.text
+        assert rejected.json()["error"] == "bad_signature"
+        assert calls == []
 
 
 def test_display_name_patch_does_not_fail_when_stored_live_and_cdp_is_later_off(tmp_path, monkeypatch) -> None:
@@ -304,6 +361,8 @@ def test_topup_is_mainnet_only_while_the_switch_is_on(tmp_path, monkeypatch) -> 
         document = json.loads(base64.b64decode(quoted.headers["payment-required"]))
         assert [item["network"] for item in document["accepts"]] == ["eip155:8453"]
         assert document["accepts"][0]["asset"] == _BASE_USDC
+        assert document["accepts"][0]["extra"]["name"] == "USD Coin"
+        assert document["accepts"][0]["extra"]["version"] == "2"
         assert quoted.json()["testing"] is False
         assert quoted.json()["x402_mode"] == "live"
         from test_x402 import _payload
@@ -323,6 +382,7 @@ def test_topup_is_mainnet_only_while_the_switch_is_on(tmp_path, monkeypatch) -> 
         assert fresh.status_code == 402, fresh.text
         fresh_doc = json.loads(base64.b64decode(fresh.headers["payment-required"]))
         assert fresh_doc["accepts"][0]["network"] == "eip155:84532"
+        assert fresh_doc["accepts"][0]["extra"]["name"] == "USDC"
         assert fresh.json()["testing"] is True
         assert fresh.json()["x402_mode"] == "test"
         started = http.get("/v1/topup/trial", headers={"X-Api-Key": key})

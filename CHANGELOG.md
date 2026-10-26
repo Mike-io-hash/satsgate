@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Core 0.15.1 puts the EIP-712 domain name of that network's USDC contract in `extra`. Base Sepolia (`eip155:84532`) stays `name: USDC`. Base (`eip155:8453`) is `name: USD Coin`. Both keep `version: 2` and `assetTransferMethod: eip3009`. Route offers and credit-pack top-ups use the extra for the network they offer. A payment whose `accepted.extra` does not match that network is rejected before the facilitator is called. No migration. Rebuild the core image. The gate, the proxy, and satsgate-mcp do not compare or hardcode that name, so they stay 0.14.0, 0.13.0, and 0.11.0.
+
+`GET /health` reports `0.15.1`.
+
 ### Added
 - Core 0.15.0 accepts USDC on Base (`eip155:8453`) through the Coinbase CDP facilitator when `SATSGATE_X402_CDP=1` and both `SATSGATE_X402_CDP_KEY_ID` and `SATSGATE_X402_CDP_KEY_SECRET` are set. The default is off. A missing or unusable credential does not refuse boot. Sepolia and Lightning still start. The secret is a CDP Ed25519 API key. It is not logged, not on `/health`, not in the manifest, and not given to the gate. `SATSGATE_X402_NETWORK` must stay `eip155:84532`. Mainnet is the CDP switch, not that variable.
 - A site has one x402 mode. `test` offers only Base Sepolia through `https://x402.org/facilitator`. `live` offers only Base through CDP, and only while the switch is on. One 402 never lists both. A new site leaves the rail off and the mode unset. Turning the rail on without a mode stores `test`, so a merchant does not take real USDC until they ask for live. Test responses set `testing: true` and describe the payment as Base Sepolia, not Base mainnet. Try on Base Sepolia with your agent first, then switch the site to live.
@@ -19,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - The draft terms in `docs/hosted-gate-terms.md` now say that a facilitator can reject a USDC payment, including after the origin ran; that illegal or sanctioned content can be taken down; that credits are not money and are not redeemable; and that the service is not anonymous. On the hosted gate, a credit and a use are taken only after the origin returns 2xx, and for USDC only after settle. A failed origin takes neither. The buyer retries the same macaroon or signature. Lightning sats still reach the merchant when the invoice is paid. Satsgate does not refund buyers. The draft is still pending legal review.
 
-Core health is 0.15.0. The hosted gate is 0.14.0. The self-hosted proxy is 0.13.0. satsgate-mcp stays 0.11.0. Copy `satsgate.sqlite3` before restart. Rebuild the core image, the gate image, and the proxy image. Rollback is `SATSGATE_X402_CDP=0` and a core restart. Live sites stop offering USDC. Test mode and Lightning keep working. The column stays.
+Those notes describe core 0.15.0. Current health is at the top of Unreleased. The hosted gate is 0.14.0. The self-hosted proxy is 0.13.0. satsgate-mcp stays 0.11.0. Copy `satsgate.sqlite3` before restart. Rebuild the core image, the gate image, and the proxy image. Rollback of that release is `SATSGATE_X402_CDP=0` and a core restart. Live sites stop offering USDC. Test mode and Lightning keep working. The column stays.
 
 ### Added
 - `satsgate-mcp` 0.11.0 reads an x402 offer on a 402. `discover`, `quote`, and `pay_and_fetch` parse `PAYMENT-REQUIRED` (x402 v2, scheme `exact`) and show each accept: network, asset, the raw atomic amount, human USDC (6 decimals, so `10000` is `0.01 USDC`), `payTo`, resource URL, scheme, and expiry when the body states one. The header wins when the JSON `x402` mirror disagrees. Amounts are the locked figures on that 402. This process does not recompute them from sats or from a BTC/USD rate. A Lightning-only 402, an x402-only 402, and a 402 that offers both are all returned. A malformed x402 header does not drop a valid Lightning invoice. An unknown network or asset is reported and is not payable. Only USDC on Base Sepolia (`eip155:84532`) and USDC on Base (`eip155:8453`) count as supported. This client does not pay either network.

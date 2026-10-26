@@ -260,7 +260,7 @@ def test_example_config_loads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 def test_versions() -> None:
     assert __version__ == "0.13.0"
-    assert 'APP_VERSION = "0.15.0"' in (ROOT / "app" / "config.py").read_text(encoding="utf-8")
+    assert 'APP_VERSION = "0.15.1"' in (ROOT / "app" / "config.py").read_text(encoding="utf-8")
     compose = (ROOT / "proxy" / "docker-compose.yml").read_text(encoding="utf-8")
     assert f"image: satsgate-proxy:{__version__}" in compose
     assert "satsgate-proxy:0.8.0" not in compose

@@ -2,7 +2,7 @@
 
 A buyer-side MCP server. An agent (Claude Desktop, Cursor, or any stdio MCP client) can see the price of a Satsgate-paywalled URL, pay it, and read the response.
 
-This package is version **0.11.0**. It talks to whatever URL returned the 402. Core is **0.15.0**. The self-hosted proxy is **0.13.0**. The hosted gate is **0.14.0**. A 402 may offer Lightning, x402 (USDC on Base), or both. One 402 lists one USDC network. `list_sites` includes a public route priced only in USD, with `price_currency` and `price_usd_atomic`. This process cannot buy Satsgate credits, and it does not hold a buyer private key. An account tops up on the core: Lightning at `GET /v1/topup/{plan_id}`, or USDC at `GET /v1/topup/{plan_id}/x402` when the operator has set `SATSGATE_TREASURY_EVM_ADDRESS`. While `SATSGATE_X402_CDP` is on, that pack is Base mainnet USDC only. While it is off, the pack stays on Base Sepolia. The USDC path is not an MCP tool.
+This package is version **0.11.0**. It talks to whatever URL returned the 402. Core is **0.15.1**. The self-hosted proxy is **0.13.0**. The hosted gate is **0.14.0**. A 402 may offer Lightning, x402 (USDC on Base), or both. One 402 lists one USDC network. `list_sites` includes a public route priced only in USD, with `price_currency` and `price_usd_atomic`. This process cannot buy Satsgate credits, and it does not hold a buyer private key. An account tops up on the core: Lightning at `GET /v1/topup/{plan_id}`, or USDC at `GET /v1/topup/{plan_id}/x402` when the operator has set `SATSGATE_TREASURY_EVM_ADDRESS`. While `SATSGATE_X402_CDP` is on, that pack is Base mainnet USDC only. While it is off, the pack stays on Base Sepolia. The USDC path is not an MCP tool.
 
 ## USDC payments: Base network only
 
@@ -17,7 +17,7 @@ Merchants: `payTo` must be an address you control on Base. The USDC is paid to t
 
 Satsgate never custodies, receives, forwards, or refunds buyer funds. The USDC moves from the buyer to the merchant's `payTo`. Satsgate does not hold a buyer wallet and does not run its own facilitator.
 
-This MCP server does not send that USDC and does not hold a key. It shows the network and the amount printed on the 402. An accept on any other network is reported and is not payable. A test-mode 402 is Base Sepolia and is labeled testing. A live-mode 402 is Base. This server can describe either. It still does not sign.
+This MCP server does not send that USDC and does not hold a key. It shows the network and the amount printed on the 402. An accept on any other network is reported and is not payable. A test-mode 402 is Base Sepolia and is labeled testing. A live-mode 402 is Base. This server can describe either. It still does not sign. A wallet that signs uses the `extra` on that 402. Base Sepolia is name `USDC`. Base is name `USD Coin`. This server does not substitute a name.
 
 `list_sites` reads `GET /v1/sites` on `SATSGATE_MCP_CORE_URL` (default `https://api.satsgate.org`). That is the public directory: approved sites that opted in. Set `SATSGATE_MCP_REGISTRY` only to replace it with a JSON file or another URL.
 
