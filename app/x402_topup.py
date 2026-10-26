@@ -10,8 +10,6 @@ from __future__ import annotations
 import logging
 import time
 
-from eth_utils import to_checksum_address
-
 from . import config, db_x402, rates, x402, x402_facilitator
 from .plans import Plan
 
@@ -37,16 +35,18 @@ def _treasury() -> str:
 
 def _offer_still_ours(offer: dict, treasury: str) -> None:
     requirements = offer.get("requirements") or {}
+    network = x402.topup_network()
+    expected_asset = x402.usdc_for_network(network)
     if offer.get("pay_to") != treasury or requirements.get("payTo") != treasury:
         raise x402.X402Error("payto_mismatch")
-    if requirements.get("network") != config.X402_NETWORK or offer.get("network") != config.X402_NETWORK:
+    if requirements.get("network") != network or offer.get("network") != network:
         raise x402.X402Error("network_mismatch")
     asset = requirements.get("asset")
     try:
         asset = x402.checksum_address(asset)
     except x402.X402Error:
         raise x402.X402Error("asset_mismatch") from None
-    if asset != to_checksum_address(config.X402_USDC):
+    if asset != expected_asset:
         raise x402.X402Error("asset_mismatch")
     if requirements.get("scheme") != "exact":
         raise x402.X402Error("bad_signature")
@@ -68,6 +68,7 @@ def issue(*, client_id: int, plan: Plan, resource_url: str) -> dict:
     if atomic is None:
         raise x402.X402Error("amount_unavailable", status=400)
     resource = f"v1/topup/{plan.id}"
+    network = x402.topup_network()
     existing = db_x402.find_topup_offer(
         config.DB_PATH,
         client_id=client_id,
@@ -75,6 +76,7 @@ def issue(*, client_id: int, plan: Plan, resource_url: str) -> dict:
         pay_to=treasury,
         amount_usd_atomic=atomic,
         grant_credits=plan.credits,
+        network=network,
         now=now,
     )
     window = timeout_seconds()
@@ -84,6 +86,7 @@ def issue(*, client_id: int, plan: Plan, resource_url: str) -> dict:
             amount=atomic,
             pay_to=treasury,
             timeout_seconds=window,
+            network=network,
         )
         existing = db_x402.create_offer(
             config.DB_PATH,
@@ -124,13 +127,17 @@ def issue(*, client_id: int, plan: Plan, resource_url: str) -> dict:
         "payment_required": x402.b64_json(
             x402.payment_required_document(resource_url=resource_url, accept=existing["requirements"])
         ),
+        "testing": x402.mode_labels(network)["testing"],
+        "x402_mode": x402.mode_labels(network)["x402_mode"],
         "x402": {
             "scheme": "exact",
-            "network": config.X402_NETWORK,
-            "asset": to_checksum_address(config.X402_USDC),
+            "network": network,
+            "asset": x402.usdc_for_network(network),
             "amount": str(int(existing["amount_usd_atomic"])),
             "payTo": treasury,
             "expires_at": existing["expires_at"],
+            "testing": x402.mode_labels(network)["testing"],
+            "x402_mode": x402.mode_labels(network)["x402_mode"],
         },
         "rate": {
             "rate_num": int(existing["rate_num"]),
@@ -328,7 +335,13 @@ def settle(*, client_id: int, plan: Plan, encoded: str) -> dict:
         "credits": granted["credits"],
         "tx": granted["tx_hash"],
         "transaction": granted["tx_hash"],
-        "network": config.X402_NETWORK,
+        "network": fields["network"],
+        "testing": x402.mode_labels(fields["network"])["testing"],
+        "x402_mode": x402.mode_labels(fields["network"])["x402_mode"],
         "amount_usd_atomic": int(offer["amount_usd_atomic"]),
-        "payment_response": x402.payment_response_b64(tx=granted["tx_hash"], payer=fields["payer"]),
+        "payment_response": x402.payment_response_b64(
+            tx=granted["tx_hash"],
+            payer=fields["payer"],
+            network=fields["network"],
+        ),
     }

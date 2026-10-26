@@ -230,16 +230,83 @@ def safe_get_bytes(
         _local.pinned_host = None
 
 
+def _request_headers(extra: dict | None) -> dict[str, str]:
+    headers = {"content-type": "application/json"}
+    if not extra:
+        return headers
+    for key, value in extra.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise SSRFError("invalid_response")
+        if any(char in key or char in value for char in "\r\n\0"):
+            raise SSRFError("invalid_response")
+        headers[key] = value
+    return headers
+
+
+def safe_get_response(
+    url: str,
+    *,
+    headers: dict | None = None,
+    resolver: Callable | None = None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> tuple[int, bytes]:
+    """GET and return status plus a capped body. Redirects are rejected.
+
+    A non-200 is returned, not raised, so a caller can tell auth from a crash.
+    Header values are not logged.
+    """
+    guarded = guard_url(url, resolver=resolver)
+    request_headers = _request_headers(headers)
+    request_headers.pop("content-type", None)
+    http = _shared_client()
+    _local.pinned_ip = guarded.ip
+    _local.pinned_host = guarded.host
+    try:
+        with http.stream(
+            "GET",
+            guarded.url,
+            headers=request_headers,
+            timeout=timeout,
+            follow_redirects=False,
+        ) as response:
+            if 300 <= response.status_code < 400:
+                raise SSRFError("redirects_not_allowed")
+            declared = response.headers.get("content-length")
+            if declared is not None:
+                try:
+                    if int(declared) > MAX_RESPONSE_BYTES:
+                        raise SSRFError("response_too_large")
+                except ValueError as exc:
+                    raise SSRFError("invalid_response") from exc
+            chunks: list[bytes] = []
+            total = 0
+            for chunk in response.iter_bytes():
+                total += len(chunk)
+                if total > MAX_RESPONSE_BYTES:
+                    raise SSRFError("response_too_large")
+                chunks.append(chunk)
+            return response.status_code, b"".join(chunks)
+    except SSRFError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise SSRFError("fetch_failed") from exc
+    finally:
+        _local.pinned_ip = None
+        _local.pinned_host = None
+
+
 def safe_post_json(
     url: str,
     payload: dict,
     *,
+    headers: dict | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     resolver: Callable | None = None,
 ) -> tuple[int, dict | None]:
     """POST JSON and return status plus a dict body. Redirects are rejected.
 
     A non-JSON body comes back as None. The caller decides what a non-200 means.
+    Extra headers (an Authorization bearer) are not logged.
     """
     guarded = guard_url(url, resolver=resolver)
     raw = json.dumps(payload).encode("utf-8")
@@ -252,7 +319,7 @@ def safe_post_json(
         response = http.post(
             guarded.url,
             content=raw,
-            headers={"content-type": "application/json"},
+            headers=_request_headers(headers),
             timeout=timeout,
             follow_redirects=False,
         )

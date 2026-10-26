@@ -238,6 +238,7 @@ async def create_challenge(
         payload["access_seconds"] = access_seconds
     if route.x402:
         payload["x402"] = True
+        payload["x402_mode"] = route.x402_mode or "test"
         payload["resource_url"] = _resource_url(settings, request_path)
     request = client.build_request(
         "POST",

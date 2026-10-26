@@ -258,6 +258,8 @@ def _migrate_x402(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE sites ADD COLUMN rail_lightning INTEGER NOT NULL DEFAULT 1")
     if "rail_x402" not in site_cols:
         conn.execute("ALTER TABLE sites ADD COLUMN rail_x402 INTEGER NOT NULL DEFAULT 0")
+    if "x402_mode" not in site_cols:
+        conn.execute("ALTER TABLE sites ADD COLUMN x402_mode TEXT NOT NULL DEFAULT ''")
 
     info = conn.execute("PRAGMA table_info(site_routes)").fetchall()
     by_name = {row["name"]: row for row in info}

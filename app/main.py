@@ -847,6 +847,14 @@ class SiteUpdateIn(BaseModel):
     listed: bool | None = None
     rail_lightning: bool | None = None
     rail_x402: bool | None = None
+    x402_mode: str | None = Field(
+        default=None,
+        description=(
+            "Exclusive USDC mode. test offers only Base Sepolia. live offers only Base "
+            "and requires the operator CDP switch. A new site leaves this unset. "
+            "Turning x402 on without a mode stores test."
+        ),
+    )
 
 
 class RouteCreateIn(BaseModel):
@@ -962,7 +970,7 @@ def v1_sites_update(
     if isinstance(auth, JSONResponse):
         return auth
     fields = body.model_fields_set
-    if "rail_lightning" in fields or "rail_x402" in fields:
+    if "rail_lightning" in fields or "rail_x402" in fields or "x402_mode" in fields:
         if auth.scope != db_keys.SCOPE_ACCOUNT:
             return _insufficient_scope(auth.scope)
     try:
@@ -977,6 +985,8 @@ def v1_sites_update(
             set_description="description" in fields,
             rail_lightning=body.rail_lightning if "rail_lightning" in fields else None,
             rail_x402=body.rail_x402 if "rail_x402" in fields else None,
+            x402_mode=body.x402_mode if "x402_mode" in fields else None,
+            set_x402_mode="x402_mode" in fields,
         )
     except (ValueError, db_sites.OriginError) as exc:
         return _sites_error(exc)
@@ -1410,12 +1420,15 @@ def v1_topup_x402(
     x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
     payment_signature: str | None = Header(default=None, alias="PAYMENT-SIGNATURE"),
 ):
-    """Buy a credit pack with USDC on Base Sepolia.
+    """Buy a credit pack with USDC.
 
-    No `PAYMENT-SIGNATURE`: 402 and `PAYMENT-REQUIRED` (scheme `exact`, payTo
-    the treasury, amount from the locked BTC/USD quote). With that header:
-    verify, settle, then grant credits. A failed settle grants nothing.
-    Credits are not redeemable for USDC. Lightning top-up is a different path.
+    While the operator CDP switch is on, the only network is Base
+    (`eip155:8453`) through the CDP facilitator. While it is off, the only
+    network is Base Sepolia (`eip155:84532`). Credits are not sold for testnet
+    USDC once mainnet is on. No `PAYMENT-SIGNATURE`: 402 and `PAYMENT-REQUIRED`
+    (scheme `exact`, payTo the treasury, amount from the locked BTC/USD quote).
+    With that header: verify, settle, then grant credits. A failed settle grants
+    nothing. Credits are not redeemable for USDC. Lightning top-up is separate.
     """
     try:
         plan = get_plan(plan_id)
@@ -1621,6 +1634,14 @@ class PaywallChallengeIn(BaseModel):
         default=None,
         max_length=500,
         description="Public http(s) URL the buyer will pay. Required when x402 is true.",
+    )
+    x402_mode: str | None = Field(
+        default=None,
+        description=(
+            "test or live. Omitted with x402 true means test (Base Sepolia). "
+            "live offers only Base and requires the operator CDP switch. "
+            "The two networks are never in the same 402."
+        ),
     )
 
 
@@ -1893,8 +1914,9 @@ def _attach_x402_quote(
             content={"ok": False, "error": "payee_evm_not_verified"},
             headers={"Cache-Control": "no-store"},
         )
+    mode = body.x402_mode or "test"
     plan = x402_service.quote_plan(
-        {"rail_lightning": 1, "rail_x402": 1},
+        {"rail_lightning": 1, "rail_x402": 1, "x402_mode": mode},
         {
             "price_currency": "sats",
             "price_sats": int(lightning_body["amount_sats"]),
@@ -1956,7 +1978,26 @@ def v1_paywall_challenge(
     auth = _paywall_principal(x_api_key, body.resource)
     if isinstance(auth, JSONResponse):
         return auth
+    if body.x402_mode is not None and not body.x402:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": "x402_mode_invalid"},
+            headers={"Cache-Control": "no-store"},
+        )
     if body.x402:
+        mode = body.x402_mode or "test"
+        if mode not in {"test", "live"}:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "x402_mode_invalid"},
+                headers={"Cache-Control": "no-store"},
+            )
+        if mode == "live" and not x402_mod.mainnet_enabled():
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "x402_mainnet_disabled"},
+                headers={"Cache-Control": "no-store"},
+            )
         if _http_resource_url(body.resource_url) is None:
             return JSONResponse(
                 status_code=400,

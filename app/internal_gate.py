@@ -244,7 +244,12 @@ def internal_challenge(
         if not pay_to:
             plan["x402_atomic"] = None
     if plan["lightning_sats"] is None and plan["x402_atomic"] is None:
-        code = "payee_evm_not_verified" if plan["x402_on"] and not pay_to else "rail_unavailable"
+        if plan.get("x402_blocked"):
+            code = "x402_mainnet_disabled"
+        elif bool(int(site.get("rail_x402", 0))) and not pay_to:
+            code = "payee_evm_not_verified"
+        else:
+            code = "rail_unavailable"
         return JSONResponse(status_code=400, content={"ok": False, "error": code}, headers=_NO_STORE)
 
     peer = request.client.host if request.client else None
@@ -349,12 +354,16 @@ def _lock_lightning_offer(
     now = int(time.time())
     offer = db_x402.offer_by_payment_hash(config.DB_PATH, str(body["payment_hash"]))
     window = x402.offer_timeout_seconds()
+    stored_requirements = offer.get("requirements") if offer is not None else None
     quote_live = (
         plan["x402_on"]
         and pay_to
         and offer is not None
         and int(offer["expires_at"]) > now
         and offer.get("pay_to") == pay_to
+        and offer.get("network") == plan.get("x402_network")
+        and isinstance(stored_requirements, dict)
+        and stored_requirements.get("network") == plan.get("x402_network")
         and offer.get("amount_usd_atomic")
         and offer.get("requirements")
     )
@@ -379,6 +388,7 @@ def _lock_lightning_offer(
             amount=int(plan["x402_atomic"]),
             pay_to=pay_to,
             timeout_seconds=window,
+            network=plan.get("x402_network") or x402.NETWORK_SEPOLIA,
         )
         stored_pay_to = pay_to
         offer_expires = now + window

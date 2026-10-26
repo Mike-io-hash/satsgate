@@ -148,6 +148,7 @@ def find_reusable_offer(
     max_uses: int | None,
     access_seconds: int | None,
     now: int,
+    network: str | None = None,
 ) -> dict | None:
     """Reuse the locked quote. The derived amount is not part of the match."""
     if not buyer_ip_hash or config.CHALLENGE_REUSE_SECONDS <= 0:
@@ -162,7 +163,7 @@ def find_reusable_offer(
             return None
         amount_column = "amount_usd_atomic"
         amount = int(main_usd)
-    params = (
+    params: tuple = (
         int(client_id),
         resource,
         price_currency,
@@ -184,6 +185,7 @@ def find_reusable_offer(
           AND buyer_ip_hash = ?
           AND max_uses IS ?
           AND access_seconds IS ?
+          AND (? IS NULL OR network = ?)
           AND expires_at > ?
           AND created_at >= ?
         ORDER BY created_at DESC
@@ -199,11 +201,13 @@ def find_reusable_offer(
           AND buyer_ip_hash = ?
           AND max_uses IS ?
           AND access_seconds IS ?
+          AND (? IS NULL OR network = ?)
           AND expires_at > ?
           AND created_at >= ?
         ORDER BY created_at DESC
         LIMIT 1
     """
+    params = params[:8] + (network, network) + params[8:]
     with _connect(db_path) as conn:
         row = conn.execute(sats_sql if amount_column == "amount_sats" else usd_sql, params).fetchone()
     return None if row is None else _offer_dict(row)
@@ -243,8 +247,12 @@ def create_offer(
         stored = dict(requirements)
         stored["maxTimeoutSeconds"] = max(1, expires - now)
         scheme = "exact"
-        network = config.X402_NETWORK
-        asset = x402.checksum_address(config.X402_USDC)
+        network = stored.get("network")
+        if network not in {x402.NETWORK_SEPOLIA, x402.NETWORK_BASE}:
+            raise x402.X402Error("network_mismatch")
+        asset = x402.usdc_for_network(network)
+        stored["network"] = network
+        stored["asset"] = asset
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         if enforce:
@@ -345,7 +353,12 @@ def replace_x402_quote(
     """
     stored = dict(requirements)
     stored["maxTimeoutSeconds"] = max(1, int(expires_at) - int(now))
-    asset = x402.checksum_address(config.X402_USDC)
+    network = stored.get("network")
+    if network not in {x402.NETWORK_SEPOLIA, x402.NETWORK_BASE}:
+        raise x402.X402Error("network_mismatch")
+    asset = x402.usdc_for_network(network)
+    stored["network"] = network
+    stored["asset"] = asset
     payload = json.dumps(stored, separators=(",", ":"), sort_keys=True)
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -362,7 +375,7 @@ def replace_x402_quote(
                 payload,
                 None if amount_usd_atomic is None else int(amount_usd_atomic),
                 pay_to,
-                config.X402_NETWORK,
+                network,
                 asset,
                 None if rate_num is None else int(rate_num),
                 None if rate_den is None else int(rate_den),
@@ -670,19 +683,31 @@ def find_topup_offer(
     pay_to: str,
     amount_usd_atomic: int,
     grant_credits: int,
+    network: str,
     now: int,
 ) -> dict | None:
-    """An unexpired pack quote with the same locked amount. A new median is a new row."""
+    """An unexpired pack quote with the same locked amount and network.
+
+    A new median is a new row. So is a switch from testnet USDC to mainnet.
+    """
     with _connect(db_path) as conn:
         row = conn.execute(
             """
             SELECT * FROM payment_offers
             WHERE client_id = ? AND resource = ? AND pay_to = ? AND amount_usd_atomic = ?
-              AND grant_credits = ? AND expires_at > ? AND resource_url IS NOT NULL
+              AND grant_credits = ? AND network = ? AND expires_at > ? AND resource_url IS NOT NULL
             ORDER BY created_at DESC
             LIMIT 1
             """,
-            (int(client_id), resource, pay_to, int(amount_usd_atomic), int(grant_credits), int(now)),
+            (
+                int(client_id),
+                resource,
+                pay_to,
+                int(amount_usd_atomic),
+                int(grant_credits),
+                network,
+                int(now),
+            ),
         ).fetchone()
     return None if row is None else _offer_dict(row)
 

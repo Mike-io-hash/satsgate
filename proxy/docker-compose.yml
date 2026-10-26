@@ -15,7 +15,7 @@ services:
     build:
       context: ..
       dockerfile: proxy/Dockerfile
-    image: satsgate-proxy:0.12.1
+    image: satsgate-proxy:0.13.0
     ports:
       - "8080:8080"
     environment:

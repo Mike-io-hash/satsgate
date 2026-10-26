@@ -322,7 +322,7 @@ def test_health_does_not_leak_internals(client):
     body = response.json()
     assert set(body) == {"ok", "version"}
     assert body["ok"] is True
-    assert body["version"] == "0.14.3"
+    assert body["version"] == "0.15.0"
     serialized = json.dumps(body).lower()
     assert "sqlite" not in serialized
     assert "db_path" not in serialized
@@ -1402,7 +1402,8 @@ def test_topup_paid_after_ten_minutes_still_claims(client):
 
     import app.main as mainmod
 
-    frozen = time.time() + 11 * 60
+    original_time = time.time
+    frozen = original_time() + 11 * 60
     mainmod.time.time = lambda: frozen
     try:
         preimage = client.get(f"/dev/mock/pay/{body['payment_hash']}").json()["preimage"]
@@ -1411,7 +1412,7 @@ def test_topup_paid_after_ten_minutes_still_claims(client):
             headers={"Authorization": _auth(body["macaroon"], preimage)},
         )
     finally:
-        mainmod.time.time = time.time
+        mainmod.time.time = original_time
     assert paid_late.status_code == 200, paid_late.text
     assert paid_late.json()["credits_added"] == body["plan"]["credits"]
     assert paid_late.json()["api_key"].startswith("sg_")
@@ -1740,7 +1741,8 @@ def test_paywall_paid_after_ten_minutes_still_unlocks(client):
     before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
     import app.main as mainmod
 
-    frozen = time.time() + 11 * 60
+    original_time = time.time
+    frozen = original_time() + 11 * 60
     mainmod.time.time = lambda: frozen
     try:
         preimage = client.get(f"/dev/mock/pay/{challenge['payment_hash']}").json()["preimage"]
@@ -1750,7 +1752,7 @@ def test_paywall_paid_after_ten_minutes_still_unlocks(client):
             json={"expected_resource": "api/premium"},
         )
     finally:
-        mainmod.time.time = time.time
+        mainmod.time.time = original_time
     assert paid_late.status_code == 200, paid_late.text
     assert paid_late.json()["charged_credits"] == 1
     assert paid_late.json()["cache_until"] == paid_late.json()["claim_until"]

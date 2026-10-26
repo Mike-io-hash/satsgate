@@ -1,8 +1,11 @@
-"""x402 v2 payment requirements for USDC on Base Sepolia.
+"""x402 v2 payment requirements for USDC on Base.
 
 Core builds the requirements and checks the buyer's payload against the offer
 it stored. The facilitator checks the EIP-3009 signature. This module does
 not sign, broadcast, or hold a key.
+
+A site is in one mode. Test offers only Base Sepolia. Live offers only Base.
+One 402 never lists both networks.
 """
 
 from __future__ import annotations
@@ -26,6 +29,14 @@ _SIG = re.compile(r"^0x[0-9a-fA-F]{130}$")
 _ATOMIC = re.compile(r"^[1-9][0-9]{0,17}$")
 
 EXTRA = {"name": "USDC", "version": "2", "assetTransferMethod": "eip3009"}
+NETWORK_SEPOLIA = "eip155:84532"
+NETWORK_BASE = "eip155:8453"
+_USDC_BY_NETWORK = {
+    NETWORK_SEPOLIA: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    NETWORK_BASE: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+}
+MODES = frozenset({"test", "live"})
+TEST_DESCRIPTION = "Test payment on Base Sepolia. Not Base mainnet."
 
 
 class X402Error(Exception):
@@ -106,10 +117,41 @@ def recover_personal_signer(message: str, signature: str) -> str:
     return to_checksum_address(recovered)
 
 
+def mainnet_enabled() -> bool:
+    return bool(config.X402_MAINNET_ENABLED)
+
+
+def topup_network() -> str:
+    """Credit packs use mainnet USDC only while the operator switch is on.
+
+    Selling credits for faucet USDC is not allowed once real money is on.
+    Merchant routes can still be in test mode. That choice is the merchant's.
+    """
+    return NETWORK_BASE if mainnet_enabled() else NETWORK_SEPOLIA
+
+
+def network_for_mode(mode: str) -> str:
+    if mode == "live":
+        return NETWORK_BASE
+    if mode == "test":
+        return NETWORK_SEPOLIA
+    raise X402Error("x402_mode_invalid", status=400)
+
+
+def mode_labels(network: str) -> dict:
+    """Labels for the JSON body. They are not part of the EIP-3009 ``extra``."""
+    if network == NETWORK_BASE:
+        return {"testing": False, "x402_mode": "live"}
+    if network == NETWORK_SEPOLIA:
+        return {"testing": True, "x402_mode": "test"}
+    raise X402Error("network_mismatch")
+
+
 def usdc_for_network(network: str) -> str:
-    if network != config.X402_NETWORK:
+    asset = _USDC_BY_NETWORK.get(network)
+    if asset is None:
         raise X402Error("network_mismatch")
-    return to_checksum_address(config.X402_USDC)
+    return to_checksum_address(asset)
 
 
 def resource_url(slug: str, path: str) -> str:
@@ -127,12 +169,24 @@ def offer_timeout_seconds() -> int:
     return min(300, max(60, int(config.X402_OFFER_SECONDS)))
 
 
-def accept_for(*, resource_url: str, amount: int, pay_to: str, timeout_seconds: int) -> dict:
+def accept_for(
+    *,
+    resource_url: str,
+    amount: int,
+    pay_to: str,
+    timeout_seconds: int,
+    network: str | None = None,
+) -> dict:
+    chosen = config.X402_NETWORK if network is None else network
+    if chosen == NETWORK_BASE and not mainnet_enabled():
+        raise X402Error("x402_mainnet_disabled", status=400)
+    if chosen not in _USDC_BY_NETWORK:
+        raise X402Error("network_mismatch")
     return {
         "scheme": "exact",
-        "network": config.X402_NETWORK,
+        "network": chosen,
         "amount": str(int(amount)),
-        "asset": to_checksum_address(config.X402_USDC),
+        "asset": usdc_for_network(chosen),
         "payTo": pay_to,
         "maxTimeoutSeconds": int(timeout_seconds),
         "extra": dict(EXTRA),
@@ -140,9 +194,10 @@ def accept_for(*, resource_url: str, amount: int, pay_to: str, timeout_seconds: 
 
 
 def payment_required_document(*, resource_url: str, accept: dict) -> dict:
+    description = TEST_DESCRIPTION if accept.get("network") == NETWORK_SEPOLIA else ""
     return {
         "x402Version": 2,
-        "resource": {"url": resource_url, "description": "", "mimeType": "application/json"},
+        "resource": {"url": resource_url, "description": description, "mimeType": "application/json"},
         "accepts": [accept],
     }
 
@@ -206,14 +261,30 @@ def validate_payload(payload: dict, *, offer: dict, now: int | None = None) -> d
     if accepted.get("scheme") != "exact":
         raise X402Error("bad_signature")
     network = accepted.get("network")
-    if network != config.X402_NETWORK:
+    requirements = offer.get("requirements") if isinstance(offer.get("requirements"), dict) else {}
+    offer_network = offer.get("network") or requirements.get("network")
+    if not isinstance(network, str):
         raise X402Error("network_mismatch")
+    if network == NETWORK_BASE and not mainnet_enabled():
+        raise X402Error("network_mismatch")
+    if network not in _USDC_BY_NETWORK:
+        raise X402Error("network_mismatch")
+    if network != offer_network or (requirements.get("network") and network != requirements.get("network")):
+        raise X402Error("network_mismatch")
+    expected_asset = usdc_for_network(network)
     try:
         asset = checksum_address(accepted.get("asset"))
     except X402Error:
         raise X402Error("asset_mismatch") from None
-    if asset != to_checksum_address(config.X402_USDC):
+    if asset != expected_asset:
         raise X402Error("asset_mismatch")
+    if requirements.get("asset"):
+        try:
+            stored_asset = checksum_address(requirements.get("asset"))
+        except X402Error:
+            raise X402Error("asset_mismatch") from None
+        if stored_asset != expected_asset:
+            raise X402Error("asset_mismatch")
     try:
         pay_to = checksum_address(accepted.get("payTo"))
     except X402Error:
@@ -264,12 +335,12 @@ def validate_payload(payload: dict, *, offer: dict, now: int | None = None) -> d
         "nonce": nonce.lower(),
         "value": value,
         "pay_to": pay_to,
-        "network": config.X402_NETWORK,
-        "asset": to_checksum_address(config.X402_USDC),
+        "network": network,
+        "asset": expected_asset,
     }
 
 
-def payment_response_b64(*, tx: str, payer: str) -> str:
+def payment_response_b64(*, tx: str, payer: str, network: str | None = None) -> str:
     """x402 v2 settlement response.
 
     Spec field is ``transaction`` (coinbase/x402 ``specs/x402-specification-v2.md``,
@@ -280,7 +351,7 @@ def payment_response_b64(*, tx: str, payer: str) -> str:
             "success": True,
             "transaction": tx,
             "tx": tx,
-            "network": config.X402_NETWORK,
+            "network": network or config.X402_NETWORK,
             "payer": payer,
         }
     )

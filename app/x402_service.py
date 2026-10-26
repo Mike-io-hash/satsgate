@@ -5,8 +5,6 @@ from __future__ import annotations
 import logging
 import time
 
-from eth_utils import to_checksum_address
-
 from . import config, db, db_x402, rates, x402, x402_facilitator
 
 log = logging.getLogger("satsgate.x402")
@@ -20,7 +18,12 @@ def quote_plan(site: dict, route: dict) -> dict:
     A missing or stale rate drops the derived rail. The main currency stays.
     """
     lightning_on = bool(int(site.get("rail_lightning", 1)))
-    x402_on = bool(int(site.get("rail_x402", 0)))
+    requested = bool(int(site.get("rail_x402", 0)))
+    raw_mode = str(site.get("x402_mode") or "").strip()
+    if raw_mode not in {"test", "live"}:
+        raw_mode = "test" if requested else ""
+    blocked = bool(requested and raw_mode == "live" and not x402.mainnet_enabled())
+    x402_on = requested and not blocked
     currency = route.get("price_currency") or "sats"
     main_sats = int(route["price_sats"]) if currency == "sats" and route.get("price_sats") else None
     main_usd = int(route["price_usd_atomic"]) if currency == "usd" and route.get("price_usd_atomic") else None
@@ -30,6 +33,7 @@ def quote_plan(site: dict, route: dict) -> dict:
     lightning_sats = main_sats if lightning_on and main_sats else derived_sats if lightning_on else None
     x402_atomic = main_usd if x402_on and main_usd else derived_usd if x402_on else None
     used = rate if derived_usd is not None or derived_sats is not None else None
+    network = x402.network_for_mode(raw_mode) if x402_on and raw_mode in {"test", "live"} else None
     return {
         "price_currency": currency,
         "main_sats": main_sats,
@@ -38,6 +42,9 @@ def quote_plan(site: dict, route: dict) -> dict:
         "x402_atomic": x402_atomic,
         "rate": used,
         "x402_on": x402_on,
+        "x402_mode": raw_mode or None,
+        "x402_network": network,
+        "x402_blocked": blocked,
     }
 
 
@@ -54,6 +61,8 @@ def _rate_view(offer: dict) -> dict | None:
 def x402_view(offer: dict, *, resource_url: str, reused: bool, resource: str) -> dict:
     offer["resource_url"] = resource_url
     amount = str(int(offer["amount_usd_atomic"]))
+    network = offer.get("network") or config.X402_NETWORK
+    labels = x402.mode_labels(network)
     document = x402.payment_required_document(resource_url=resource_url, accept=offer["requirements"])
     body = {
         "ok": True,
@@ -64,13 +73,17 @@ def x402_view(offer: dict, *, resource_url: str, reused: bool, resource: str) ->
         "reused": reused,
         "payment_required": x402.b64_json(document),
         "price_currency": offer.get("price_currency"),
+        "testing": labels["testing"],
+        "x402_mode": labels["x402_mode"],
         "x402": {
             "scheme": "exact",
-            "network": offer.get("network") or config.X402_NETWORK,
-            "asset": offer.get("asset") or to_checksum_address(config.X402_USDC),
+            "network": network,
+            "asset": offer.get("asset") or x402.usdc_for_network(network),
             "amount": amount,
             "payTo": offer["pay_to"],
             "expires_at": offer["expires_at"],
+            "testing": labels["testing"],
+            "x402_mode": labels["x402_mode"],
         },
     }
     rate = _rate_view(offer)
@@ -124,6 +137,7 @@ def issue_offer(
     now = int(time.time())
     url = _bound_url(slug, path, resource_url)
     amount = int(plan["x402_atomic"])
+    network = plan.get("x402_network") or x402.NETWORK_SEPOLIA
     existing = db_x402.find_reusable_offer(
         config.DB_PATH,
         client_id=client_id,
@@ -136,6 +150,7 @@ def issue_offer(
         max_uses=max_uses,
         access_seconds=access_seconds,
         now=now,
+        network=network,
     )
     if existing is None or not existing.get("requirements"):
         window = x402.offer_timeout_seconds()
@@ -144,6 +159,7 @@ def issue_offer(
             amount=amount,
             pay_to=pay_to,
             timeout_seconds=window,
+            network=network,
         )
         try:
             db.preview_challenge_capacity(
@@ -353,7 +369,7 @@ def settle_payment(
             amount_usd_atomic=int(offer["amount_usd_atomic"]),
             api_key_id=api_key_id,
         )
-        return _settled_body(charged, fields["payer"])
+        return _settled_body(charged, fields["payer"], network=fields["network"])
     locked = db_x402.set_authorization_state(
         config.DB_PATH,
         network=fields["network"],
@@ -451,7 +467,7 @@ def settle_payment(
         amount_usd_atomic=int(offer["amount_usd_atomic"]),
         api_key_id=api_key_id,
     )
-    return _settled_body(charged, fields["payer"])
+    return _settled_body(charged, fields["payer"], network=fields["network"])
 
 
 def _replay(row, offer: dict, payer: str, client_id: int) -> dict:
@@ -464,12 +480,16 @@ def _replay(row, offer: dict, payer: str, client_id: int) -> dict:
         "credits": credits,
         "replay": True,
         "tx": tx,
-        "payment_response": x402.payment_response_b64(tx=tx, payer=payer),
+        "payment_response": x402.payment_response_b64(
+            tx=tx,
+            payer=payer,
+            network=offer.get("network") or row["network"],
+        ),
         "offer_id": offer["id"],
     }
 
 
-def _settled_body(charged: dict, payer: str) -> dict:
+def _settled_body(charged: dict, payer: str, *, network: str) -> dict:
     return {
         "ok": True,
         "serve": False,
@@ -477,5 +497,5 @@ def _settled_body(charged: dict, payer: str) -> dict:
         "credits": charged["credits"],
         "replay": False,
         "tx": charged["tx_hash"],
-        "payment_response": x402.payment_response_b64(tx=charged["tx_hash"], payer=payer),
+        "payment_response": x402.payment_response_b64(tx=charged["tx_hash"], payer=payer, network=network),
     }

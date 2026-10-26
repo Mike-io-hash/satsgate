@@ -141,6 +141,10 @@ def _challenge_response(result: CoreResult, reason: str | None, route: PayRoute)
         headers["WWW-Authenticate"] = challenge.www_authenticate
     if challenge.offers_x402 and challenge.x402 is not None:
         body["x402"] = challenge.x402
+        if "testing" in challenge.x402:
+            body["testing"] = challenge.x402["testing"]
+        if "x402_mode" in challenge.x402:
+            body["x402_mode"] = challenge.x402["x402_mode"]
         headers["PAYMENT-REQUIRED"] = challenge.payment_required
     return JSONResponse(body, status_code=402, headers=headers)
 

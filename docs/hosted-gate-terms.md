@@ -21,13 +21,17 @@ You may not use the gate for any of the following:
 - abuse, including attacks on other people or on Satsgate
 - scraping or reselling someone else's API when you do not have the right to do that
 
-Satsgate may disable a site that breaks these rules.
+Satsgate may disable a site that breaks these rules. Illegal or sanctioned content is prohibited. A site that offers it can be taken down.
 
 ## Money
 
 Satsgate does not hold buyer funds. A buyer pays a Lightning invoice. That payment goes to the Lightning Address you set on your account, not to Satsgate.
 
-One credit is used the first time a payment is settled and unlocked. Further uses of that same payment do not take more credits. Credits are not refunded once that unlock has happened, except where Satsgate has said otherwise in writing. If the origin fails after the unlock, the use is still spent: the sats already went to you, and the credit was the fee for that check.
+One credit is used the first time a paid request is delivered. That is when your origin returns a success (HTTP 2xx) and, for a USDC payment, the facilitator has settled. Later requests that reuse that same payment do not take another credit. If the origin fails, no credit is used and the use is not taken. The buyer can retry with the same macaroon or the same payment signature. A Lightning payment still reaches the Lightning Address on your account when the invoice is paid, which is before the origin runs. Any remedy for a failed origin is between you and the buyer. Satsgate does not refund buyers.
+
+A buyer may also pay USDC on Base. That USDC goes to the Base address you verified, or, for a Satsgate credit pack, to Satsgate's treasury address. Satsgate does not hold, forward, or refund that USDC. USDC payments depend on a third-party facilitator. That facilitator can reject a payment, including after the origin has already run. Satsgate does not control that decision, does not complete the payment itself, and does not refund it.
+
+Credits are not money. They are not transferable and they are not redeemable. Any refund from Satsgate, if one is given, is in credits only.
 
 ## Satsgate is not your buyer
 
@@ -37,7 +41,7 @@ To the extent the law allows, Satsgate is not liable for lost sats, lost credits
 
 ## Privacy
 
-Buyers do not get Satsgate accounts. An IP address is used to rate-limit that buyer. What is stored for the limit is a hash of a truncated address, not a profile. Payment hashes are stored so a paid invoice can be matched to its grant and its remaining uses. The public directory shows the site name, slug, description, gate URL, and route prices. It does not show the origin, the origin secret, or the owner.
+Buyers do not get Satsgate accounts. This service is not anonymous. An IP address is used to rate-limit that buyer. What is stored for the limit is a hash of a truncated address, not a profile. Payment hashes are stored so a paid invoice can be matched to its grant and its remaining uses. A USDC payment also stores the settlement transaction hash. The transaction itself is public on Base. The facilitator may screen addresses. The public directory shows the site name, slug, description, gate URL, and route prices. It does not show the origin, the origin secret, or the owner.
 
 ## Changes
 
