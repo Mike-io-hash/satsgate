@@ -27,7 +27,7 @@ Satsgate may disable a site that breaks these rules. Illegal or sanctioned conte
 
 Satsgate does not hold buyer funds. A buyer pays a Lightning invoice. That payment goes to the Lightning Address you set on your account, not to Satsgate.
 
-One credit is used the first time a payment is settled and unlocked. Further uses of that same payment do not take more credits. Credits are not refunded once that unlock has happened, except where Satsgate has said otherwise in writing. If the origin fails after the unlock, the use is still spent: the sats already went to you, and the credit was the fee for that check.
+One credit is used the first time a paid request is delivered. That is when your origin returns a success (HTTP 2xx) and, for a USDC payment, the facilitator has settled. Later requests that reuse that same payment do not take another credit. If the origin fails, no credit is used and the use is not taken. The buyer can retry with the same macaroon or the same payment signature. A Lightning payment still reaches the Lightning Address on your account when the invoice is paid, which is before the origin runs. Any remedy for a failed origin is between you and the buyer. Satsgate does not refund buyers.
 
 A buyer may also pay USDC on Base. That USDC goes to the Base address you verified, or, for a Satsgate credit pack, to Satsgate's treasury address. Satsgate does not hold, forward, or refund that USDC. USDC payments depend on a third-party facilitator. That facilitator can reject a payment, including after the origin has already run. Satsgate does not control that decision, does not complete the payment itself, and does not refund it.
 

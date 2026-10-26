@@ -95,7 +95,7 @@ First match wins. Anything that is not a free path or a route is **404**. A path
 
 One credit is one settled payment, not one HTTP call and not the sats the buyer paid. The trial plan is about **5 sats per credit**. Set `pricing.sats_per_credit` to the plan you bought. A `per_request` price below **10 times** that number logs a warning at startup (under 50 sats on the trial plan). Cheap calls should be `uses:N` or `pass:<seconds>`, so one credit covers many requests. Bundles and passes do not warn.
 
-Credits are charged once per `payment_hash`, on the first settlement, and are **not refunded**. The Lightning payment goes straight to the merchant's payee. The credit is the fee for that verification.
+Credits are charged once per `payment_hash`, and only after the origin returns 2xx. For USDC, settle has to succeed as well. They are not refunded. The Lightning payment goes to the merchant's payee when the invoice is paid, before the origin runs. A failed origin takes no credit and no use. The buyer retries the same macaroon or signature. Any remedy for that failed origin is between the buyer and the merchant.
 
 ## Buyer IP
 
@@ -107,7 +107,7 @@ The core stores an HMAC of a truncated address (IPv4 /24, IPv6 /64), not the raw
 
 ## What the origin receives
 
-After a successful consume the proxy forwards the original method, raw path, and raw query. It does not follow redirects.
+When the payment is confirmed, the proxy forwards the original method, raw path, and raw query. The credit and the use are taken only after a 2xx. It does not follow redirects.
 
 Headers added:
 
@@ -134,9 +134,7 @@ Responses drop `Server`, `Via`, `X-Powered-By`, `Location`, and `Content-Encodin
 
 The response is buffered up to `limits.max_response_bytes` (default 10 MiB, max 64 MiB). Over that, the buyer gets **502** `upstream_response_too_large` instead of a truncated 200. A request larger than `limits.max_request_bytes` (default 1 MiB, max 32 MiB) is **413** before any core call, so it does not mint an invoice or consume a use.
 
-## If the origin fails after consume
-
-The proxy consumes first, then forwards. There is no un-consume. Two parallel requests cannot both pass a check and both hit the origin.
+## If the origin fails
 
 The proxy confirms the payment first and calls the origin next. A credit is taken only when that response is 2xx. An origin **4xx** or **5xx** is passed through with the host headers removed, and nothing is debited. The same macaroon can be retried. If the origin times out, refuses the connection, redirects, or returns a body over the cap, the buyer gets a proxy error with `use_spent: false`. Do not put internal hostnames in an origin error body.
 
@@ -167,5 +165,5 @@ Use 1 to 21 sats on a test route. Pay from a different wallet than the payee.
 - **Alby `fetch402`.** The macaroon is treated as opaque. The retry includes the preimage. The macaroon base64 does not contain the substrings `L402` or `LSAT` (the core re-rolls those).
 - **Phone wallet.** Pay the invoice without a preimage. Retry `Authorization: L402 <macaroon>` until `payment_pending` stops and the origin responds. `Retry-After` is present while pending, and a second invoice is not minted.
 - A used `per_request` token gets a new **402**, not 401.
-- The payee receives the sats. The account loses **one** credit on the first unlock only. A second use of a bundle does not charge another credit.
+- The payee receives the sats when the invoice is paid. The account loses **one** credit on the first successful delivery only, after the origin returns 2xx. A second use of a bundle does not charge another credit. A failed origin takes no credit.
 - Against hosted core, the proxy sends `X-Satsgate-Buyer-Ip` and it is ignored unless that egress IP was added to `SATSGATE_TRUSTED_PROXIES`. Record what you observed.

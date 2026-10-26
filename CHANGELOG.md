@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `satsgate-proxy` 0.13.0 sends `x402_mode` (`test` or `live`). `x402: true` without a mode is test. A mode without `x402: true` refuses to start.
 
 ### Changed
-- The draft terms in `docs/hosted-gate-terms.md` now say that a facilitator can reject a USDC payment, including after the origin ran; that illegal or sanctioned content can be taken down; that credits are not money and are not redeemable; and that the service is not anonymous. The draft is still pending legal review.
+- The draft terms in `docs/hosted-gate-terms.md` now say that a facilitator can reject a USDC payment, including after the origin ran; that illegal or sanctioned content can be taken down; that credits are not money and are not redeemable; and that the service is not anonymous. On the hosted gate, a credit and a use are taken only after the origin returns 2xx, and for USDC only after settle. A failed origin takes neither. The buyer retries the same macaroon or signature. Lightning sats still reach the merchant when the invoice is paid. Satsgate does not refund buyers. The draft is still pending legal review.
 
 Core health is 0.15.0. The hosted gate is 0.14.0. The self-hosted proxy is 0.13.0. satsgate-mcp stays 0.11.0. Copy `satsgate.sqlite3` before restart. Rebuild the core image, the gate image, and the proxy image. Rollback is `SATSGATE_X402_CDP=0` and a core restart. Live sites stop offering USDC. Test mode and Lightning keep working. The column stays.
 
