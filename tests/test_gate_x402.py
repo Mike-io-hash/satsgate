@@ -159,6 +159,9 @@ def test_x402_only_verifies_serves_and_settles(tmp_path, monkeypatch):
                 assert "www-authenticate" not in challenge.headers
                 assert body["x402"]["scheme"] == "exact"
                 assert body["x402"]["network"] == "eip155:84532"
+                assert body["x402"]["testing"] is True
+                assert body["x402_mode"] == "test"
+                assert body["testing"] is True
                 assert body["x402"]["asset"] == _USDC
                 assert body["x402"]["payTo"] == owner.address
                 assert body["x402"]["amount"] == "10000"
@@ -166,7 +169,14 @@ def test_x402_only_verifies_serves_and_settles(tmp_path, monkeypatch):
                 document = json.loads(base64.b64decode(encoded))
                 assert document["x402Version"] == 2
                 assert document["accepts"][0]["scheme"] == "exact"
+                assert len(document["accepts"]) == 1
+                assert document["resource"]["description"] == "Test payment on Base Sepolia. Not Base mainnet."
                 assert "paymentFlow" not in document["accepts"][0]["extra"]
+                assert document["accepts"][0]["extra"] == {
+                    "name": "USDC",
+                    "version": "2",
+                    "assetTransferMethod": "eip3009",
+                }
                 assert owner.address != "0x0000000000000000000000000000000000000000"
                 signature = _payload(encoded, buyer, body["x402"]["expires_at"])
                 paid = http.get(

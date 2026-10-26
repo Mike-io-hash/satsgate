@@ -51,12 +51,17 @@ services:
       # Only the gate container may present that token. Empty would allow any peer.
       SATSGATE_GATE_PEERS: ${SATSGATE_GATE_PEERS:-172.28.0.4}
 
-      # x402 testnet. Defaults are safe: Base Sepolia, public facilitator, rail off.
-      # SATSGATE_X402_NETWORK must stay eip155:84532. Mainnet refuses to boot.
+      # x402. SATSGATE_X402_NETWORK must stay eip155:84532 (the public facilitator).
+      # Base mainnet is SATSGATE_X402_CDP, not that variable. Leave the switch at 0.
+      # These three CDP variables stay on this service. The gate must not receive them.
       SATSGATE_X402_FACILITATOR_URL: ${SATSGATE_X402_FACILITATOR_URL:-https://x402.org/facilitator}
       SATSGATE_X402_NETWORK: ${SATSGATE_X402_NETWORK:-eip155:84532}
       SATSGATE_X402_OFFER_SECONDS: ${SATSGATE_X402_OFFER_SECONDS:-60}
+      SATSGATE_X402_CDP: ${SATSGATE_X402_CDP:-0}
+      SATSGATE_X402_CDP_KEY_ID: ${SATSGATE_X402_CDP_KEY_ID:-}
+      SATSGATE_X402_CDP_KEY_SECRET: ${SATSGATE_X402_CDP_KEY_SECRET:-}
       # Credit packs only. Empty disables GET /v1/topup/{plan_id}/x402.
+      # While CDP is on, packs are Base mainnet USDC. While it is off, Base Sepolia.
       SATSGATE_TREASURY_EVM_ADDRESS: ${SATSGATE_TREASURY_EVM_ADDRESS:-}
 
       # BTC/USD quote. Not a conversion. Defaults match the code.

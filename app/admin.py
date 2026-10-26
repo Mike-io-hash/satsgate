@@ -97,3 +97,18 @@ def v1_admin_sites_disable(
     if site is None:
         return JSONResponse(status_code=404, content={"ok": False, "error": "site_not_found"})
     return {"ok": True, "site": site}
+
+
+@router.get("/v1/admin/x402")
+def v1_admin_x402(x_admin_token: str | None = Header(default=None, alias="X-Admin-Token")):
+    """Whether Base mainnet USDC is on, and whether CDP last advertised exact.
+
+    For a server watchdog. The JSON is a fixed set of keys. It does not include
+    credentials. Anonymous /v1 rate limits still apply. Call at most once a minute.
+    """
+    err = _require_admin(x_admin_token)
+    if err:
+        return err
+    from . import x402_cdp_status
+
+    return x402_cdp_status.snapshot()

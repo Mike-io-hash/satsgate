@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # Load env vars from .env if present. Existing process env wins.
 load_dotenv()
 
-APP_VERSION = "0.14.3"
+APP_VERSION = "0.15.0"
 
 # production is the safe default. Local mock/dev only runs when this is explicit.
 SATSGATE_ENV = os.environ.get("SATSGATE_ENV", "production").strip().lower() or "production"
@@ -189,11 +189,16 @@ GATE_PUBLIC_BASE = _gate_public_base()
 GATE_TOKEN = os.environ.get("SATSGATE_GATE_TOKEN", "").strip()
 GATE_PEERS = os.environ.get("SATSGATE_GATE_PEERS", "").strip()
 
-# x402 testnet. Core calls a third-party facilitator. It does not hold a key
-# and it does not sign or submit transactions. Base mainnet is rejected here
-# until a later flag exists. There is no CDP credential in this process.
+# x402. Core calls a third-party facilitator. It does not hold a buyer or
+# merchant key and it does not sign or submit transactions.
+# SATSGATE_X402_NETWORK stays the public-facilitator network (Base Sepolia).
+# Base mainnet is SATSGATE_X402_CDP, not this variable.
 X402_TESTNET_NETWORK = "eip155:84532"
+X402_MAINNET_NETWORK = "eip155:8453"
 X402_USDC_SEPOLIA = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+X402_USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+# Hardcoded so an operator cannot point mainnet USDC at an arbitrary host.
+X402_CDP_FACILITATOR_URL = "https://api.cdp.coinbase.com/platform/v2/x402"
 X402_MAX_USD_ATOMIC = 100_000_000
 X402_PAYEE_CHALLENGE_SECONDS = 600
 X402_SIGNATURE_MAX_BYTES = 8192
@@ -206,7 +211,8 @@ def _x402_network() -> str:
     if raw != X402_TESTNET_NETWORK:
         raise RuntimeError(
             "SATSGATE_X402_NETWORK must be eip155:84532. "
-            "Base mainnet is disabled. Satsgate does not run a facilitator."
+            "Base mainnet is SATSGATE_X402_CDP, not this variable. "
+            "Satsgate does not run a facilitator."
         )
     return raw
 
@@ -231,6 +237,44 @@ def _x402_facilitator_url() -> str:
 X402_NETWORK = _x402_network()
 X402_FACILITATOR_URL = _x402_facilitator_url()
 X402_USDC = X402_USDC_SEPOLIA
+
+
+def _cdp_requested() -> bool:
+    return os.environ.get("SATSGATE_X402_CDP", "").strip() == "1"
+
+
+def _cdp_key_id_ok() -> bool:
+    raw = os.environ.get("SATSGATE_X402_CDP_KEY_ID", "")
+    if raw != raw.strip() or not raw or any(ch.isspace() for ch in raw) or len(raw) > 256:
+        return False
+    return True
+
+
+def _mainnet_enabled() -> bool:
+    """True only when the switch is on and both CDP credentials are usable.
+
+    A bad or missing credential does not refuse boot. Sepolia and Lightning
+    still start. The secret is not logged.
+    """
+    if not _cdp_requested():
+        return False
+    secret = os.environ.get("SATSGATE_X402_CDP_KEY_SECRET", "").strip()
+    from .cdp_auth import secret_is_usable
+
+    if not _cdp_key_id_ok() or not secret_is_usable(secret):
+        logging.getLogger("satsgate.x402").warning(
+            "USDC mainnet disabled: SATSGATE_X402_CDP is set and a credential is missing or not a CDP Ed25519 secret"
+        )
+        return False
+    return True
+
+
+X402_CDP_REQUESTED = _cdp_requested()
+X402_MAINNET_ENABLED = _mainnet_enabled()
+
+from .cdp_auth import install_redactor  # noqa: E402
+
+install_redactor()
 
 # Satsgate's own USDC address for credit packs only. Unset or invalid disables
 # that rail. Buyer payments for a merchant route still go to the merchant.

@@ -34,7 +34,18 @@ _PRICING_KEYS = frozenset({"sats_per_credit"})
 _SERVER_KEYS = frozenset({"host", "port", "listen", "trusted_proxies", "pending_retry_after_seconds", "public_base"})
 _LIMIT_KEYS = frozenset({"max_request_bytes", "max_response_bytes"})
 _ROUTE_KEYS = frozenset(
-    {"name", "methods", "path", "path_regex", "price_sats", "access", "scope", "description", "x402"}
+    {
+        "name",
+        "methods",
+        "path",
+        "path_regex",
+        "price_sats",
+        "access",
+        "scope",
+        "description",
+        "x402",
+        "x402_mode",
+    }
 )
 _INJECT_KEYS = frozenset({"name", "value_env"})
 _HOP = frozenset(
@@ -99,6 +110,7 @@ class Route:
     resource: str
     description: str | None
     x402: bool = False
+    x402_mode: str = ""
 
     def __repr__(self) -> str:
         return f"Route({self.name} {self.access.label()} {self.price_sats}sats {self.scope})"
@@ -363,6 +375,19 @@ def _routes(value: object) -> tuple[Route, ...]:
         resource = "site" if scope == "site" else f"route:{name}"
         if "x402" in data and data["x402"] is not None and not isinstance(data["x402"], bool):
             raise ConfigError(f"route {name} x402 must be true or false")
+        x402_on = bool(data.get("x402", False))
+        raw_mode = data.get("x402_mode")
+        if raw_mode is not None and not x402_on:
+            raise ConfigError(f"route {name} x402_mode requires x402: true")
+        if x402_on:
+            if raw_mode is None:
+                mode = "test"
+            elif raw_mode in {"test", "live"}:
+                mode = str(raw_mode)
+            else:
+                raise ConfigError(f"route {name} x402_mode must be test or live")
+        else:
+            mode = ""
         routes.append(
             Route(
                 name=name,
@@ -373,7 +398,8 @@ def _routes(value: object) -> tuple[Route, ...]:
                 scope=scope,
                 resource=resource,
                 description=_description(data.get("description")),
-                x402=bool(data.get("x402", False)),
+                x402=x402_on,
+                x402_mode=mode,
             )
         )
     return tuple(routes)

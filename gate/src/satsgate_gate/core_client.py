@@ -20,10 +20,13 @@ _HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
 _PUBLIC_CODE = re.compile(r"^[a-z0-9_]{1,64}$")
 _ATOMIC = re.compile(r"^[1-9][0-9]{0,17}$")
 _ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
-# Base Sepolia USDC. This is the asset contract, not a payTo. The gate does
-# not receive, forward, or refund buyer funds.
-_X402_NETWORK = "eip155:84532"
-_X402_ASSET = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+# One accept, one network. Test is Base Sepolia. Live is Base. The asset is
+# that network's USDC contract, not a payTo. The gate does not receive,
+# forward, or refund buyer funds.
+_USDC_BY_NETWORK = {
+    "eip155:84532": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "eip155:8453": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+}
 _X402_HEADER_MAX = 8192
 
 # Kept in step with satsgate-proxy. A test asserts the two sets match.
@@ -517,12 +520,14 @@ def _x402_requirements(encoded: str, mirror: dict) -> dict:
     if not isinstance(accepts, list) or len(accepts) != 1 or not isinstance(accepts[0], dict):
         raise ValueError("x402")
     accept = accepts[0]
-    if accept.get("scheme") != "exact" or accept.get("network") != _X402_NETWORK:
+    network = accept.get("network")
+    expected_asset = _USDC_BY_NETWORK.get(network) if isinstance(network, str) else None
+    if accept.get("scheme") != "exact" or expected_asset is None:
         raise ValueError("x402")
     asset = accept.get("asset")
     pay_to = accept.get("payTo")
     amount = accept.get("amount")
-    if not isinstance(asset, str) or asset.lower() != _X402_ASSET.lower():
+    if not isinstance(asset, str) or asset.lower() != expected_asset.lower():
         raise ValueError("x402")
     if not isinstance(pay_to, str) or not _ADDRESS.fullmatch(pay_to):
         raise ValueError("x402")
@@ -531,18 +536,22 @@ def _x402_requirements(encoded: str, mirror: dict) -> dict:
     extra = accept.get("extra")
     if not isinstance(extra, dict) or "paymentFlow" in extra:
         raise ValueError("x402")
-    for key, expected in (("scheme", "exact"), ("network", _X402_NETWORK), ("amount", amount)):
+    for key, expected in (("scheme", "exact"), ("network", network), ("amount", amount)):
         if mirror.get(key) not in {None, expected}:
             log.warning("x402 body field %s disagreed with the header", key)
     mirror_pay = mirror.get("payTo")
     if isinstance(mirror_pay, str) and mirror_pay.lower() != pay_to.lower():
         log.warning("x402 payTo disagreed with the header")
+    testing = network == "eip155:84532"
+    mode = "test" if testing else "live"
     return {
         "scheme": "exact",
-        "network": _X402_NETWORK,
-        "asset": _X402_ASSET,
+        "network": network,
+        "asset": expected_asset,
         "amount": amount,
         "payTo": pay_to,
+        "testing": testing,
+        "x402_mode": mode,
     }
 
 

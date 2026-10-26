@@ -2,7 +2,7 @@
 
 A buyer-side MCP server. An agent (Claude Desktop, Cursor, or any stdio MCP client) can see the price of a Satsgate-paywalled URL, pay it, and read the response.
 
-This package is version **0.11.0**. It talks to whatever URL returned the 402. Core is **0.14.3**. The self-hosted proxy is **0.12.1**. The hosted gate is **0.13.0**. A 402 may offer Lightning, x402 (USDC on Base), or both. `list_sites` includes a public route priced only in USD, with `price_currency` and `price_usd_atomic`. This process cannot buy Satsgate credits, and it does not hold a buyer private key. An account tops up on the core: Lightning at `GET /v1/topup/{plan_id}`, or USDC at `GET /v1/topup/{plan_id}/x402` when the operator has set `SATSGATE_TREASURY_EVM_ADDRESS`. The USDC path is not an MCP tool.
+This package is version **0.11.0**. It talks to whatever URL returned the 402. Core is **0.15.0**. The self-hosted proxy is **0.13.0**. The hosted gate is **0.14.0**. A 402 may offer Lightning, x402 (USDC on Base), or both. One 402 lists one USDC network. `list_sites` includes a public route priced only in USD, with `price_currency` and `price_usd_atomic`. This process cannot buy Satsgate credits, and it does not hold a buyer private key. An account tops up on the core: Lightning at `GET /v1/topup/{plan_id}`, or USDC at `GET /v1/topup/{plan_id}/x402` when the operator has set `SATSGATE_TREASURY_EVM_ADDRESS`. While `SATSGATE_X402_CDP` is on, that pack is Base mainnet USDC only. While it is off, the pack stays on Base Sepolia. The USDC path is not an MCP tool.
 
 ## USDC payments: Base network only
 
@@ -10,14 +10,14 @@ USDC payments use Base only. Ethereum mainnet, Polygon, Solana, Arbitrum, and an
 
 | Network | Network id | Circle USDC contract | Status |
 | --- | --- | --- | --- |
-| Base Sepolia (testnet) | `eip155:84532` | [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e) | Live today. When a merchant turns x402 on, the 402 asks for this USDC. |
-| Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | Not live. Base mainnet comes later, behind a switch. This version has no switch. The process starts only when `SATSGATE_X402_NETWORK` is `eip155:84532`. |
+| Base Sepolia (testnet) | `eip155:84532` | [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e) | Testing. A site in test mode offers only this USDC. It is not a network for real buyers. |
+| Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | Live when the operator sets `SATSGATE_X402_CDP=1` and both CDP credentials. A site in live mode offers only this USDC. |
 
-Merchants: `payTo` must be an address you control on Base. The USDC is paid to that address on the network in the table. Buyers: USDC sent on another network will not be accepted. A balance on Ethereum, Polygon, Solana, or Arbitrum does not pay a Satsgate 402.
+Merchants: `payTo` must be an address you control on Base. The USDC is paid to that address on the one network that site is in. Try on Base Sepolia with your agent first, then switch the site to live. Buyers: USDC sent on another network will not be accepted. A balance on Ethereum, Polygon, Solana, or Arbitrum does not pay a Satsgate 402.
 
 Satsgate never custodies, receives, forwards, or refunds buyer funds. The USDC moves from the buyer to the merchant's `payTo`. Satsgate does not hold a buyer wallet and does not run its own facilitator.
 
-This MCP server does not send that USDC and does not hold a key. It shows the network and the amount printed on the 402. An accept on any other network is reported and is not payable. If a 402 ever names Circle USDC on Base (`eip155:8453`), this server shows it. The live gate does not issue that 402.
+This MCP server does not send that USDC and does not hold a key. It shows the network and the amount printed on the 402. An accept on any other network is reported and is not payable. A test-mode 402 is Base Sepolia and is labeled testing. A live-mode 402 is Base. This server can describe either. It still does not sign.
 
 `list_sites` reads `GET /v1/sites` on `SATSGATE_MCP_CORE_URL` (default `https://api.satsgate.org`). That is the public directory: approved sites that opted in. Set `SATSGATE_MCP_REGISTRY` only to replace it with a JSON file or another URL.
 

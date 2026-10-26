@@ -54,6 +54,9 @@ def _load_app(tmp_path: Path, **env: str):
         "SATSGATE_GATE_PUBLIC_BASE": "https://gate.satsgate.org",
         "SATSGATE_GATE_TOKEN": _GATE_TOKEN,
         "SATSGATE_GATE_PEERS": "",
+        "SATSGATE_X402_CDP": "0",
+        "SATSGATE_X402_CDP_KEY_ID": "",
+        "SATSGATE_X402_CDP_KEY_SECRET": "",
         "SATSGATE_BUYER_CHALLENGE_MAX": "100",
         "SATSGATE_BUYER_MAX_OPEN_CHALLENGES": "100",
     }
@@ -324,7 +327,7 @@ def test_unknown_pending_and_disabled_are_404(tmp_path, monkeypatch):
         gate, core_client, origin_client = _open_gate(module.app, settings, origin)
         try:
             with gate as http:
-                assert http.get("/healthz").json() == {"ok": True, "component": "satsgate-gate", "version": "0.13.0"}
+                assert http.get("/healthz").json() == {"ok": True, "component": "satsgate-gate", "version": "0.14.0"}
                 missing = http.get("/no-such/blog")
                 assert missing.status_code == 404
                 assert missing.json()["error"] == "not_found"

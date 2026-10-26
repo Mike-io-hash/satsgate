@@ -27,6 +27,8 @@ server:
   host: 0.0.0.0
   port: 8080
   # Required only when a route sets x402: true. Buyers pay this origin plus the path.
+  # x402: true without x402_mode is test (Base Sepolia). x402_mode: live is Base.
+  # Try on Base Sepolia with your agent first, then switch the site to live.
   # public_base: https://api.example.com
   # Addresses allowed to send X-Forwarded-For to this proxy. Empty uses the TCP peer.
   trusted_proxies: []

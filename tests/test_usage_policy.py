@@ -732,7 +732,7 @@ def test_migration_from_a_v05_database_keeps_unlimited_grants(tmp_path):
     assert debits == 1
 
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.14.3"
+        assert http.get("/health").json()["version"] == "0.15.0"
         assert _balance(http, legacy_key) == 9
         fresh = _challenge(http, legacy_key, resource="old/new")
         assert fresh["max_uses"] is None

@@ -287,7 +287,7 @@ def test_migration_adds_tables_and_leaves_a_realistic_database(tmp_path, monkeyp
     assert site_count == 0
 
     with TestClient(module.app) as http:
-        assert http.get("/health").json() == {"ok": True, "version": "0.14.3"}
+        assert http.get("/health").json() == {"ok": True, "version": "0.15.0"}
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})
         assert balance.status_code == 200
         assert balance.json()["credits"] == 42
@@ -588,14 +588,14 @@ def test_admin_routes_hide_when_the_token_is_unset(tmp_path, monkeypatch):
     with TestClient(module.app) as http:
         assert http.post("/v1/admin/sites/my-shop/approve").status_code == 404
         assert http.get("/v1/admin/sites").status_code == 404
-        assert http.get("/health").json()["version"] == "0.14.3"
+        assert http.get("/health").json()["version"] == "0.15.0"
 
 
 def test_missing_site_secret_key_refuses_create_and_boots(tmp_path, monkeypatch):
     module = _load_app(tmp_path, SATSGATE_SITE_SECRET_KEY="")
     _patch_dns(monkeypatch, module)
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.14.3"
+        assert http.get("/health").json()["version"] == "0.15.0"
         account = _buy(http)
         response = http.post(
             "/v1/sites",

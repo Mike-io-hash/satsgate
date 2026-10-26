@@ -45,7 +45,9 @@ If the hosted payee's provider advertises LUD-21 `verify` (Alby does), you can s
 
 Pay the invoice from a **different** wallet than the one that receives it. Paying yourself from the same node (for example Alby Go on the same Alby Hub) usually fails.
 
-The same packs can be bought with USDC on Base Sepolia when the operator has set `SATSGATE_TREASURY_EVM_ADDRESS`. `GET /v1/topup/trial/x402` with the account key returns `402` and `PAYMENT-REQUIRED`. Retry with `PAYMENT-SIGNATURE` after your wallet signs that exact USDC authorization. Credits land only after the facilitator settles, and they are not redeemable for USDC. If that variable is unset, the route says `x402_topup_disabled` and the Lightning steps above are unchanged. A request sketch is `scripts/x402_topup_example.py`. The proxy and the MCP server do not call this route.
+The same packs can be bought with USDC when the operator has set `SATSGATE_TREASURY_EVM_ADDRESS`. While `SATSGATE_X402_CDP` is on, the pack is Base mainnet USDC only (`eip155:8453`). While it is off, the pack is Base Sepolia only (`eip155:84532`) and the response says `testing: true`. Credits are not sold for faucet USDC once mainnet is on. `GET /v1/topup/trial/x402` with the account key returns `402` and `PAYMENT-REQUIRED`. Retry with `PAYMENT-SIGNATURE` after your wallet signs that exact USDC authorization. Credits land only after the facilitator settles, and they are not redeemable for USDC. If the treasury variable is unset, the route says `x402_topup_disabled` and the Lightning steps above are unchanged. A request sketch is `scripts/x402_topup_example.py`. The proxy and the MCP server do not call this route.
+
+A hosted site that takes USDC starts in test mode. Try on Base Sepolia with your agent first, then switch the site to live. See [`gate/README.md`](./gate/README.md).
 
 ## 2) Register your payee (where your users will pay)
 
@@ -71,7 +73,7 @@ curl -s -X POST https://api.satsgate.org/v1/api-keys \
 
 That key can call the paywall challenge, status, and verify routes for resources starting with `demo/`. It cannot top up, change the payee, manage keys, or read the ledger. Drop the prefix field to allow every resource. Revoke it with `POST /v1/api-keys/{id}/revoke` using the account key. Python: `SatsgateClient.create_api_key`, `list_api_keys`, `revoke_api_key` (satsgate-sdk 0.4.0).
 
-To put that key in front of an API you already have, without writing paywall code, run [`satsgate-proxy`](./proxy/README.md). It is a separate process (version 0.12.1) and uses resource ids `route:<name>` or `site`, so set `resource_prefix` to match those (or omit it). The core in this quickstart stays the hosted API.
+To put that key in front of an API you already have, without writing paywall code, run [`satsgate-proxy`](./proxy/README.md). It is a separate process (version 0.13.0) and uses resource ids `route:<name>` or `site`, so set `resource_prefix` to match those (or omit it). The core in this quickstart stays the hosted API. `x402: true` without `x402_mode` is Base Sepolia. `x402_mode: live` is Base, after the operator has enabled it.
 
 A buyer-side agent uses [`satsgate-mcp`](./mcp/README.md) (version 0.11.0). That process does not create challenges. It pays a Lightning URL the proxy already protects, reads an x402 offer without signing it, and `list_sites` reads the public directory of approved sites, including a USD-priced route. The optional `sgr_` key on the MCP server is only for read-only status and is a different key from the one in the proxy.
 

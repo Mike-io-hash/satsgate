@@ -154,6 +154,25 @@ class World(httpx.AsyncBaseTransport):
         }
         if not self.omit_www:
             payload["www_authenticate"] = f'L402 macaroon="{macaroon}", invoice="{invoice}"'
+        body = snap["body"] if isinstance(snap["body"], dict) else {}
+        if body.get("x402"):
+            mode = body.get("x402_mode") or "test"
+            network = "eip155:8453" if mode == "live" else "eip155:84532"
+            asset = (
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+                if mode == "live"
+                else "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+            )
+            payload["payment_required"] = "dGVzdA"
+            payload["x402"] = {
+                "scheme": "exact",
+                "network": network,
+                "asset": asset,
+                "amount": "10000",
+                "payTo": "0x1111111111111111111111111111111111111111",
+                "testing": mode == "test",
+                "x402_mode": mode,
+            }
         return httpx.Response(200, json=payload)
 
     def _unlock(self, snap: dict) -> httpx.Response:
@@ -240,8 +259,8 @@ def test_example_config_loads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_versions() -> None:
-    assert __version__ == "0.12.1"
-    assert 'APP_VERSION = "0.14.3"' in (ROOT / "app" / "config.py").read_text(encoding="utf-8")
+    assert __version__ == "0.13.0"
+    assert 'APP_VERSION = "0.15.0"' in (ROOT / "app" / "config.py").read_text(encoding="utf-8")
     compose = (ROOT / "proxy" / "docker-compose.yml").read_text(encoding="utf-8")
     assert f"image: satsgate-proxy:{__version__}" in compose
     assert "satsgate-proxy:0.8.0" not in compose
@@ -429,7 +448,7 @@ def test_health_and_free_and_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     with _client(settings, world) as client:
         health = client.get("/healthz")
         assert health.status_code == 200
-        assert health.json() == {"ok": True, "component": "satsgate-proxy", "version": "0.12.1"}
+        assert health.json() == {"ok": True, "component": "satsgate-proxy", "version": "0.13.0"}
         assert client.head("/healthz").status_code == 200
         free = client.get("/health", headers={"Authorization": "Bearer keep-me", "X-Satsgate-Payment-Hash": "forged"})
         missing = client.get("/nope")
@@ -745,3 +764,42 @@ def test_built_www_authenticate_when_core_omits_it(tmp_path: Path, monkeypatch: 
         response = client.get("/blog/a")
     header = response.headers["www-authenticate"]
     assert header == 'L402 macaroon="bWFjYXJvb24", invoice="lnbc1testinvoice"'
+
+
+def test_x402_mode_is_exclusive_and_defaults_to_test(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    missing = YAML.replace(
+        "    description: Read an article\n",
+        "    description: Read an article\n    x402_mode: test\n",
+    )
+    with pytest.raises(ConfigError, match="x402_mode requires x402: true"):
+        _load(tmp_path, monkeypatch, missing)
+    bad = YAML.replace(
+        "    description: Read an article\n",
+        "    description: Read an article\n    x402: true\n    x402_mode: both\n",
+    ).replace("port: 8080\n", "port: 8080\n  public_base: https://api.example.com\n")
+    with pytest.raises(ConfigError, match="x402_mode must be test or live"):
+        _load(tmp_path, monkeypatch, bad)
+
+    implied = YAML.replace(
+        "    description: Read an article\n",
+        "    description: Read an article\n    x402: true\n",
+    ).replace("port: 8080\n", "port: 8080\n  public_base: https://api.example.com\n")
+    settings = _load(tmp_path, monkeypatch, implied)
+    assert settings.routes[0].x402 is True
+    assert settings.routes[0].x402_mode == "test"
+
+    live = implied.replace("x402: true\n", "x402: true\n    x402_mode: live\n")
+    settings = _load(tmp_path, monkeypatch, live)
+    assert settings.routes[0].x402_mode == "live"
+    world = World()
+    with _client(settings, world) as client:
+        response = client.get("/blog/a")
+    assert response.status_code == 402
+    body = response.json()
+    assert body["x402"]["network"] == "eip155:8453"
+    assert body["testing"] is False
+    assert body["x402_mode"] == "live"
+    sent = world.core_calls[0]["body"]
+    assert sent["x402"] is True
+    assert sent["x402_mode"] == "live"
+    assert sent["resource_url"] == "https://api.example.com/blog/a"

@@ -13,7 +13,7 @@ import secrets
 import time
 from urllib.parse import urlsplit, urlunsplit
 
-from . import config
+from . import config, x402
 from .db import _connect
 from .site_secret import (
     SiteSecretError,
@@ -325,6 +325,28 @@ def _route_public(row) -> dict:
     }
 
 
+def _stored_mode(row) -> str:
+    raw = row["x402_mode"] if "x402_mode" in row.keys() else ""
+    if isinstance(raw, str) and raw in {"test", "live"}:
+        return raw
+    return ""
+
+
+def _x402_mode_fields(row) -> dict:
+    """Owner and directory labels. payTo stays off this object."""
+    mode = _stored_mode(row) or None
+    rail = bool(int(row["rail_x402"]))
+    fields: dict = {
+        "x402_mode": mode,
+        "x402_testing": bool(rail and mode == "test"),
+    }
+    if rail and mode == "test":
+        fields["x402_network"] = x402.NETWORK_SEPOLIA
+    elif rail and mode == "live":
+        fields["x402_network"] = x402.NETWORK_BASE
+    return fields
+
+
 def _site_owner(row, routes: list[dict]) -> dict:
     return {
         "id": int(row["id"]),
@@ -341,6 +363,7 @@ def _site_owner(row, routes: list[dict]) -> dict:
         "approved_at": None if row["approved_at"] is None else int(row["approved_at"]),
         "rail_lightning": bool(int(row["rail_lightning"])),
         "rail_x402": bool(int(row["rail_x402"])),
+        **_x402_mode_fields(row),
         "routes": routes,
     }
 
@@ -355,6 +378,7 @@ def _site_public(row, routes: list[dict]) -> dict:
     }
     if isinstance(description, str) and description:
         item["description"] = description
+    item.update(_x402_mode_fields(row))
     return item
 
 
@@ -485,6 +509,8 @@ def update_site(
     set_description: bool = False,
     rail_lightning: bool | None = None,
     rail_x402: bool | None = None,
+    x402_mode: str | None = None,
+    set_x402_mode: bool = False,
     resolver=None,
 ) -> dict | None:
     slug = clean_slug(slug)
@@ -495,8 +521,13 @@ def update_site(
         and listed is None
         and rail_lightning is None
         and rail_x402 is None
+        and not set_x402_mode
     ):
         raise ValueError("empty_update")
+    if set_x402_mode and x402_mode not in {"test", "live"}:
+        raise ValueError("x402_mode_invalid")
+    if set_x402_mode and x402_mode == "live" and not x402.mainnet_enabled():
+        raise ValueError("x402_mainnet_disabled")
     new_name = None if display_name is None else clean_display_name(display_name)
     new_description = clean_description(description) if set_description else None
     new_origin = None if origin_url is None else validate_origin_url(origin_url, resolver=resolver)
@@ -512,6 +543,17 @@ def update_site(
         if next_lightning == 0 and next_x402 == 0:
             conn.execute("ROLLBACK")
             raise ValueError("rails_required")
+        stored_mode = _stored_mode(row)
+        if set_x402_mode:
+            next_mode = str(x402_mode)
+        else:
+            next_mode = stored_mode
+        turning_on = next_x402 == 1 and int(row["rail_x402"]) != 1
+        if turning_on and not next_mode:
+            next_mode = "test"
+        if next_mode == "live" and not x402.mainnet_enabled() and (turning_on or set_x402_mode):
+            conn.execute("ROLLBACK")
+            raise ValueError("x402_mainnet_disabled")
         if next_x402 == 1 and int(row["rail_x402"]) != 1:
             payee = conn.execute(
                 "SELECT payee_evm_verified_at FROM clients WHERE id = ?",
@@ -524,7 +566,7 @@ def update_site(
             """
             UPDATE sites
             SET display_name = ?, description = ?, origin_url = ?, listed = ?,
-                rail_lightning = ?, rail_x402 = ?, updated_at = ?
+                rail_lightning = ?, rail_x402 = ?, x402_mode = ?, updated_at = ?
             WHERE slug = ? AND client_id = ?
             """,
             (
@@ -534,6 +576,7 @@ def update_site(
                 row["listed"] if listed is None else (1 if listed else 0),
                 next_lightning,
                 next_x402,
+                next_mode,
                 now,
                 slug,
                 int(client_id),
