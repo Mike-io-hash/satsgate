@@ -22,6 +22,19 @@ It’s a hosted + self-hostable FastAPI service that gives you:
 
 Your users pay **your** Lightning Address (LNURL-pay). satsgate is **non-custodial** (we never hold your funds) and doesn’t require end-user accounts or KYC.
 
+## USDC payments: Base network only
+
+USDC payments use Base only. Ethereum mainnet, Polygon, Solana, Arbitrum, and any other chain are not accepted.
+
+| Network | Network id | Circle USDC contract | Status |
+| --- | --- | --- | --- |
+| Base Sepolia (testnet) | `eip155:84532` | [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e) | Live today. When a merchant turns x402 on, the 402 asks for this USDC. |
+| Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | Not live. Base mainnet comes later, behind a switch. This version has no switch. The process starts only when `SATSGATE_X402_NETWORK` is `eip155:84532`. |
+
+Merchants: `payTo` must be an address you control on Base. The USDC is paid to that address on the network in the table. Buyers: USDC sent on another network will not be accepted. A balance on Ethereum, Polygon, Solana, or Arbitrum does not pay a Satsgate 402.
+
+Satsgate never custodies, receives, forwards, or refunds buyer funds. The USDC moves from the buyer to the merchant's `payTo`. Satsgate does not hold a buyer wallet and does not run its own facilitator.
+
 Hosted beta: https://api.satsgate.org (start in [`CUSTOMER_QUICKSTART.md`](./CUSTOMER_QUICKSTART.md)). Minimum top-up: **1000 sats → 200 payment verifications** (anti-abuse; no expiry).
 
 No LLM in the hot path: satsgate is a lightweight, low-latency “cashier/turnstile” that sits in front of your agent.
@@ -49,7 +62,7 @@ See [`STATUS.md`](./STATUS.md).
 - Contributing: [`CONTRIBUTING.md`](./CONTRIBUTING.md)
 - Changelog: [`CHANGELOG.md`](./CHANGELOG.md)
 - Security: [`SECURITY.md`](./SECURITY.md)
-- x402 design (not implemented): [`docs/x402-design.md`](./docs/x402-design.md)
+- x402 design: [`docs/x402-design.md`](./docs/x402-design.md)
 
 ## Manifest (.well-known)
 
@@ -70,7 +83,7 @@ Configured via env vars:
   - checks the BOLT11 amount, network, `description_hash` (LUD-06), expiry, and payment hash before issuing a challenge
   - if the provider advertises LUD-21 `verify`, settlement is confirmed there too, including without the payer returning a preimage. Providers that omit it (Wallet of Satoshi) stay preimage-only
 
-`GET /health` returns `{"ok": true, "version": "0.14.2"}` and nothing else.
+`GET /health` returns `{"ok": true, "version": "0.14.3"}` and nothing else.
 
 ## Prepaid payment verifications (credits)
 
@@ -330,14 +343,16 @@ The gate offers Lightning, x402, or both, matching the site. A Lightning-only 40
 
 `PAYMENT-SIGNATURE` is checked by core (verify, then the origin, then settle). Both payment headers on one request is `400 one_rail_only`. The origin does not see `PAYMENT-SIGNATURE`. A USDC payment is signed with `X-Satsgate-Paid-Usd-Atomic`. The payment-hash header is the EIP-3009 nonce, because the transaction id does not exist until settle, and settle runs after the origin.
 
-Enable it with the account key, not a restricted `sgr_` key:
+Enable it with the account key, not a restricted `sgr_` key. Set `payTo` to an address you control on Base. The live network is Base Sepolia. See [USDC payments: Base network only](#usdc-payments-base-network-only).
 
 1. `POST /v1/client/payee/evm/challenge` with `{"address":"0x..."}`. The response is an EIP-191 message. Nothing is written on chain.
 2. Sign that exact text with `personal_sign` and `POST /v1/client/payee/evm` with `{"address","signature"}`. A bad signature does not replace a stored address.
 3. `PATCH /v1/sites/{slug}` with `{"rail_x402": true}`. Lightning can stay true. Both false is rejected.
 4. Price the route in sats or in USD (`price_usd_atomic`, 6 decimals, 1 to 100000000). One main price per route.
 
-Core 0.14.2 and proxy 0.12.0 add no migration and no new environment variable. Rebuild the proxy image and the core image. The gate stays 0.13.0. An old proxy that still omits `charge=false` debits a Lightning credit before the origin. `GET /health` reports `0.14.2`. `GET /healthz` on the gate reports `0.13.0` and on the proxy reports `0.12.0`. Keep the facilitator at `https://x402.org/facilitator`. Route payments still go to the merchant's verified address. An x402 offer, and the cap slot of an unpaid Lightning quote, last `SATSGATE_X402_OFFER_SECONDS` clamped to 60–300 seconds. The Lightning invoice itself is not shortened. The treasury variable below is only for Satsgate credit packs. The private Sepolia check, including the merchant test address, is in [`gate/README.md`](./gate/README.md).
+Core 0.14.2 and proxy 0.12.0 add no migration and no new environment variable. Rebuild the proxy image and the core image. The gate stays 0.13.0. An old proxy that still omits `charge=false` debits a Lightning credit before the origin. `GET /healthz` on the gate reports `0.13.0`. Keep the facilitator at `https://x402.org/facilitator`. Route payments still go to the merchant's verified address. An x402 offer, and the cap slot of an unpaid Lightning quote, last `SATSGATE_X402_OFFER_SECONDS` clamped to 60–300 seconds. The Lightning invoice itself is not shortened. The treasury variable below is only for Satsgate credit packs. The private Sepolia check, including the merchant test address, is in [`gate/README.md`](./gate/README.md).
+
+Core 0.14.3 stores `api_key_id` on a new x402 ledger debit when settle was called with a restricted `sgr_` key. The hosted gate still uses `GATE_TOKEN`, so those debits stay null. Existing rows stay null. No new column and no new environment variable. `GET /health` reports `0.14.3`. Proxy 0.12.1 logs `key fp` and a 12-character SHA-256 fingerprint of the API key at startup. It does not log a prefix of the key. `GET /healthz` on the proxy reports `0.12.1`. satsgate-mcp 0.11.0 reads an x402 402 and does not sign it.
 
 The gate resource string is `gate:<slug>:<path>` and must be at most 200 characters, which is the paywall resource limit. A longer route is stored and is not served.
 
@@ -361,11 +376,11 @@ Startup adds columns. It does not add a table. Copy `satsgate.sqlite3` before re
 
 ## No-code proxy
 
-`satsgate-proxy` (version 0.12.0, in [`proxy/`](./proxy/README.md)) sits in front of an HTTP API you already run. Buyers talk to the proxy. The proxy calls this core with a restricted `sgr_` key. The origin does not implement L402. It checks an HMAC instead.
+`satsgate-proxy` (version 0.12.1, in [`proxy/`](./proxy/README.md)) sits in front of an HTTP API you already run. Buyers talk to the proxy. The proxy calls this core with a restricted `sgr_` key. The origin does not implement L402. It checks an HMAC instead.
 
 An unpaid request is **402** with `WWW-Authenticate: L402 macaroon="...", invoice="..."` (macaroon before invoice, standard base64), which lnget and Alby `fetch402` already parse. The JSON body carries `amount_sats`, `payment_hash`, `invoice_expires_at`, and a hint for wallets that do not return a preimage. A route with `x402: true` adds `PAYMENT-REQUIRED` on that same 402. `Authorization: L402 <macaroon>:<preimage>` confirms the payment. `Authorization: L402 <macaroon>` polls status. The credit is taken after the origin returns 2xx. Pending stays on that invoice (`402 payment_pending`, `Retry-After`). A used, expired, or wrong-route token is a fresh 402, not 401.
 
-The self-hosted proxy is 0.12.0. `GET /healthz` on the proxy reports `0.12.0`. Core health is `0.14.2`. The proxy confirms payment, calls the origin, and debits only after a 2xx, on Lightning and on x402. A failed origin reports no debit. Set `x402: true` on a route, and `server.public_base` to the URL buyers pay, to offer USDC as well. The proxy does not sell credit packs. Top up on the core, with Lightning or with the USDC pack route.
+The self-hosted proxy is 0.12.1. `GET /healthz` on the proxy reports `0.12.1`. Core health is `0.14.3`. The proxy confirms payment, calls the origin, and debits only after a 2xx, on Lightning and on x402. A failed origin reports no debit. The same `PAYMENT-SIGNATURE` can be retried after that failure. Set `x402: true` on a route, and `server.public_base` to the URL buyers pay, to offer USDC as well. Startup logs `key fp` and a SHA-256 fingerprint of the restricted key, not any part of the key. An x402 settle through this proxy records that key's id on the ledger debit. The proxy does not sell credit packs. Top up on the core, with Lightning or with the USDC pack route.
 
 Config is YAML: upstream base URL, routes (`per_request`, `uses:N`, `pass:<seconds>`, scope `route` or `site`), free paths, body limits, and an origin secret from the environment. A `per_request` price below about 10 times the plan's sats-per-credit logs a warning at startup. The trial plan is about 5 sats per credit, so that line is 50 sats. Cheap calls should be bundles or passes.
 
@@ -383,13 +398,13 @@ Full steps, the signature, and a mainnet checklist are in [`proxy/README.md`](./
 
 ## Buyer MCP
 
-`satsgate-mcp` (version 0.10.0, in [`mcp/`](./mcp/README.md)) is a separate process an agent runs over stdio. It is a client. It does not change the core.
+`satsgate-mcp` (version 0.11.0, in [`mcp/`](./mcp/README.md)) is a separate process an agent runs over stdio. It is a client. It does not change the core.
 
-`discover` and `quote` request a URL and read the 402: price in sats, `max_uses`, `access_seconds`, and expiry. `pay_and_fetch` with mode `human` returns the invoice and a QR. `check_payment` polls settlement without a preimage, then retries the URL with the macaroon. Mode `nwc` pays from `SATSGATE_MCP_NWC_URI` in the environment, never from a tool argument, and only inside `SATSGATE_MCP_MAX_PAYMENT_SATS` and `SATSGATE_MCP_DAILY_MAX_SATS`. A token with uses or time left is reused. `token_used_up` comes back as a new quote unless `SATSGATE_MCP_AUTO_PAY` is on and the new invoice is inside the budget.
+`discover` and `quote` request a URL and read the 402. Lightning still returns the price in sats, `max_uses`, `access_seconds`, and expiry. An x402 offer adds the `PAYMENT-REQUIRED` accepts: network, asset, atomic amount, human USDC, `payTo`, resource, scheme, and expiry. The amount is whatever the 402 locked. This process does not recompute it. `pay_and_fetch` with mode `human` returns the invoice and a QR when Lightning is offered, including when x402 is on the same 402. With no Lightning wallet connected, a person can pay that invoice from a phone and the agent continues through `check_payment`. Mode `nwc` pays Lightning from `SATSGATE_MCP_NWC_URI` in the environment, never from a tool argument, and only inside `SATSGATE_MCP_MAX_PAYMENT_SATS` and `SATSGATE_MCP_DAILY_MAX_SATS`. USDC uses a separate pair, `SATSGATE_MCP_MAX_PAYMENT_USD` and `SATSGATE_MCP_DAILY_MAX_USD`. Both must be set before a `PAYMENT-SIGNATURE` is forwarded. This process holds no buyer key and does not sign. The agent retries `pay_and_fetch` with `payment_signature` from an external wallet. A token with uses or time left is reused. `token_used_up` comes back as a new quote unless `SATSGATE_MCP_AUTO_PAY` is on and the new invoice is inside the budget.
 
-An optional `sgr_` key enables read-only `challenge_status` and `credits_balance`. The key cannot top up or change the payee. `list_sites` reads `GET /v1/sites` on the core URL: approved, listed sites, each with a gate URL and route prices. Set `SATSGATE_MCP_REGISTRY` to a JSON file or another URL only when that directory should be replaced.
+An optional `sgr_` key enables read-only `challenge_status` and `credits_balance`. The key cannot top up or change the payee. Nothing in the x402 path asks for an account key. `list_sites` reads `GET /v1/sites` on the core URL: approved, listed sites, each with a gate URL and route prices. A USD-only route is included, with `price_currency` and `price_usd_atomic`. Set `SATSGATE_MCP_REGISTRY` to a JSON file or another URL only when that directory should be replaced.
 
-Core health is `0.14.2`. `GET /health` reports `0.14.2`. The MCP package is 0.10.0. It still cannot top up. Buying credits with USDC is `GET /v1/topup/{plan_id}/x402` on the core with the account key, not an MCP tool. A USD route in the public directory is skipped by `list_sites` until a later MCP release, because that tool still requires `price_sats`.
+Core health is `0.14.3`. `GET /health` reports `0.14.3`. The MCP package is 0.11.0. It still cannot top up. Buying credits with USDC is `GET /v1/topup/{plan_id}/x402` on the core with the account key, not an MCP tool.
 
 ```bash
 pip install -r mcp/requirements.txt

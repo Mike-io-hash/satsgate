@@ -19,7 +19,7 @@ from satsgate_proxy import __version__
 from satsgate_proxy.app import build_app
 from satsgate_proxy.client_ip import buyer_ip_for_core
 from satsgate_proxy.client_ip import resolve_client_ip as proxy_resolve_client_ip
-from satsgate_proxy.config import ConfigError, load_settings
+from satsgate_proxy.config import ConfigError, key_fingerprint, load_settings
 from satsgate_proxy.match import compile_glob
 from satsgate_proxy.origin import origin_message, request_target, sign_origin, verify_origin_signature
 
@@ -240,8 +240,24 @@ def test_example_config_loads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_versions() -> None:
-    assert __version__ == "0.12.0"
-    assert 'APP_VERSION = "0.14.2"' in (ROOT / "app" / "config.py").read_text(encoding="utf-8")
+    assert __version__ == "0.12.1"
+    assert 'APP_VERSION = "0.14.3"' in (ROOT / "app" / "config.py").read_text(encoding="utf-8")
+    compose = (ROOT / "proxy" / "docker-compose.yml").read_text(encoding="utf-8")
+    assert f"image: satsgate-proxy:{__version__}" in compose
+    assert "satsgate-proxy:0.8.0" not in compose
+
+
+def test_startup_fingerprint_is_not_any_part_of_the_api_key() -> None:
+    key = "sgr_SUPERSECRETvalue_not_a_hex_prefix"
+    fingerprint = key_fingerprint(key)
+    assert fingerprint == key_fingerprint(key)
+    assert fingerprint != key_fingerprint(key + "x")
+    assert len(fingerprint) == 12
+    assert set(fingerprint) <= set("0123456789abcdef")
+    assert key not in fingerprint
+    assert key[:8] not in fingerprint
+    assert "SUPERSECRET" not in fingerprint
+    assert "sgr_" not in fingerprint
 
 
 def test_globs() -> None:
@@ -413,7 +429,7 @@ def test_health_and_free_and_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     with _client(settings, world) as client:
         health = client.get("/healthz")
         assert health.status_code == 200
-        assert health.json() == {"ok": True, "component": "satsgate-proxy", "version": "0.12.0"}
+        assert health.json() == {"ok": True, "component": "satsgate-proxy", "version": "0.12.1"}
         assert client.head("/healthz").status_code == 200
         free = client.get("/health", headers={"Authorization": "Bearer keep-me", "X-Satsgate-Payment-Hash": "forged"})
         missing = client.get("/nope")

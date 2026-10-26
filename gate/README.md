@@ -2,7 +2,20 @@
 
 The hosted gate. One process serves many approved sites at `https://gate.satsgate.org/<slug>/<path>`.
 
-Version **0.13.0**. Core is **0.14.2**. A site can offer Lightning, x402 (USDC on Base Sepolia), or both. x402 is off until the merchant turns it on. The self-hosted proxy is **0.12.0** and is a different program: one merchant, one YAML file, one origin secret in the environment. It charges after a successful origin on both rails. This process has no origin secret of its own, and it does not call the facilitator.
+Version **0.13.0**. Core is **0.14.3**. A site can offer Lightning, x402 (USDC on Base Sepolia), or both. x402 is off until the merchant turns it on. The self-hosted proxy is **0.12.1** and is a different program: one merchant, one YAML file, one origin secret in the environment. It charges after a successful origin on both rails. This process has no origin secret of its own, and it does not call the facilitator. A debit from this gate still has a null `api_key_id`, because the gate authenticates with `GATE_TOKEN` rather than an `sgr_` key.
+
+## USDC payments: Base network only
+
+USDC payments use Base only. Ethereum mainnet, Polygon, Solana, Arbitrum, and any other chain are not accepted.
+
+| Network | Network id | Circle USDC contract | Status |
+| --- | --- | --- | --- |
+| Base Sepolia (testnet) | `eip155:84532` | [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e) | Live today. When the merchant turns x402 on, the 402 asks for this USDC. |
+| Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | Not live. Base mainnet comes later, behind a switch. This version has no switch. Core starts only when `SATSGATE_X402_NETWORK` is `eip155:84532`. |
+
+Merchants: `payTo` must be an address you control on Base. The USDC is paid to that address on the network in the table. Buyers: USDC sent on another network will not be accepted. A balance on Ethereum, Polygon, Solana, or Arbitrum does not pay this gate.
+
+Satsgate never custodies, receives, forwards, or refunds buyer funds. The USDC moves from the buyer to the merchant's `payTo`. This process does not hold a buyer wallet and does not run its own facilitator.
 
 ## Why an internal API
 
@@ -50,7 +63,7 @@ Compose builds this directory and does not publish a port. Caddy is the only pub
 
 ## Turn on x402
 
-Use the account key. A restricted `sgr_` key cannot set a payee or a rail.
+Use the account key. A restricted `sgr_` key cannot set a payee or a rail. `payTo` must be an address you control on Base. The live network is Base Sepolia (`eip155:84532`), contract [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e). USDC sent on another network will not be accepted. See [USDC payments: Base network only](#usdc-payments-base-network-only).
 
 1. `POST /v1/client/payee/evm/challenge` with `{"address":"0x..."}`. Sign the returned text with `personal_sign` (EIP-191). Nothing happens on chain.
 2. `POST /v1/client/payee/evm` with `{"address","signature"}`. `GET /v1/client` then shows `payee_evm_verified: true`. It does not return the signature.

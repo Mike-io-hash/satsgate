@@ -2,7 +2,20 @@
 
 A reverse proxy a merchant runs beside an existing HTTP API. The buyer hits the proxy. The proxy sells the request through [satsgate](https://api.satsgate.org) and forwards only a paid request to the origin. The merchant does not write paywall code.
 
-The proxy is version **0.12.0**. It talks to the satsgate core paywall (challenge, verify, status, charge, and x402 verify/settle). Core is **0.14.2**. The proxy does not sell credit packs and does not call the facilitator. Top up on the core with Lightning, or with USDC at `GET /v1/topup/{plan_id}/x402` when `SATSGATE_TREASURY_EVM_ADDRESS` is set. The hosted gate is a separate program. Buyer USDC on a proxied route goes to the merchant's verified `payTo`.
+The proxy is version **0.12.1**. It talks to the satsgate core paywall (challenge, verify, status, charge, and x402 verify/settle). Core is **0.14.3**. The proxy does not sell credit packs and does not call the facilitator. Top up on the core with Lightning, or with USDC at `GET /v1/topup/{plan_id}/x402` when `SATSGATE_TREASURY_EVM_ADDRESS` is set. The hosted gate is a separate program. Buyer USDC on a proxied route goes to the merchant's verified `payTo`.
+
+## USDC payments: Base network only
+
+USDC payments use Base only. Ethereum mainnet, Polygon, Solana, Arbitrum, and any other chain are not accepted.
+
+| Network | Network id | Circle USDC contract | Status |
+| --- | --- | --- | --- |
+| Base Sepolia (testnet) | `eip155:84532` | [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e) | Live today. When a route sets `x402: true`, the 402 asks for this USDC. |
+| Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | Not live. Base mainnet comes later, behind a switch. This version has no switch. Core starts only when `SATSGATE_X402_NETWORK` is `eip155:84532`. |
+
+Merchants: `payTo` must be an address you control on Base. Prove it with the same EVM challenge the hosted gate uses. The USDC is paid to that address on the network in the table. Buyers: USDC sent on another network will not be accepted. A balance on Ethereum, Polygon, Solana, or Arbitrum does not pay this proxy.
+
+Satsgate never custodies, receives, forwards, or refunds buyer funds. The USDC moves from the buyer to the merchant's `payTo`. The proxy does not hold a buyer wallet and does not run its own facilitator.
 
 ## Run it
 
@@ -31,7 +44,9 @@ The proxy is version **0.12.0**. It talks to the satsgate core paywall (challeng
    docker compose -f proxy/docker-compose.yml up --build
    ```
 
-   Buyers use the proxy's published port. `GET /healthz` is the proxy (`{"ok":true,"component":"satsgate-proxy","version":"0.12.0"}`). It is not forwarded.
+   Buyers use the proxy's published port. `GET /healthz` is the proxy (`{"ok":true,"component":"satsgate-proxy","version":"0.12.1"}`). It is not forwarded.
+
+   Startup logs `key fp` and 12 hex characters. That is the start of SHA-256 of the API key. It is not a prefix of the key, and the key itself is not written to the log.
 
 Without Docker, from a checkout:
 
@@ -40,7 +55,7 @@ pip install -r proxy/requirements.txt
 PYTHONPATH=proxy/src python -m satsgate_proxy --config proxy/satsgate-proxy.yaml
 ```
 
-The image listens as uid 65532. Build it from the repo root: `docker build -f proxy/Dockerfile -t satsgate-proxy:0.12.0 .`
+The image listens as uid 65532. Build it from the repo root: `docker build -f proxy/Dockerfile -t satsgate-proxy:0.12.1 .`
 
 ## What a buyer sees
 
@@ -125,7 +140,7 @@ The proxy consumes first, then forwards. There is no un-consume. Two parallel re
 
 The proxy confirms the payment first and calls the origin next. A credit is taken only when that response is 2xx. An origin **4xx** or **5xx** is passed through with the host headers removed, and nothing is debited. The same macaroon can be retried. If the origin times out, refuses the connection, redirects, or returns a body over the cap, the buyer gets a proxy error with `use_spent: false`. Do not put internal hostnames in an origin error body.
 
-A route may set `x402: true`. That also requires `server.public_base`, the `http://` or `https://` origin buyers pay (no path). The account needs a verified EVM payee, the same challenge used by the hosted gate. The 402 then includes `PAYMENT-REQUIRED`. `PAYMENT-SIGNATURE` is verified, the origin is called with `X-Satsgate-Paid-Usd-Atomic` and no `X-Satsgate-Paid-Sats`, and settle runs only after a 2xx. `PAYMENT-RESPONSE` carries `success`, `transaction`, `network`, `payer`, and `tx`. Sending both `Authorization: L402` and `PAYMENT-SIGNATURE` is 400 `one_rail_only`. The proxy never calls the facilitator.
+A route may set `x402: true`. The network is Base Sepolia only. See [USDC payments: Base network only](#usdc-payments-base-network-only). That also requires `server.public_base`, the `http://` or `https://` origin buyers pay (no path). The account needs a verified EVM payee on Base, the same challenge used by the hosted gate. The 402 then includes `PAYMENT-REQUIRED`. `PAYMENT-SIGNATURE` is verified, the origin is called with `X-Satsgate-Paid-Usd-Atomic` and no `X-Satsgate-Paid-Sats`, and settle runs only after a 2xx. `PAYMENT-RESPONSE` carries `success`, `transaction`, `network`, `payer`, and `tx`. An origin 4xx or 5xx does not settle and does not debit. The buyer retries the same `PAYMENT-SIGNATURE`. Sending both `Authorization: L402` and `PAYMENT-SIGNATURE` is 400 `one_rail_only`. The proxy never calls the facilitator. The settle call uses the restricted `sgr_` key, and core records that key's id on the new ledger debit. The key string is not stored.
 
 A retry of the same token takes another use when the bundle still has one. A `per_request` token is then `token_used_up`, and the next call is a new 402. Pending polls do not consume.
 

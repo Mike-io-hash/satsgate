@@ -82,21 +82,34 @@ def _one_site(item: object, allowlist: tuple[str, ...]) -> dict | None:
             if not isinstance(route, dict):
                 continue
             path = route.get("path")
-            price = route.get("price_sats")
-            if not isinstance(path, str) or not path.startswith("/") or isinstance(price, bool):
+            if not isinstance(path, str) or not path.startswith("/"):
                 continue
-            if not isinstance(price, int):
+            price = route.get("price_sats")
+            has_sats = isinstance(price, int) and not isinstance(price, bool)
+            currency = route.get("price_currency")
+            usd = route.get("price_usd_atomic")
+            has_usd = (
+                currency == "usd"
+                and isinstance(usd, int)
+                and not isinstance(usd, bool)
+                and usd >= 1
+            )
+            if not has_sats and not has_usd:
                 continue
             uses = route.get("max_uses")
             access = route.get("access_seconds")
-            kept.append(
-                {
-                    "path": path[:200],
-                    "price_sats": price,
-                    "max_uses": uses if isinstance(uses, int) and not isinstance(uses, bool) else None,
-                    "access_seconds": access if isinstance(access, int) and not isinstance(access, bool) else None,
-                }
-            )
+            kept_route: dict = {
+                "path": path[:200],
+                "max_uses": uses if isinstance(uses, int) and not isinstance(uses, bool) else None,
+                "access_seconds": access if isinstance(access, int) and not isinstance(access, bool) else None,
+            }
+            if has_sats:
+                kept_route["price_sats"] = price
+            if currency in {"sats", "usd"}:
+                kept_route["price_currency"] = currency
+            if isinstance(usd, int) and not isinstance(usd, bool) and usd >= 1:
+                kept_route["price_usd_atomic"] = usd
+            kept.append(kept_route)
         if kept:
             entry["routes"] = kept
     return entry

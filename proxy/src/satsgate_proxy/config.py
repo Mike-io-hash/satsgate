@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -14,6 +15,11 @@ import yaml
 from satsgate_proxy.match import MatchError, compile_glob, compile_regex
 
 log = logging.getLogger("satsgate_proxy")
+
+
+def key_fingerprint(api_key: str) -> str:
+    """Short SHA-256 id for logs. Not a prefix of the key and not reversible from the log line."""
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
 
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ROUTE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")

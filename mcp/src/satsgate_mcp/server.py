@@ -13,12 +13,17 @@ from satsgate_mcp.urls import UrlError
 
 _INSTRUCTIONS = (
     "Satsgate buyer tools. discover and quote read a 402 and do not pay. "
-    "pay_and_fetch with mode human returns a BOLT11 invoice and a QR; then call check_payment "
-    "with the payment_hash until the content arrives. No preimage is required. "
-    "mode nwc pays from the wallet configured in the server environment, never from a tool argument. "
-    "A used-up token is quoted again and is not paid inside the same call unless auto-pay is enabled "
-    "and the invoice is inside the configured budget. "
-    "Do not ask the user to paste a wallet connection string or an API key into the chat."
+    "A 402 may offer Lightning, USDC via x402, or both. "
+    "pay_and_fetch with mode human returns a BOLT11 invoice and a QR when Lightning is offered; "
+    "then call check_payment with the payment_hash until the content arrives. No preimage is required. "
+    "mode nwc pays Lightning from the wallet configured in the server environment, never from a tool argument. "
+    "This server does not hold an EVM key and does not sign x402. When the USDC amount is inside the USD cap, "
+    "the tool returns the payment requirements. Call pay_and_fetch again with payment_signature set to a "
+    "PAYMENT-SIGNATURE from an external wallet. If the origin fails, retry that same payment_signature. "
+    "Do not send it together with an L402 Authorization. "
+    "A used-up Lightning token is quoted again and is not paid inside the same call unless auto-pay is enabled "
+    "and the invoice is inside the configured sats budget. "
+    "Do not ask the user to paste a wallet connection string, an API key, or a private key into the chat."
 )
 
 _READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=True)
@@ -53,10 +58,11 @@ def build_server(buyer: Buyer | None = None, settings: Settings | None = None) -
 
     @mcp.tool(annotations=_READ, structured_output=False)
     async def discover(url: str, method: str = "GET") -> dict:
-        """Request a URL with no payment and read a 402 L402 challenge.
+        """Request a URL with no payment and read a 402.
 
-        Returns the price in sats, max_uses, access_seconds, and invoice expiry when the
-        server sends them. Does not pay and does not reuse a token.
+        Lightning fields are the price in sats, max_uses, access_seconds, and invoice expiry.
+        An x402 offer adds network, asset, atomic amount, human USDC, payTo, resource, scheme,
+        and expiry. Both are returned when the 402 offers both. Does not pay and does not sign.
         """
         try:
             return await buyer.discover(url, method)
@@ -72,17 +78,26 @@ def build_server(buyer: Buyer | None = None, settings: Settings | None = None) -
             return _error(exc)
 
     @mcp.tool(annotations=_PAY, structured_output=False)
-    async def pay_and_fetch(url: str, mode: str = "human", method: str = "GET", body: str | None = None) -> list:
+    async def pay_and_fetch(
+        url: str,
+        mode: str = "human",
+        method: str = "GET",
+        body: str | None = None,
+        payment_signature: str | None = None,
+    ) -> list:
         """Fetch a paywalled URL.
 
-        mode human returns the invoice, a text QR, and a PNG. Then call check_payment.
-        mode nwc pays with the NWC URI from the environment, inside the sats budget.
-        A token that still has uses or time left is reused and is not paid again.
+        mode human returns the Lightning invoice, a text QR, and a PNG when that rail is offered.
+        Then call check_payment. mode nwc pays Lightning with the NWC URI from the environment,
+        inside the sats budget. A token that still has uses or time left is reused and is not paid again.
+        x402 is not signed here. Within the USD cap the result tells an external wallet what to pay.
+        Pass that wallet's PAYMENT-SIGNATURE as payment_signature to retry. The same value can be
+        sent again if the origin failed. Do not pass an L402 header in the same call.
         A fresh 402 token_used_up is returned as a new quote unless SATSGATE_MCP_AUTO_PAY is on
-        and the new invoice is inside the budget.
+        and the new invoice is inside the sats budget.
         """
         try:
-            return _present(await buyer.pay_and_fetch(url, mode, method, body))
+            return _present(await buyer.pay_and_fetch(url, mode, method, body, payment_signature))
         except (BuyerError, UrlError, ConfigError) as exc:
             return [_error(exc)]
 
@@ -127,7 +142,7 @@ def build_server(buyer: Buyer | None = None, settings: Settings | None = None) -
         """List approved, listed sites from the public directory.
 
         The default is GET /v1/sites on SATSGATE_MCP_CORE_URL. Each row has a name,
-        slug, gate URL, and routes (price in sats, max_uses, access_seconds).
+        slug, gate URL, and routes (price in sats and, when present, USD).
         SATSGATE_MCP_REGISTRY, when set, replaces that with a JSON file or another URL.
         """
         try:

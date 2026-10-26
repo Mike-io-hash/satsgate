@@ -11,7 +11,7 @@ import uvicorn
 
 from satsgate_proxy import __version__
 from satsgate_proxy.app import build_app
-from satsgate_proxy.config import ConfigError, load_settings
+from satsgate_proxy.config import ConfigError, key_fingerprint, load_settings
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -31,12 +31,12 @@ def main(argv: list[str] | None = None) -> None:
     log = logging.getLogger("satsgate_proxy")
     names = ", ".join(name for name, _value in settings.inject_headers)
     log.info(
-        "satsgate-proxy %s listen %s:%s core %s key %s… upstream %s routes %s inject [%s]",
+        "satsgate-proxy %s listen %s:%s core %s key fp %s upstream %s routes %s inject [%s]",
         __version__,
         settings.host,
         settings.port,
         settings.core_base_url,
-        settings.api_key[:8],
+        key_fingerprint(settings.api_key),
         settings.upstream_base_url,
         len(settings.routes),
         names,

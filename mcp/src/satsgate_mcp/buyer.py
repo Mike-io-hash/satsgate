@@ -20,14 +20,41 @@ from satsgate_mcp.redact import scrub
 from satsgate_mcp.registry import RegistryError, load_registry
 from satsgate_mcp.store import Store
 from satsgate_mcp.urls import UrlError, validate_url
+from satsgate_mcp.x402 import ParsedX402, for_agent, payment_response_fields
 
 log = logging.getLogger("satsgate_mcp")
 
 _METHODS = frozenset({"GET", "HEAD", "POST"})
 _QUOTE_REUSE_SECONDS = 60
+_USD_DAY = 24 * 60 * 60
+_SIGNATURE_MAX = 8192
 _REQUOTE = frozenset({"token_used_up", "token_expired"})
 _PREIMAGE = re.compile(r"^[0-9a-fA-F]{64}$")
 _HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
+_X402_RETRY_NEW = frozenset({"bad_signature", "expired", "x402_replay"})
+_X402_ERRORS = {
+    "x402_rejected": (
+        "The gate returned x402_rejected. A failed verify needs a new PAYMENT-SIGNATURE. "
+        "A failed settle can be retried with this same header. The gate does not ask for a new nonce "
+        "while that payment is still pending. Satsgate did not move the USDC."
+    ),
+    "x402_replay": "This signature was already settled. Sending it again will not fetch the resource.",
+    "x402_in_progress": "Settlement is still in progress. Retry the same PAYMENT-SIGNATURE after a short wait.",
+    "expired": "The offer expired. Fetch a new 402 and pay the amount that one states.",
+    "bad_signature": "The gate rejected the PAYMENT-SIGNATURE. It was not logged. Fetch a new 402 if the offer changed.",
+    "one_rail_only": (
+        "The gate saw both an L402 Authorization and PAYMENT-SIGNATURE. "
+        "This call sends only one. Retry the same PAYMENT-SIGNATURE without an L402 header."
+    ),
+    "paywall_unavailable": (
+        "The gate could not finish verification or settlement. Nothing was settled and no merchant credit was taken. "
+        "You can retry the same PAYMENT-SIGNATURE."
+    ),
+    "payment_required": (
+        "The server still wants payment. The signature was not accepted as payment for this 402. "
+        "Compare it with the requirements. Retrying the same header is safe while the offer is unchanged."
+    ),
+}
 
 
 class BuyerError(Exception):
@@ -77,7 +104,7 @@ class Buyer:
         challenge, response = await self._fetch_challenge(url, method, body=None, reuse=False)
         if challenge is None:
             return response
-        return challenge.public()
+        return self._annotate(challenge)
 
     async def quote(self, url: str, method: str = "GET") -> dict:
         found = await self.discover(url, method)
@@ -91,10 +118,13 @@ class Buyer:
         mode: str = "human",
         method: str = "GET",
         body: str | None = None,
+        payment_signature: str | None = None,
     ) -> Presentation:
         way = mode.strip().lower()
         if way not in {"human", "nwc"}:
             raise BuyerError("invalid_mode", "mode must be human or nwc.")
+        if payment_signature is not None and payment_signature != "":
+            return await self._pay_with_signature(url, method, body, payment_signature)
         payload = None if body is None else body.encode("utf-8")
         if payload is not None and len(payload) > self.settings.max_body_bytes:
             raise BuyerError("request_too_large", "The request body is above SATSGATE_MCP_MAX_BODY_BYTES.")
@@ -113,6 +143,8 @@ class Buyer:
             if challenge is None:
                 return Presentation(free)
 
+        if not challenge.offers_lightning:
+            return self._x402_offer(self._annotate(challenge), mode=way)
         if way == "human":
             return self._human_offer(challenge)
         return await self._pay_with_nwc(challenge, allow_autopay=False)
@@ -312,6 +344,7 @@ class Buyer:
                     www_authenticate=response.headers.get("www-authenticate", ""),
                     body=response.body,
                     request_body=body,
+                    payment_required=response.headers.get("payment-required", ""),
                 )
             except ChallengeError as exc:
                 raise BuyerError(exc.code, exc.message) from None
@@ -341,20 +374,179 @@ class Buyer:
                 "reason": challenge.reason,
                 "request_body": challenge.request_body,
                 "created_at": self._now(),
+                "x402_json": None if challenge.x402 is None else challenge.x402.to_json(),
             }
         )
 
-    def _human_offer(self, challenge: Challenge) -> Presentation:
-        png, text = invoice_qr(challenge.invoice)
+    def _annotate(self, challenge: Challenge) -> dict:
         payload = challenge.public()
+        if challenge.x402 is None:
+            return payload
+        spent = self.store.spent_usd_since(self._now() - _USD_DAY)
+        view = for_agent(challenge.x402, self.settings, spent)
+        payload["x402"] = view
+        if not view.get("payable"):
+            extra = view.get("cap_detail") or view.get("detail")
+            if extra:
+                payload["summary"] = f"{payload.get('summary', '')} {extra}".strip()
+        elif view.get("detail"):
+            payload["summary"] = f"{payload.get('summary', '')} {view['detail']}".strip()
+        return payload
+
+    def _x402_offer(self, payload: dict, *, mode: str) -> Presentation:
+        payload["mode"] = mode
+        payload["auto_paid"] = False
+        x402 = payload.get("x402") if isinstance(payload.get("x402"), dict) else {}
+        if x402.get("payable"):
+            payload["action"] = "pay_x402_external"
+            detail = str(x402["payment"]["detail"])
+            if mode == "nwc":
+                detail = "NWC pays a Lightning invoice. This 402 has no invoice. " + detail
+            payload["detail"] = detail
+            return Presentation(payload)
+        payload["ok"] = False
+        payload["error"] = x402.get("error") or "not_payable"
+        payload["action"] = "refused"
+        payload["signature_sent"] = False
+        payload["detail"] = str(x402.get("cap_detail") or x402.get("detail") or "The USDC requirement was not paid.")
+        return Presentation(payload)
+
+    def _human_offer(self, challenge: Challenge) -> Presentation:
+        payload = self._annotate(challenge)
+        png, text = invoice_qr(challenge.invoice)
         payload["mode"] = "human"
         payload["action"] = "pay_invoice"
         payload["qr_text"] = text
-        payload["detail"] = (
+        lightning = (
             "Pay this invoice from any Lightning wallet, then call check_payment with payment_hash. "
             "Do not send a preimage. check_payment polls settlement and retries the URL with the macaroon."
         )
+        x402 = payload.get("x402") if isinstance(payload.get("x402"), dict) else None
+        if x402 and x402.get("payable"):
+            payload["detail"] = (
+                lightning
+                + " This 402 also offers USDC. Paying the invoice does not pay the USDC amount. "
+                + str(x402["payment"]["detail"])
+            )
+        elif x402:
+            extra = x402.get("cap_detail") or x402.get("detail") or ""
+            payload["detail"] = f"{lightning} {extra}".strip()
+        else:
+            payload["detail"] = lightning
         return Presentation(payload, png)
+
+    async def _pay_with_signature(
+        self,
+        url: str,
+        method: str,
+        body: str | None,
+        payment_signature: str,
+    ) -> Presentation:
+        """Forward a PAYMENT-SIGNATURE the caller already has. This process does not sign."""
+        signature = _clean_payment_signature(payment_signature)
+        payload = None if body is None else body.encode("utf-8")
+        if payload is not None and len(payload) > self.settings.max_body_bytes:
+            raise BuyerError("request_too_large", "The request body is above SATSGATE_MCP_MAX_BODY_BYTES.")
+        method = _method(method)
+        target = validate_url(url, self.settings.allowlist)
+        challenge, free = await self._fetch_challenge(target, method, payload, reuse=True)
+        if challenge is None:
+            free["signature_sent"] = False
+            free["detail"] = (
+                "The URL did not return a 402, so the PAYMENT-SIGNATURE was not sent. "
+                "Nothing was signed by this server."
+            )
+            return Presentation(free)
+        annotated = self._annotate(challenge)
+        x402 = annotated.get("x402") if isinstance(annotated.get("x402"), dict) else None
+        if not x402 or not x402.get("offered"):
+            annotated["ok"] = False
+            annotated["error"] = "x402_not_offered"
+            annotated["action"] = "requote"
+            annotated["signature_sent"] = False
+            annotated["detail"] = "This 402 did not offer x402. The PAYMENT-SIGNATURE was not sent."
+            return Presentation(annotated)
+        if not x402.get("payable"):
+            annotated["ok"] = False
+            annotated["error"] = x402.get("error") or "not_payable"
+            annotated["action"] = "refused"
+            annotated["signature_sent"] = False
+            annotated["detail"] = str(
+                x402.get("cap_detail") or x402.get("detail") or "The USDC requirement was not paid."
+            )
+            return Presentation(annotated)
+        fetched = await self._send(
+            challenge.method,
+            challenge.url,
+            {"PAYMENT-SIGNATURE": signature},
+            challenge.request_body if payload is None else payload,
+        )
+        return Presentation(self._interpret_signed(fetched, challenge, annotated, signature))
+
+    def _interpret_signed(
+        self,
+        response: "_Raw",
+        challenge: Challenge,
+        annotated: dict,
+        signature: str,
+    ) -> dict:
+        x402 = annotated.get("x402") if isinstance(annotated.get("x402"), dict) else {}
+        charge = x402.get("charge_atomic") if isinstance(x402, dict) else None
+        parsed = _json(response.body)
+        if 200 <= response.status < 300:
+            if isinstance(charge, int) and not isinstance(charge, bool) and charge > 0:
+                host = urlsplit(challenge.url).hostname or ""
+                self.store.record_usd_spend(
+                    created_at=self._now(),
+                    amount_usd_atomic=charge,
+                    host=host,
+                    resource=challenge.url,
+                )
+            content = self._content(response, None, None)
+            if isinstance(content.get("body"), str):
+                content["body"] = self._scrub(str(content["body"]), signature)
+            content["paid_with"] = "x402"
+            content["signature_sent"] = True
+            content["retry_same_payment_signature"] = False
+            display = _first_display(x402)
+            if display:
+                content["amount_atomic"] = display[0]
+                content["amount_display"] = display[1]
+            fields = payment_response_fields(response.headers.get("payment-response", ""))
+            if fields:
+                content["payment_response"] = fields
+            content["detail"] = (
+                "The server returned the resource. payment_response, when present, is the settlement report "
+                "(success, transaction, network, payer). This server did not sign the payment and did not log the header."
+            )
+            return content
+        if 300 <= response.status < 400:
+            raise BuyerError("redirect_not_followed", "The server redirected. This client does not follow redirects.")
+        error = parsed.get("error") if isinstance(parsed.get("error"), str) else ""
+        explanation = _X402_ERRORS.get(error)
+        if explanation is None:
+            explanation = (
+                f"The server returned HTTP {response.status}. "
+                "If that status is the origin, the payment was not settled and no merchant credit was taken. "
+                "Retry pay_and_fetch with the same PAYMENT-SIGNATURE while the offer is valid. "
+                "This server did not sign a new payment."
+            )
+        body_text = ""
+        if response.body and len(response.body) <= 2000:
+            body_text = self._scrub(response.body.decode("utf-8", errors="replace"), signature)
+        return {
+            "ok": False,
+            "payment_required": response.status == 402,
+            "error": error or "request_failed",
+            "http_status": response.status,
+            "signature_sent": True,
+            "retry_same_payment_signature": error not in _X402_RETRY_NEW,
+            "url": challenge.url,
+            "method": challenge.method,
+            "x402": x402,
+            "detail": explanation,
+            "body": body_text or None,
+        }
 
     async def _pay_with_nwc(self, challenge: Challenge, *, allow_autopay: bool) -> Presentation:
         if not self.settings.nwc_uri:
@@ -365,7 +557,7 @@ class Buyer:
             )
         blocked = refusal(self.settings, self.store, challenge.amount_sats, self._now())
         if blocked:
-            payload = challenge.public()
+            payload = self._annotate(challenge)
             payload["ok"] = False
             payload["error"] = "over_budget"
             payload["action"] = "requote"
@@ -373,7 +565,7 @@ class Buyer:
             payload["detail"] = blocked
             return Presentation(payload)
         if allow_autopay and not self.settings.auto_pay:
-            payload = challenge.public()
+            payload = self._annotate(challenge)
             payload["action"] = "requote"
             payload["auto_paid"] = False
             payload["detail"] = (
@@ -465,15 +657,16 @@ class Buyer:
                     www_authenticate=response.headers.get("www-authenticate", ""),
                     body=response.body,
                     request_body=challenge.request_body,
+                    payment_required=response.headers.get("payment-required", ""),
                 )
             except ChallengeError as exc:
                 raise BuyerError(exc.code, exc.message) from None
             self._remember_quote(fresh)
             reason = fresh.reason or ""
-            if allow_autopay and reason in _REQUOTE and self.settings.auto_pay:
+            if allow_autopay and reason in _REQUOTE and self.settings.auto_pay and fresh.offers_lightning:
                 paid = await self._pay_with_nwc(fresh, allow_autopay=True)
                 return paid
-            payload = fresh.public()
+            payload = self._annotate(fresh)
             payload["action"] = "requote"
             payload["auto_paid"] = False
             if reason in _REQUOTE:
@@ -483,6 +676,8 @@ class Buyer:
                 )
             else:
                 payload["detail"] = "The server returned a new 402. It was not paid."
+            if not fresh.offers_lightning:
+                return Presentation(payload)
             png, text = invoice_qr(fresh.invoice)
             payload["qr_text"] = text
             return Presentation(payload, png)
@@ -590,7 +785,7 @@ class Buyer:
         target = validate_url(url) if _is_core(url, self.settings.core_url) else validate_url(url, self.settings.allowlist)
         outbound = {"Accept": headers.get("Accept", "*/*"), "Accept-Encoding": "identity"}
         for name, value in headers.items():
-            if name.lower() in {"authorization", "x-api-key", "content-type", "accept"}:
+            if name.lower() in {"authorization", "x-api-key", "content-type", "accept", "payment-signature"}:
                 outbound[name] = value
         if body:
             outbound.setdefault("Content-Type", "application/json")
@@ -627,6 +822,34 @@ class _Raw:
     headers: dict[str, str]
     body: bytes
     truncated: bool
+
+
+def _clean_payment_signature(value: str) -> str:
+    if not value or any(char.isspace() for char in value) or any(char in value for char in "\r\n\x00"):
+        raise BuyerError(
+            "invalid_payment_signature",
+            "PAYMENT-SIGNATURE must be a single line without spaces. It was not sent.",
+        )
+    if len(value.encode("utf-8")) > _SIGNATURE_MAX:
+        raise BuyerError(
+            "invalid_payment_signature",
+            "PAYMENT-SIGNATURE is longer than 8192 bytes. It was not sent.",
+        )
+    return value
+
+
+def _first_display(x402: dict) -> tuple[str, str] | None:
+    accepts = x402.get("accepts")
+    if not isinstance(accepts, list):
+        return None
+    for item in accepts:
+        if not isinstance(item, dict):
+            continue
+        atomic = item.get("amount_atomic")
+        shown = item.get("amount_display")
+        if isinstance(atomic, str) and isinstance(shown, str):
+            return atomic, shown
+    return None
 
 
 def _unix() -> int:
@@ -702,11 +925,14 @@ def _preimage_required(challenge: Challenge) -> dict:
 
 
 def _challenge_from_quote(row) -> Challenge:
+    raw = row["x402_json"] if "x402_json" in row.keys() else None
+    parsed = ParsedX402.from_json(raw) if isinstance(raw, str) and raw else None
+    invoice = str(row["invoice"])
     return Challenge(
         method=str(row["method"]),
         url=str(row["url"]),
         macaroon=str(row["macaroon"]),
-        invoice=str(row["invoice"]),
+        invoice=invoice,
         payment_hash=str(row["payment_hash"]),
         amount_sats=int(row["amount_sats"]),
         resource=row["resource"],
@@ -715,6 +941,8 @@ def _challenge_from_quote(row) -> Challenge:
         invoice_expires_at=row["invoice_expires_at"],
         reason=row["reason"],
         request_body=row["request_body"],
+        offers_lightning=bool(invoice),
+        x402=parsed,
     )
 
 

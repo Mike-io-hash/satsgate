@@ -194,15 +194,18 @@ def test_proxy_x402_charges_once_and_records_the_ledger(tmp_path, monkeypatch):
             assert settled["network"] == "eip155:84532"
             assert settled["payer"] == buyer.address
             assert core.get("/v1/balance", headers={"X-Api-Key": account}).json()["credits"] == before - 1
+            keys = core.get("/v1/api-keys", headers={"X-Api-Key": account}).json()["keys"]
+            assert len(keys) == 1
             with sqlite3.connect(os.environ["SATSGATE_DB_PATH"]) as conn:
                 ledger = conn.execute(
                     """
-                    SELECT network, amount_usd_atomic, COUNT(*)
+                    SELECT api_key_id, network, amount_usd_atomic, COUNT(*)
                     FROM ledger WHERE reason = 'paywall_verify'
                     """
                 ).fetchone()
-            assert ledger[0] == "eip155:84532"
-            assert ledger[1] == int(body["x402"]["amount"])
-            assert ledger[2] == 1
+            assert ledger[0] == keys[0]["id"]
+            assert ledger[1] == "eip155:84532"
+            assert ledger[2] == int(body["x402"]["amount"])
+            assert ledger[3] == 1
             assert sum(1 for url, _body in calls if url.endswith("/settle")) == 1
             assert sum(1 for url, _body in calls if url.endswith("/verify")) == 1

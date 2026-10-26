@@ -2610,6 +2610,7 @@ def _paywall_x402(body: PaywallX402In, x_api_key: str | None, *, settle: bool):
                 resource=body.resource,
                 encoded=body.payment_signature,
                 resource_url=resource_url,
+                api_key_id=auth.api_key_id,
             )
         else:
             result = x402_service.verify_payment(

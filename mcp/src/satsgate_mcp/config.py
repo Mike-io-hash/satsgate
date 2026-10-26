@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +29,28 @@ def _optional_int(name: str, *, minimum: int, maximum: int) -> int | None:
     return value
 
 
+def _usd_atomic(name: str) -> int | None:
+    """USD from the environment as USDC atomic units (6 decimals).
+
+    ``0.01`` is 10000. More than 6 decimal places is rejected. Unset is None.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return None
+    text = str(raw).strip()
+    if text.startswith("+"):
+        text = text[1:]
+    if not re.fullmatch(r"\d+(\.\d+)?", text):
+        raise ConfigError(f"{name} must be a USD amount with up to 6 decimal places.")
+    whole, _, frac = text.partition(".")
+    if len(frac) > 6:
+        raise ConfigError(f"{name} must have at most 6 decimal places.")
+    atomic = int(whole) * 1_000_000 + int((frac or "0").ljust(6, "0"))
+    if atomic > 1_000_000 * 1_000_000:
+        raise ConfigError(f"{name} must be at most 1000000 USD.")
+    return atomic
+
+
 def _allowlist() -> tuple[str, ...]:
     raw = os.environ.get("SATSGATE_MCP_URL_ALLOWLIST", "")
     return tuple(part.strip() for part in raw.split(",") if part.strip())
@@ -38,6 +61,8 @@ class Settings:
     nwc_uri: str
     max_payment_sats: int | None
     daily_max_sats: int | None
+    max_payment_usd_atomic: int | None
+    daily_max_usd_atomic: int | None
     auto_pay: bool
     data_dir: Path
     core_url: str
@@ -53,7 +78,9 @@ class Settings:
         key = "set" if self.api_key else "unset"
         return (
             f"Settings(nwc_uri={nwc}, api_key={key}, max_payment_sats={self.max_payment_sats}, "
-            f"daily_max_sats={self.daily_max_sats}, auto_pay={self.auto_pay}, core_url={self.core_url!r})"
+            f"daily_max_sats={self.daily_max_sats}, max_payment_usd_atomic={self.max_payment_usd_atomic}, "
+            f"daily_max_usd_atomic={self.daily_max_usd_atomic}, auto_pay={self.auto_pay}, "
+            f"core_url={self.core_url!r})"
         )
 
 
@@ -86,6 +113,8 @@ def load_settings() -> Settings:
         nwc_uri=nwc,
         max_payment_sats=_optional_int("SATSGATE_MCP_MAX_PAYMENT_SATS", minimum=0, maximum=100_000_000),
         daily_max_sats=_optional_int("SATSGATE_MCP_DAILY_MAX_SATS", minimum=0, maximum=100_000_000),
+        max_payment_usd_atomic=_usd_atomic("SATSGATE_MCP_MAX_PAYMENT_USD"),
+        daily_max_usd_atomic=_usd_atomic("SATSGATE_MCP_DAILY_MAX_USD"),
         auto_pay=os.environ.get("SATSGATE_MCP_AUTO_PAY", "").strip().lower() in _TRUE,
         data_dir=data_dir,
         core_url=core,

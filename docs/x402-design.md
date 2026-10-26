@@ -42,12 +42,14 @@ The residual risk is accepted. `/settle` can fail after the origin has already r
 
 Lightning money already moves when the invoice is paid, to `clients.payee_lightning_address`, before the origin runs. The Lightning PR does not change that. It changes only when the Satsgate credit and the use counter move.
 
-The facilitator is not us. Testnet calls the public x402.org facilitator, which must advertise `exact` on `eip155:84532` from `GET /supported`. Mainnet calls the Coinbase CDP facilitator only when `SATSGATE_X402_CDP=1`. The default is off. Core is the only process that holds facilitator credentials and the only process that calls `/verify` or `/settle`. The gate and the proxy call core, the same way they call `_unlock_paywall` today.
+The facilitator is not us. Testnet calls the public x402.org facilitator, which must advertise `exact` on `eip155:84532` from `GET /supported`. Mainnet calls the Coinbase CDP facilitator only when `SATSGATE_X402_CDP=1`. The default is off. That switch is not in the shipped code. Core refuses to boot on any network other than `eip155:84532`. Core is the only process that holds facilitator credentials and the only process that calls `/verify` or `/settle`. The gate and the proxy call core, the same way they call `_unlock_paywall` today.
 
-USDC contracts are fixed in config, not taken from the buyer or the merchant:
+USDC contracts are fixed in config, not taken from the buyer or the merchant. Ethereum mainnet, Polygon, Solana, Arbitrum, and any other chain are not accepted.
 
-- Base Sepolia `eip155:84532`: `0x036CbD53842c5426634e7929541eC2318f3dCF7e` (the address in the v2 exact-EVM examples).
-- Base `eip155:8453`: `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`.
+- Base Sepolia `eip155:84532`: [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e) (Circle USDC, the address in the v2 exact-EVM examples). Live today.
+- Base `eip155:8453`: [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) (Circle USDC). Not live. The mainnet switch above is not in this tree.
+
+`payTo` is an address the merchant controls on Base. USDC sent on another network will not be accepted. Satsgate never custodies, receives, forwards, or refunds buyer funds.
 
 `extra.name` is `USDC` and `extra.version` is `2`. `extra.assetTransferMethod` is `eip3009`.
 
@@ -248,7 +250,7 @@ Merchant account, all on the account key. A restricted `sgr_` key cannot set a p
 - `PATCH /v1/sites/{slug}` accepts `rail_lightning` and `rail_x402`. Turning x402 on without a verified address is 400 `payee_evm_not_verified`. Turning both off is 400. Default for a new site is Lightning on, x402 off.
 - `POST /v1/sites/{slug}/routes` and the route `PATCH` accept `price_currency` (`sats` or `usd`) and, when USD, `price_usd_atomic`. `price_sats` stays required for a sats-priced route. Bounds stay inside `clean_price` for sats. USD must be at least 1 atomic unit and at most a config cap (proposed `$1,000`, `100_000_000` atomic, so a typo cannot quote a fortune).
 
-`GET /v1/sites` adds, per route, `price_currency` and `price_usd_atomic` when that is the main price. It does not add `payTo`. The gate URL stays `url`. Derived prices are not listed, because they move. The 402 is where the locked quote appears. satsgate-mcp `list_sites` (`mcp/src/satsgate_mcp/registry.py`) will pass those fields through in the MCP PR. Until then, unknown JSON fields are already ignored.
+`GET /v1/sites` adds, per route, `price_currency` and `price_usd_atomic` when that is the main price. It does not add `payTo`. The gate URL stays `url`. Derived prices are not listed, because they move. The 402 is where the locked quote appears. satsgate-mcp `list_sites` (`mcp/src/satsgate_mcp/registry.py`) passes `price_currency` and `price_usd_atomic` through as of 0.11.0. A USD-only route is kept. A sats route still requires an integer `price_sats`. Unknown JSON fields stay ignored.
 
 402 from the gate (`_challenge_response`) and from the proxy (`proxy/src/satsgate_proxy/app.py` `_challenge_response`):
 
@@ -368,7 +370,7 @@ Each one is shippable on its own. None of them is this pull request.
 4. Lightning credit timing. Shipped for the hosted gate in satsgate-gate 0.13.0 and core 0.14.1. `settled_at` on payment confirmation. Credit and `uses_consumed` only after origin 2xx. Retry and replay as in section 3.1. Proxy 0.12.0 does the same through the public paywall routes. This release also shortens gate-route x402 offers to the 60–300 second window, stops expired offers from filling the buyer cap, and names the settlement field `transaction` (section 5.3 of the x402 v2 spec) with `tx` kept as an alias.
 5. USDC credit top-up. Shipped in core 0.14.0 as `GET /v1/topup/{plan_id}/x402`, payTo `SATSGATE_TREASURY_EVM_ADDRESS`, amount from the BTC/USD median locked on the offer. Credits only after settle. No gate change.
 6. Proxy YAML and the same headers, still talking to core.
-7. MCP. Parse `PAYMENT-REQUIRED`, show the USDC amount, and enforce a separate USD cap (`SATSGATE_MCP_MAX_PAYMENT_USD` and a daily cap). Do not pay automatically unless a later, explicit wallet setting exists. The sats caps in `budget.py` do not apply to USDC and must not be reused as if they did.
+7. MCP. Shipped as satsgate-mcp 0.11.0. It parses `PAYMENT-REQUIRED`, shows the USDC amount exactly as the 402 states it, and enforces a separate USD cap (`SATSGATE_MCP_MAX_PAYMENT_USD` and `SATSGATE_MCP_DAILY_MAX_USD`). Both must be set before a `PAYMENT-SIGNATURE` is forwarded. It does not hold a buyer private key and does not pay. The sats caps in `budget.py` do not apply to USDC. An unknown network or asset is reported and is not payable. Only USDC on Base Sepolia and Base is treated as supported. A signature is forwarded only when every accept is supported and inside both caps, because the signature may select any accept.
 8. CDP mainnet behind `SATSGATE_X402_CDP`, default off, after the small real payment in section 10. A per-site `upfront` option is not in this list.
 
 ## 12. Open questions
@@ -376,5 +378,5 @@ Each one is shippable on its own. None of them is this pull request.
 Credit timing, the standard x402 flow, and rounding are decisions (sections 1.1 and 6). Credit packs in 0.14.0 use the BTC/USD median rather than a fixed USD list. The testnet facilitator URL is `https://x402.org/facilitator`; `GET /supported` lists `exact` on `eip155:84532`. These still need an owner:
 
 1. Whether `payTo` may appear on `GET /v1/sites`. This design keeps it off the directory, like the Lightning address, and puts it only in the 402.
-2. Whether the MCP may hold a buyer private key. This design says no in the first MCP PR. It returns the payment requirements and enforces a USD cap. A key in the environment would be a separate decision, and it would have to be unread from logs the way `SATSGATE_MCP_NWC_URI` is.
+2. Whether the MCP may hold a buyer private key. Decided for the first MCP release: no. satsgate-mcp 0.11.0 returns the payment requirements and enforces both USD caps. A key in the environment remains a separate decision, and it would have to be unread from logs the way `SATSGATE_MCP_NWC_URI` is.
 3. The mainnet facilitator URL. It stays disabled. There is still no CDP path.

@@ -1,7 +1,7 @@
 [project]
 name = "satsgate-mcp"
-version = "0.10.0"
-description = "Buyer-side MCP server for Satsgate L402 resources"
+version = "0.11.0"
+description = "Buyer-side MCP server for Satsgate L402 and x402 resources"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

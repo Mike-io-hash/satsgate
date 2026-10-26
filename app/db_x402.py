@@ -575,8 +575,14 @@ def mark_settled_and_charge(
     cost: int,
     now: int,
     amount_usd_atomic: int,
+    api_key_id: int | None = None,
 ) -> dict:
-    """Store the tx and debit one credit. A second call does not debit again."""
+    """Store the tx and debit one credit. A second call does not debit again.
+
+    ``api_key_id`` is the restricted key that settled the request, when the
+    caller authenticated with one. The account key and the hosted gate leave
+    it null. Existing ledger rows are not rewritten.
+    """
     now = int(now)
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -629,9 +635,18 @@ def mark_settled_and_charge(
             INSERT INTO ledger(
               client_id, delta_credits, reason, ref, created_at, api_key_id, resource,
               network, amount_usd_atomic
-            ) VALUES(?, ?, 'paywall_verify', ?, ?, NULL, ?, ?, ?)
+            ) VALUES(?, ?, 'paywall_verify', ?, ?, ?, ?, ?, ?)
             """,
-            (int(client_id), -int(cost), tx_hash, now, resource, network, int(amount_usd_atomic)),
+            (
+                int(client_id),
+                -int(cost),
+                tx_hash,
+                now,
+                int(api_key_id) if api_key_id is not None else None,
+                resource,
+                network,
+                int(amount_usd_atomic),
+            ),
         )
         conn.execute(
             """

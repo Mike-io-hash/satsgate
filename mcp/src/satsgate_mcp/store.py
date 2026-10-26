@@ -28,7 +28,15 @@ CREATE TABLE IF NOT EXISTS quotes (
     invoice_expires_at INTEGER,
     reason TEXT,
     request_body BLOB,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    x402_json TEXT
+);
+CREATE TABLE IF NOT EXISTS spend_usd (
+    id INTEGER PRIMARY KEY,
+    created_at INTEGER NOT NULL,
+    amount_usd_atomic INTEGER NOT NULL,
+    host TEXT NOT NULL,
+    resource TEXT
 );
 CREATE TABLE IF NOT EXISTS tokens (
     cache_key TEXT PRIMARY KEY,
@@ -61,10 +69,29 @@ class Store:
         self._conn = sqlite3.connect(path, timeout=30)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         try:
             os.chmod(path, 0o600)
         except OSError:
             pass
+
+    def _migrate(self) -> None:
+        """Additive only. Existing spend and quote rows are left as they are."""
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(quotes)")}
+        if "x402_json" not in cols:
+            self._conn.execute("ALTER TABLE quotes ADD COLUMN x402_json TEXT")
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS spend_usd (
+                id INTEGER PRIMARY KEY,
+                created_at INTEGER NOT NULL,
+                amount_usd_atomic INTEGER NOT NULL,
+                host TEXT NOT NULL,
+                resource TEXT
+            )
+            """
+        )
+        self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
@@ -72,6 +99,24 @@ class Store:
     def spent_since(self, since: int) -> int:
         row = self._conn.execute("SELECT COALESCE(SUM(amount_sats), 0) AS total FROM spend WHERE created_at >= ?", (since,))
         return int(row.fetchone()["total"])
+
+    def spent_usd_since(self, since: int) -> int:
+        row = self._conn.execute(
+            "SELECT COALESCE(SUM(amount_usd_atomic), 0) AS total FROM spend_usd WHERE created_at >= ?",
+            (since,),
+        )
+        return int(row.fetchone()["total"])
+
+    def record_usd_spend(self, *, created_at: int, amount_usd_atomic: int, host: str, resource: str) -> None:
+        """Record an x402 amount after a 2xx. The payment header is not stored."""
+        self._conn.execute(
+            """
+            INSERT INTO spend_usd (created_at, amount_usd_atomic, host, resource)
+            VALUES (?, ?, ?, ?)
+            """,
+            (created_at, int(amount_usd_atomic), host[:200], resource[:300]),
+        )
+        self._conn.commit()
 
     def record_spend(self, *, created_at: int, amount_sats: int, payment_hash: str, host: str) -> None:
         self._conn.execute(
@@ -87,8 +132,8 @@ class Store:
             INSERT INTO quotes (
                 payment_hash, cache_key, method, url, macaroon, invoice, resource,
                 amount_sats, max_uses, access_seconds, invoice_expires_at, reason,
-                request_body, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                request_body, created_at, x402_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row["payment_hash"],
@@ -105,6 +150,7 @@ class Store:
                 row.get("reason"),
                 row.get("request_body"),
                 row["created_at"],
+                row.get("x402_json"),
             ),
         )
         self._conn.commit()
