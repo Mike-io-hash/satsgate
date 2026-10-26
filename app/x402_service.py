@@ -307,6 +307,7 @@ def settle_payment(
     resource: str,
     encoded: str,
     resource_url: str | None = None,
+    api_key_id: int | None = None,
 ) -> dict:
     """Called only after the origin returned 2xx. A failed settle does not debit."""
     now = int(time.time())
@@ -350,6 +351,7 @@ def settle_payment(
             cost=_COST,
             now=now,
             amount_usd_atomic=int(offer["amount_usd_atomic"]),
+            api_key_id=api_key_id,
         )
         return _settled_body(charged, fields["payer"])
     locked = db_x402.set_authorization_state(
@@ -447,6 +449,7 @@ def settle_payment(
         cost=_COST,
         now=now,
         amount_usd_atomic=int(offer["amount_usd_atomic"]),
+        api_key_id=api_key_id,
     )
     return _settled_body(charged, fields["payer"])
 

@@ -199,9 +199,9 @@ def test_x402_only_verifies_serves_and_settles(tmp_path, monkeypatch):
 
                 with sqlite3.connect(os.environ["SATSGATE_DB_PATH"]) as conn:
                     ledger = conn.execute(
-                        "SELECT network, amount_usd_atomic FROM ledger WHERE reason = 'paywall_verify'"
+                        "SELECT network, amount_usd_atomic, api_key_id FROM ledger WHERE reason = 'paywall_verify'"
                     ).fetchone()
-                assert ledger == ("eip155:84532", 10_000)
+                assert ledger == ("eip155:84532", 10_000, None)
                 assert verify_origin_signature(
                     secret=secret,
                     header=forwarded.headers["x-satsgate-signature"],

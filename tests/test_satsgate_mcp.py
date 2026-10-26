@@ -83,6 +83,8 @@ def _settings(tmp_path: Path, **overrides) -> Settings:
         nwc_uri="",
         max_payment_sats=100,
         daily_max_sats=500,
+        max_payment_usd_atomic=None,
+        daily_max_usd_atomic=None,
         auto_pay=False,
         data_dir=tmp_path,
         core_url="http://core.test",
@@ -172,7 +174,7 @@ def _hrp(invoice: str) -> str:
 
 
 def test_version_and_bolt11_amount() -> None:
-    assert __version__ == "0.10.0"
+    assert __version__ == "0.11.0"
     assert amount_sats(SPEC_INVOICE) == 250_000
     assert expires_at(SPEC_INVOICE) == 1_496_314_718
     assert amount_sats("lnbc200n1ignored") == 20

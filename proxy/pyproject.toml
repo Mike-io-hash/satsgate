@@ -1,6 +1,6 @@
 [project]
 name = "satsgate-proxy"
-version = "0.12.0"
+version = "0.12.1"
 description = "Self-hosted L402 reverse proxy for an existing HTTP API"
 readme = "README.md"
 requires-python = ">=3.10"
