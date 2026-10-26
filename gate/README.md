@@ -2,7 +2,7 @@
 
 The hosted gate. One process serves many approved sites at `https://gate.satsgate.org/<slug>/<path>`.
 
-Version **0.14.0**. Core is **0.15.0**. A site can offer Lightning, x402 (USDC on one Base network), or both. x402 is off until the merchant turns it on. A new site stores no mode. Turning x402 on without a mode stores test (Base Sepolia). Live (Base) is a separate choice and only works when the operator has enabled CDP. The self-hosted proxy is **0.13.0** and is a different program: one merchant, one YAML file, one origin secret in the environment. It charges after a successful origin on both rails. This process has no origin secret of its own, and it does not call the facilitator. A debit from this gate still has a null `api_key_id`, because the gate authenticates with `GATE_TOKEN` rather than an `sgr_` key.
+Version **0.14.0**. Core is **0.15.1**. A site can offer Lightning, x402 (USDC on one Base network), or both. x402 is off until the merchant turns it on. A new site stores no mode. Turning x402 on without a mode stores test (Base Sepolia). Live (Base) is a separate choice and only works when the operator has enabled CDP. The self-hosted proxy is **0.13.0** and is a different program: one merchant, one YAML file, one origin secret in the environment. It charges after a successful origin on both rails. This process has no origin secret of its own, and it does not call the facilitator. A debit from this gate still has a null `api_key_id`, because the gate authenticates with `GATE_TOKEN` rather than an `sgr_` key.
 
 ## USDC payments: Base network only
 
@@ -13,7 +13,7 @@ USDC payments use Base only. Ethereum mainnet, Polygon, Solana, Arbitrum, and an
 | Base Sepolia (testnet) | `eip155:84532` | [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e) | Testing. A site in test mode offers only this USDC. It is not a network for real buyers. |
 | Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | Live mode. Available only when the operator sets `SATSGATE_X402_CDP=1` and both CDP credentials. The 402 offers only this USDC. |
 
-Merchants: `payTo` must be an address you control on Base. The USDC is paid to that address on the one network the site is in. Try on Base Sepolia with your agent first, then switch the site to live. Buyers: USDC sent on another network will not be accepted. A balance on Ethereum, Polygon, Solana, or Arbitrum does not pay this gate.
+Merchants: `payTo` must be an address you control on Base. The USDC is paid to that address on the one network the site is in. The EIP-712 name in `extra` is `USDC` on Base Sepolia and `USD Coin` on Base. Try on Base Sepolia with your agent first, then switch the site to live. Buyers: USDC sent on another network will not be accepted. A balance on Ethereum, Polygon, Solana, or Arbitrum does not pay this gate.
 
 Satsgate never custodies, receives, forwards, or refunds buyer funds. The USDC moves from the buyer to the merchant's `payTo`. This process does not hold a buyer wallet and does not run its own facilitator.
 

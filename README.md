@@ -31,7 +31,7 @@ USDC payments use Base only. Ethereum mainnet, Polygon, Solana, Arbitrum, and an
 | Base Sepolia (testnet) | `eip155:84532` | [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e) | Testing. A site in test mode offers only this USDC, through `https://x402.org/facilitator`. It is not a network for real buyers. |
 | Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | Live when the operator sets `SATSGATE_X402_CDP=1` and both CDP credentials. A site in live mode offers only this USDC, through the Coinbase CDP facilitator. |
 
-Merchants: `payTo` must be an address you control on Base. The USDC is paid to that address on the one network that site is in. A 402 never lists both. Try on Base Sepolia with your agent first, then switch the site to live. Buyers: USDC sent on another network will not be accepted. A balance on Ethereum, Polygon, Solana, or Arbitrum does not pay a Satsgate 402.
+Merchants: `payTo` must be an address you control on Base. The USDC is paid to that address on the one network that site is in. A 402 never lists both. The EIP-712 domain name in `extra` follows that contract: `USDC` on Base Sepolia and `USD Coin` on Base. Both use version `2`. Try on Base Sepolia with your agent first, then switch the site to live. Buyers: USDC sent on another network will not be accepted. A balance on Ethereum, Polygon, Solana, or Arbitrum does not pay a Satsgate 402.
 
 A new site leaves x402 off and the mode unset. Turning x402 on without a mode stores `test`. That default is deliberate: a merchant does not take real USDC until they set `x402_mode` to `live`. Live is rejected while the operator switch is off. Test mode is labeled `testing: true` on the API response. The resource description says it is Base Sepolia, not Base mainnet.
 
@@ -85,7 +85,7 @@ Configured via env vars:
   - checks the BOLT11 amount, network, `description_hash` (LUD-06), expiry, and payment hash before issuing a challenge
   - if the provider advertises LUD-21 `verify`, settlement is confirmed there too, including without the payer returning a preimage. Providers that omit it (Wallet of Satoshi) stay preimage-only
 
-`GET /health` returns `{"ok": true, "version": "0.15.0"}` and nothing else.
+`GET /health` returns `{"ok": true, "version": "0.15.1"}` and nothing else.
 
 ## Prepaid payment verifications (credits)
 
@@ -354,7 +354,9 @@ Enable it with the account key, not a restricted `sgr_` key. Set `payTo` to an a
 
 Core 0.14.2 and proxy 0.12.0 add no migration and no new environment variable. Rebuild the proxy image and the core image. The gate stays 0.13.0. An old proxy that still omits `charge=false` debits a Lightning credit before the origin. `GET /healthz` on the gate reports `0.13.0`. Keep the facilitator at `https://x402.org/facilitator`. Route payments still go to the merchant's verified address. An x402 offer, and the cap slot of an unpaid Lightning quote, last `SATSGATE_X402_OFFER_SECONDS` clamped to 60–300 seconds. The Lightning invoice itself is not shortened. The treasury variable below is only for Satsgate credit packs. The private Sepolia check, including the merchant test address, is in [`gate/README.md`](./gate/README.md).
 
-Core 0.15.0 adds Base mainnet USDC behind `SATSGATE_X402_CDP` (default `0`). `GET /health` reports `0.15.0`. The hosted gate is 0.14.0. The proxy is 0.13.0. satsgate-mcp stays 0.11.0. Startup adds `sites.x402_mode` (`''`, `test`, or `live`). Copy `satsgate.sqlite3` before you restart. There is no schema rollback: turning the switch off does not drop the column.
+Core 0.15.1 fixes the EIP-712 domain name. Base Sepolia offers stay `extra.name` `USDC`. Base mainnet offers and mainnet credit packs use `USD Coin`, which is what that USDC contract returns from `name()`. `GET /health` reports `0.15.1`. No migration. Rebuild the core image. The gate stays 0.14.0, the proxy stays 0.13.0, and satsgate-mcp stays 0.11.0.
+
+Core 0.15.0 adds Base mainnet USDC behind `SATSGATE_X402_CDP` (default `0`). The hosted gate is 0.14.0. The proxy is 0.13.0. satsgate-mcp stays 0.11.0. Startup adds `sites.x402_mode` (`''`, `test`, or `live`). Copy `satsgate.sqlite3` before you restart. There is no schema rollback: turning the switch off does not drop the column.
 
 To enable mainnet, on the core service only (the gate container must not receive these):
 
@@ -426,7 +428,7 @@ Startup adds columns. It does not add a table. Copy `satsgate.sqlite3` before re
 
 An unpaid request is **402** with `WWW-Authenticate: L402 macaroon="...", invoice="..."` (macaroon before invoice, standard base64), which lnget and Alby `fetch402` already parse. The JSON body carries `amount_sats`, `payment_hash`, `invoice_expires_at`, and a hint for wallets that do not return a preimage. A route with `x402: true` adds `PAYMENT-REQUIRED` on that same 402. `Authorization: L402 <macaroon>:<preimage>` confirms the payment. `Authorization: L402 <macaroon>` polls status. The credit is taken after the origin returns 2xx. Pending stays on that invoice (`402 payment_pending`, `Retry-After`). A used, expired, or wrong-route token is a fresh 402, not 401.
 
-The self-hosted proxy is 0.13.0. `GET /healthz` on the proxy reports `0.13.0`. Core health is `0.15.0`. The proxy confirms payment, calls the origin, and debits only after a 2xx, on Lightning and on x402. A failed origin reports no debit. The same `PAYMENT-SIGNATURE` can be retried after that failure. Set `x402: true` on a route, and `server.public_base` to the URL buyers pay, to offer USDC as well. `x402: true` without `x402_mode` is test (Base Sepolia). `x402_mode: live` is Base, and only while the operator switch is on. Try on Base Sepolia with your agent first, then switch the site to live. Startup logs `key fp` and a SHA-256 fingerprint of the restricted key, not any part of the key. An x402 settle through this proxy records that key's id on the ledger debit. The proxy does not sell credit packs. Top up on the core, with Lightning or with the USDC pack route.
+The self-hosted proxy is 0.13.0. `GET /healthz` on the proxy reports `0.13.0`. Core health is `0.15.1`. The proxy confirms payment, calls the origin, and debits only after a 2xx, on Lightning and on x402. A failed origin reports no debit. The same `PAYMENT-SIGNATURE` can be retried after that failure. Set `x402: true` on a route, and `server.public_base` to the URL buyers pay, to offer USDC as well. `x402: true` without `x402_mode` is test (Base Sepolia). `x402_mode: live` is Base, and only while the operator switch is on. Try on Base Sepolia with your agent first, then switch the site to live. Startup logs `key fp` and a SHA-256 fingerprint of the restricted key, not any part of the key. An x402 settle through this proxy records that key's id on the ledger debit. The proxy does not sell credit packs. Top up on the core, with Lightning or with the USDC pack route.
 
 Config is YAML: upstream base URL, routes (`per_request`, `uses:N`, `pass:<seconds>`, scope `route` or `site`), free paths, body limits, and an origin secret from the environment. A `per_request` price below about 10 times the plan's sats-per-credit logs a warning at startup. The trial plan is about 5 sats per credit, so that line is 50 sats. Cheap calls should be bundles or passes.
 
@@ -450,7 +452,7 @@ Full steps, the signature, and a mainnet checklist are in [`proxy/README.md`](./
 
 An optional `sgr_` key enables read-only `challenge_status` and `credits_balance`. The key cannot top up or change the payee. Nothing in the x402 path asks for an account key. `list_sites` reads `GET /v1/sites` on the core URL: approved, listed sites, each with a gate URL and route prices. A USD-only route is included, with `price_currency` and `price_usd_atomic`. Set `SATSGATE_MCP_REGISTRY` to a JSON file or another URL only when that directory should be replaced.
 
-Core health is `0.15.0`. `GET /health` reports `0.15.0`. The MCP package is 0.11.0. It still cannot top up. Buying credits with USDC is `GET /v1/topup/{plan_id}/x402` on the core with the account key, not an MCP tool. While `SATSGATE_X402_CDP` is on, that pack is Base mainnet USDC only. While it is off, the pack stays on Base Sepolia.
+Core health is `0.15.1`. `GET /health` reports `0.15.1`. The MCP package is 0.11.0. It still cannot top up. Buying credits with USDC is `GET /v1/topup/{plan_id}/x402` on the core with the account key, not an MCP tool. While `SATSGATE_X402_CDP` is on, that pack is Base mainnet USDC only. While it is off, the pack stays on Base Sepolia.
 
 ```bash
 pip install -r mcp/requirements.txt

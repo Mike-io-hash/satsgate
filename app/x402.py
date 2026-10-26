@@ -28,12 +28,19 @@ _BYTES32 = re.compile(r"^0x[0-9a-fA-F]{64}$")
 _SIG = re.compile(r"^0x[0-9a-fA-F]{130}$")
 _ATOMIC = re.compile(r"^[1-9][0-9]{0,17}$")
 
-EXTRA = {"name": "USDC", "version": "2", "assetTransferMethod": "eip3009"}
 NETWORK_SEPOLIA = "eip155:84532"
 NETWORK_BASE = "eip155:8453"
 _USDC_BY_NETWORK = {
     NETWORK_SEPOLIA: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
     NETWORK_BASE: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+}
+# EIP-712 domain name() on each USDC contract. Sepolia is "USDC".
+# Base mainnet is "USD Coin". version() is "2" on both. assetTransferMethod
+# stays eip3009. A buyer signs this exact object. One dict for both networks
+# makes CDP reject a valid mainnet signature.
+_EXTRA_BY_NETWORK = {
+    NETWORK_SEPOLIA: {"name": "USDC", "version": "2", "assetTransferMethod": "eip3009"},
+    NETWORK_BASE: {"name": "USD Coin", "version": "2", "assetTransferMethod": "eip3009"},
 }
 MODES = frozenset({"test", "live"})
 TEST_DESCRIPTION = "Test payment on Base Sepolia. Not Base mainnet."
@@ -154,6 +161,14 @@ def usdc_for_network(network: str) -> str:
     return to_checksum_address(asset)
 
 
+def extra_for_network(network: str) -> dict:
+    """EIP-712 extra for that network. Callers must not share the stored dict."""
+    extra = _EXTRA_BY_NETWORK.get(network)
+    if extra is None:
+        raise X402Error("network_mismatch")
+    return dict(extra)
+
+
 def resource_url(slug: str, path: str) -> str:
     return f"{config.GATE_PUBLIC_BASE}/{slug}{path}"
 
@@ -189,7 +204,7 @@ def accept_for(
         "asset": usdc_for_network(chosen),
         "payTo": pay_to,
         "maxTimeoutSeconds": int(timeout_seconds),
-        "extra": dict(EXTRA),
+        "extra": extra_for_network(chosen),
     }
 
 
@@ -294,7 +309,7 @@ def validate_payload(payload: dict, *, offer: dict, now: int | None = None) -> d
     amount = _atomic(accepted.get("amount"))
     if amount != str(int(offer["amount_usd_atomic"])):
         raise X402Error("amount_mismatch")
-    if accepted.get("extra") != EXTRA:
+    if accepted.get("extra") != extra_for_network(network):
         raise X402Error("bad_signature")
     inner = payload.get("payload")
     if not isinstance(inner, dict):
