@@ -5,7 +5,7 @@ import { describe, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import { formatAddressBlocks } from '../src/address.js'
-import { ERROR_MESSAGES, GENERIC_ERROR, messageForError } from '../src/copy.js'
+import { COPY, ERROR_MESSAGES, GENERIC_ERROR, expirySentence, messageForError } from '../src/copy.js'
 import { isUserRejection, phoneSignHint } from '../src/errors.js'
 import { utf8ToHex } from '../src/hex.js'
 import { isProjectId } from '../src/project.js'
@@ -62,6 +62,69 @@ describe('error copy', () => {
     assert.equal(messageForError('no_such_code'), GENERIC_ERROR)
     assert.equal(messageForError(''), GENERIC_ERROR)
     assert.equal(/anonymous/i.test(JSON.stringify(ERROR_MESSAGES)), false)
+  })
+})
+
+describe('expiry sentence', () => {
+  const stay = 'Keep this tab open. Refreshing forgets the link.'
+
+  test('does not add a second period when the locale already ends with one', () => {
+    const cases = [
+      '29/10/2026, 6:41:17 p.m.',
+      '29/10/2026, 6:41:17 a.m.',
+      '29/10/2026, 6:41:17 p. m.',
+      '29/10/2026 18:41:17。',
+    ]
+    for (const when of cases) {
+      const line = expirySentence(when)
+      assert.equal(line, `This link expires ${when} ${stay}`)
+      assert.equal(line.includes('..'), false, line)
+    }
+  })
+
+  test('keeps a single period when the locale does not end with one', () => {
+    const cases = [
+      '10/29/2026, 6:41:17 PM',
+      '29/10/2026, 18:41:17',
+      '29.10.2026, 18:41:17',
+    ]
+    for (const when of cases) {
+      const line = expirySentence(when)
+      assert.equal(line, `This link expires ${when}. ${stay}`)
+      assert.equal(line.includes('..'), false, line)
+    }
+  })
+
+  test('no sampled locale formats into a double period', () => {
+    const sample = new Date('2026-10-29T18:41:17Z')
+    const locales = ['en-US', 'en-GB', 'en-IE', 'en-AU', 'en-CA', 'es-AR', 'es-MX', 'es-ES', 'pt-BR', 'fr-FR', 'de-DE', 'ja-JP', 'ar', 'zh-CN']
+    for (const locale of locales) {
+      const line = expirySentence(sample.toLocaleString(locale))
+      assert.equal(line.includes('..'), false, `${locale}: ${line}`)
+      assert.match(line, /^This link expires .+ Keep this tab open\. Refreshing forgets the link\.$/)
+    }
+  })
+})
+
+describe('callout copy', () => {
+  test('adds the two titles and the lock without rewriting the exchange body', () => {
+    assert.equal(COPY.baseTitle, '✅ USDC on Base only')
+    assert.equal(COPY.baseMiddle, 'Buyers pay USDC on the Base network (')
+    assert.equal(COPY.exchangeTitle, '⚠️ Do not use an exchange deposit address')
+    assert.equal(
+      COPY.exchangeBefore,
+      'Use an address from a wallet you control, such as MetaMask, Rabby, Coinbase Wallet, Trust Wallet, Rainbow or a hardware wallet. ',
+    )
+    assert.equal(COPY.exchangeStrong, 'Do not use a deposit address from an exchange')
+    assert.equal(
+      COPY.exchangeAfter,
+      ' (Coinbase.com, Binance, Kraken, OKX and others). Exchanges can change or retire deposit addresses, may not credit USDC sent this way, and you could lose the payments.',
+    )
+    assert.equal(
+      COPY.neverAsk,
+      '🔒 Satsgate will never ask for your seed phrase (recovery phrase) or private key. If any page or person does, it is a scam.',
+    )
+    assert.equal(COPY.verified, 'Verified ✓')
   })
 })
 
@@ -125,6 +188,16 @@ describe('page source', () => {
       assert.equal(/anonymous/i.test(text), false, `${name} says anonymous`)
     }
     assert.ok(names.length > 0)
+  })
+
+  test('styles the approved card without an inline style', async () => {
+    const css = await readFile(fileURLToPath(new URL('../src/style.css', import.meta.url)), 'utf8')
+    const main = await readFile(fileURLToPath(new URL('../src/main.js', import.meta.url)), 'utf8')
+    const tokens = ['#e9eef0', '#f7931a', '#d6f3e4', '#12a36a', '#0b6b46', '#ffe1cc', '#e8590c', '#b23f00', '#e3e7e8']
+    for (const token of tokens) assert.equal(css.includes(token), true, token)
+    assert.equal(main.includes('expirySentence'), true)
+    assert.equal(main.includes('${COPY.stay}'), false)
+    assert.equal(main.includes('style='), false)
   })
 })
 

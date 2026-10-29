@@ -13,6 +13,7 @@ import {
   ERROR_MESSAGES,
   GENERIC_ERROR,
   SEPOLIA_USDC_URL,
+  expirySentence,
   messageForError,
 } from './copy.js'
 import { isUserRejection, phoneSignHint } from './errors.js'
@@ -82,8 +83,7 @@ function messageFor(error) {
 
 function baseNote() {
   return h('p', { class: 'note' }, [
-    COPY.baseBefore,
-    h('strong', {}, [COPY.baseEmphasis]),
+    h('span', { class: 'title' }, [COPY.baseTitle]),
     COPY.baseMiddle,
     h('a', { href: SEPOLIA_USDC_URL, rel: 'noopener noreferrer' }, [COPY.baseSepolia]),
     COPY.baseBetween,
@@ -94,6 +94,7 @@ function baseNote() {
 
 function exchangeNote() {
   return h('p', { class: 'warning' }, [
+    h('span', { class: 'title' }, [COPY.exchangeTitle]),
     COPY.exchangeBefore,
     h('strong', {}, [COPY.exchangeStrong]),
     COPY.exchangeAfter,
@@ -130,7 +131,7 @@ function shell(panel) {
       exchangeNote(),
       currentNote(),
       state.info
-        ? h('p', { class: 'expiry' }, [`This link expires ${localExpiry(state.info.expires_at)}. ${COPY.stay}`])
+        ? h('p', { class: 'expiry' }, [expirySentence(localExpiry(state.info.expires_at))])
         : null,
       h('p', { class: 'never' }, [COPY.neverAsk]),
       panel,
@@ -258,7 +259,7 @@ function renderSuccess() {
   shell(
     h('section', {}, [
       h('h2', {}, [COPY.verified]),
-      h('p', { class: 'addr' }, [blocks(address)]),
+      h('p', { class: 'addr verified' }, [blocks(address)]),
       state.result && state.result.rails_cleared ? h('p', { class: 'warning' }, [COPY.railsCleared]) : null,
       h('p', {}, [COPY.closePage]),
     ]),

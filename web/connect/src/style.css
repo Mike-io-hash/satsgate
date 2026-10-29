@@ -1,58 +1,117 @@
 :root {
-  color: #14221b;
-  background: #f3f6f4;
-  font-family: "Segoe UI", system-ui, sans-serif;
+  color: #1d2a2c;
+  background: #e9eef0;
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
   line-height: 1.5;
 }
 
 * { box-sizing: border-box; }
 
+html { background: #e9eef0; }
+
 body {
   margin: 0;
+  min-height: 100vh;
+  background: #e9eef0;
+  padding: 32px 16px;
 }
 
 main {
-  max-width: 40rem;
+  max-width: 560px;
   margin: 0 auto;
-  padding: 1.5rem 1rem 3rem;
+  background: #fff;
+  border-radius: 18px;
+  box-shadow: 0 8px 30px rgba(20, 40, 45, 0.12);
+  padding: 28px 26px;
+  border-top: 6px solid #f7931a;
 }
+
+main p { margin: 12px 0; font-size: 14.5px; }
 
 .brand {
   margin: 0;
-  font-size: 0.85rem;
-  letter-spacing: 0.08em;
+  font-size: 12px;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: #0e7a4b;
+  color: #0b7a5c;
+  font-weight: 700;
 }
 
 h1 {
-  margin: 0.25rem 0 1rem;
-  font-size: 1.7rem;
-  line-height: 1.25;
+  margin: 6px 0 20px;
+  font-size: 26px;
+  line-height: 1.2;
 }
 
-h2 { margin: 0 0 0.5rem; }
+h2 {
+  margin: 22px 0 8px;
+  font-size: 20px;
+  line-height: 1.2;
+  color: #0b6b46;
+}
+
+.title {
+  font-weight: 700;
+  display: block;
+  margin-bottom: 4px;
+}
 
 .note, .warning, .never, .current, .expiry, .hint, .error {
-  padding: 0.75rem 0.9rem;
-  border-radius: 0.6rem;
+  border-radius: 10px;
+  padding: 14px 16px;
+  line-height: 1.5;
 }
 
-.note { background: #e7f5ee; }
-.warning { background: #fff4e5; }
-.never { background: #fff; border: 1px solid #d5e0d8; }
-.current, .expiry, .hint { background: #fff; }
-.error { background: #fdecea; color: #6d1c1c; }
+.note {
+  background: #d6f3e4;
+  border-left: 5px solid #12a36a;
+}
 
-a { color: #0b5e3a; }
+.note .title { color: #0b6b46; }
 
-.addr {
-  font-family: ui-monospace, "Cascadia Code", monospace;
-  font-size: 1rem;
-  overflow-wrap: anywhere;
+.warning {
+  background: #ffe1cc;
+  border-left: 5px solid #e8590c;
+}
+
+.warning .title { color: #b23f00; }
+
+.never, .current, .expiry, .hint {
   background: #fff;
-  padding: 0.6rem 0.7rem;
-  border-radius: 0.4rem;
+  border: 1px solid #e3e7e8;
+}
+
+.error {
+  background: #fdecea;
+  color: #6d1c1c;
+  border-left: 5px solid #6d1c1c;
+}
+
+a { color: #0b7a5c; }
+
+code, .addr {
+  font-family: ui-monospace, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+
+code {
+  font-size: 13.5px;
+  background: #f2f4f5;
+  padding: 2px 6px;
+  border-radius: 5px;
+}
+
+p.addr {
+  font-size: 14px;
+  background: #fff;
+  border: 1px solid #e3e7e8;
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+
+p.addr.verified {
+  background: #d6f3e4;
+  border: 1px solid #12a36a;
 }
 
 button {
@@ -62,6 +121,7 @@ button {
   border-radius: 0.5rem;
   border: 1px solid transparent;
   font: inherit;
+  font-size: 14.5px;
   cursor: pointer;
 }
 
@@ -71,14 +131,14 @@ button:disabled {
 }
 
 .primary {
-  background: #0e7a4b;
+  background: #0b7a5c;
   color: #fff;
 }
 
 .ghost {
   background: #fff;
-  border-color: #b7c9be;
-  color: #14221b;
+  border-color: #c5ced0;
+  color: #1d2a2c;
 }
 
 .check {
@@ -86,32 +146,63 @@ button:disabled {
   gap: 0.7rem;
   align-items: flex-start;
   margin: 0.8rem 0;
+  font-size: 14.5px;
 }
 
 .check input {
   width: 1.25rem;
   height: 1.25rem;
   margin-top: 0.2rem;
+  flex: none;
 }
 
 textarea {
   width: 100%;
-  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-family: ui-monospace, Menlo, monospace;
   font-size: 0.9rem;
   padding: 0.7rem;
-  border: 1px solid #d5e0d8;
-  border-radius: 0.4rem;
+  border: 1px solid #e3e7e8;
+  border-radius: 10px;
   background: #fff;
   color: inherit;
 }
 
 footer {
-  margin-top: 2rem;
-  color: #3d5248;
-  font-size: 0.95rem;
+  margin-top: 18px;
+  border-top: 1px solid #eef0f1;
+  padding-top: 14px;
+  color: #5b6a6c;
+  font-size: 13px;
 }
 
+footer p { margin: 0; font-size: 13px; }
+
 button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible {
-  outline: 2px solid #0e7a4b;
+  outline: 2px solid #0b7a5c;
   outline-offset: 2px;
+}
+
+@media (max-width: 480px) {
+  body { padding: 12px 8px; }
+
+  main {
+    padding: 20px 16px;
+    border-radius: 14px;
+  }
+
+  h1 { font-size: 21px; }
+
+  main p { font-size: 14px; }
+
+  .note, .warning, .never, .current, .expiry, .hint, .error {
+    font-size: 14px;
+    padding: 12px 13px;
+  }
+
+  .check { font-size: 14px; }
+
+  footer,
+  footer p { font-size: 13px; }
+
+  code, .verified, .addr { word-break: break-word; }
 }
