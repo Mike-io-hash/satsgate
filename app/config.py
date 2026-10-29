@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # Load env vars from .env if present. Existing process env wins.
 load_dotenv()
 
-APP_VERSION = "0.15.1"
+APP_VERSION = "0.16.0"
 
 # production is the safe default. Local mock/dev only runs when this is explicit.
 SATSGATE_ENV = os.environ.get("SATSGATE_ENV", "production").strip().lower() or "production"
@@ -48,6 +48,28 @@ def _optional_int(name: str, default: int, *, minimum: int, maximum: int) -> int
         raise RuntimeError(f"{name} must be an integer") from exc
     if value < minimum or value > maximum:
         raise RuntimeError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def _clamped_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    """Read an integer env var and clamp it into ``minimum``..``maximum``.
+
+    ``_optional_int`` refuses to boot when the value is outside its range.
+    The payee signing window and the connect-link lifetime clamp instead, so a
+    low or high setting still starts inside the allowed window. A non-integer
+    still refuses to boot.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = int(str(raw).strip())
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer") from exc
+    if value < minimum:
+        return minimum
+    if value > maximum:
+        return maximum
     return value
 
 
@@ -181,6 +203,36 @@ def _gate_public_base() -> str:
 
 GATE_PUBLIC_BASE = _gate_public_base()
 
+
+def _connect_public_base() -> str:
+    """Public page URL the connect link points at.
+
+    Unlike ``SATSGATE_GATE_PUBLIC_BASE``, this URL includes the page path.
+    The token is appended as a fragment, so a query or fragment in the base
+    is rejected.
+    """
+    raw = os.environ.get("SATSGATE_CONNECT_PUBLIC_BASE", "https://satsgate.org/connect").strip().rstrip("/")
+    parsed = urlsplit(raw)
+    path = parsed.path or ""
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or path in {"", "/"}
+        or "\\" in path
+        or ".." in path.split("/")
+    ):
+        raise RuntimeError(
+            "SATSGATE_CONNECT_PUBLIC_BASE must be an https URL with a path and no userinfo, query, or fragment"
+        )
+    return raw
+
+
+CONNECT_PUBLIC_BASE = _connect_public_base()
+
 # Shared secret for the hosted gate process. Unset means the internal routes
 # answer 404, so a deploy that has not turned the gate on does not expose them.
 # SATSGATE_GATE_PEERS, when set, also requires the TCP peer to be that address.
@@ -200,7 +252,21 @@ X402_USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 # Hardcoded so an operator cannot point mainnet USDC at an arbitrary host.
 X402_CDP_FACILITATOR_URL = "https://api.cdp.coinbase.com/platform/v2/x402"
 X402_MAX_USD_ATOMIC = 100_000_000
-X402_PAYEE_CHALLENGE_SECONDS = 600
+# 30 minutes. A phone pairing can outlast the old 10 minute curl window.
+# 300–3600. Out of range is clamped, not a boot failure.
+X402_PAYEE_CHALLENGE_SECONDS = _clamped_int(
+    "SATSGATE_X402_PAYEE_CHALLENGE_SECONDS",
+    1800,
+    minimum=300,
+    maximum=3600,
+)
+# One-time connect link. 600–86400. Out of range is clamped.
+PAYEE_CONNECT_SECONDS = _clamped_int(
+    "SATSGATE_PAYEE_CONNECT_SECONDS",
+    3600,
+    minimum=600,
+    maximum=86400,
+)
 X402_SIGNATURE_MAX_BYTES = 8192
 X402_FACILITATOR_TIMEOUT_SECONDS = 10.0
 X402_OFFER_SECONDS = _optional_int("SATSGATE_X402_OFFER_SECONDS", 60, minimum=15, maximum=300)

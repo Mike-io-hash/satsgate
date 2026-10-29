@@ -49,6 +49,8 @@ The same packs can be bought with USDC when the operator has set `SATSGATE_TREAS
 
 A hosted site that takes USDC starts in test mode. Try on Base Sepolia with your agent first, then switch the site to live. See [`gate/README.md`](./gate/README.md).
 
+To set the USDC address, create a one-time link with `POST /v1/client/payee/evm/connect` (the account key) and open it in a browser. The page connects a wallet you already use and asks for one signature. It does not ask for the account key, a seed phrase, or a private key. USDC is on Base only. The manual challenge and verify calls still work.
+
 ## 2) Register your payee (where your users will pay)
 
 ```bash

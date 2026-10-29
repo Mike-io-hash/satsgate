@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- An account key can mint a one-time connect link with `POST /v1/client/payee/evm/connect`. The token (`sgc_…`) is returned only in the URL fragment and stored as a hash. `GET /v1/connect/evm`, `POST /v1/connect/evm/challenge`, and `POST /v1/connect/evm/verify` accept `X-Connect-Token` and do not accept an API key. A successful verify clears the token. The link lasts `SATSGATE_PAYEE_CONNECT_SECONDS` (default 3600, clamped to 600–86400). `SATSGATE_CONNECT_PUBLIC_BASE` defaults to `https://satsgate.org/connect`.
+- A page at `satsgate.org/connect` (`web/connect/`) connects a browser-extension wallet or a mobile wallet through a WalletConnect QR, shows the address, and asks for one `personal_sign`. The Reown project ID is not in the repo. Caddy reads `SATSGATE_REOWN_PROJECT_ID` into `/connect/config.json`. A signature that is not 65 bytes is `400 smart_wallet_not_supported`.
+
+### Changed
+- The payee challenge window is 1800 seconds by default, was 600. `SATSGATE_X402_PAYEE_CHALLENGE_SECONDS` clamps it to 300–3600. EIP-191 recovery accepts a signature `v` of 0 or 1 as well as 27 or 28. The signed message is not rewritten.
+
+Core 0.16.0. The gate stays 0.14.0, the proxy stays 0.13.0, and satsgate-mcp stays 0.11.0. Startup adds two nullable columns on `clients` (`payee_evm_connect_hash`, `payee_evm_connect_expires`). Existing rows stay empty. Copy `satsgate.sqlite3` before restart. Rebuild the core image. Build `web/connect`, then reload Caddy. Rollback is the previous core image and the previous Caddyfile. The two columns stay, and they are harmless. `GET /health` reports `0.16.0`.
+
 ### Fixed
 - Core 0.15.1 puts the EIP-712 domain name of that network's USDC contract in `extra`. Base Sepolia (`eip155:84532`) stays `name: USDC`. Base (`eip155:8453`) is `name: USD Coin`. Both keep `version: 2` and `assetTransferMethod: eip3009`. Route offers and credit-pack top-ups use the extra for the network they offer. A payment whose `accepted.extra` does not match that network is rejected before the facilitator is called. No migration. Rebuild the core image. The gate, the proxy, and satsgate-mcp do not compare or hardcode that name, so they stay 0.14.0, 0.13.0, and 0.11.0.
 

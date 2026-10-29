@@ -2,7 +2,7 @@
 
 The hosted gate. One process serves many approved sites at `https://gate.satsgate.org/<slug>/<path>`.
 
-Version **0.14.0**. Core is **0.15.1**. A site can offer Lightning, x402 (USDC on one Base network), or both. x402 is off until the merchant turns it on. A new site stores no mode. Turning x402 on without a mode stores test (Base Sepolia). Live (Base) is a separate choice and only works when the operator has enabled CDP. The self-hosted proxy is **0.13.0** and is a different program: one merchant, one YAML file, one origin secret in the environment. It charges after a successful origin on both rails. This process has no origin secret of its own, and it does not call the facilitator. A debit from this gate still has a null `api_key_id`, because the gate authenticates with `GATE_TOKEN` rather than an `sgr_` key.
+Version **0.14.0**. Core is **0.16.0**. A site can offer Lightning, x402 (USDC on one Base network), or both. x402 is off until the merchant turns it on. A new site stores no mode. Turning x402 on without a mode stores test (Base Sepolia). Live (Base) is a separate choice and only works when the operator has enabled CDP. The self-hosted proxy is **0.13.0** and is a different program: one merchant, one YAML file, one origin secret in the environment. It charges after a successful origin on both rails. This process has no origin secret of its own, and it does not call the facilitator. A debit from this gate still has a null `api_key_id`, because the gate authenticates with `GATE_TOKEN` rather than an `sgr_` key.
 
 ## USDC payments: Base network only
 
@@ -67,7 +67,7 @@ Use the account key. A restricted `sgr_` key cannot set a payee, a rail, or `x40
 
 Try on Base Sepolia with your agent first, then switch the site to live.
 
-1. `POST /v1/client/payee/evm/challenge` with `{"address":"0x..."}`. Sign the returned text with `personal_sign` (EIP-191). Nothing happens on chain.
+1. `POST /v1/client/payee/evm/challenge` with `{"address":"0x..."}`. Sign the returned text with `personal_sign` (EIP-191). Nothing happens on chain. Or create a one-time connect link with `POST /v1/client/payee/evm/connect` and open it in a browser.
 2. `POST /v1/client/payee/evm` with `{"address","signature"}`. `GET /v1/client` then shows `payee_evm_verified: true`. It does not return the signature.
 3. `PATCH /v1/sites/{slug}` with `{"rail_x402": true}`. That stores `x402_mode: "test"` when the mode was unset. The 402 offers only Base Sepolia (`eip155:84532`, contract [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e)) and the JSON says `testing: true`. Set `rail_lightning` false for x402 only. Both false is `400 rails_required`.
 4. After the operator has set `SATSGATE_X402_CDP=1`, `PATCH` `{"x402_mode":"live"}`. The 402 then offers only Base (`eip155:8453`, contract [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913)). While the switch is off, that PATCH is `400 x402_mainnet_disabled`. A new site does not start in live mode, so a merchant cannot take real USDC by accident.

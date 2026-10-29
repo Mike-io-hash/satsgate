@@ -98,6 +98,39 @@ def payee_message_candidates(message: str) -> tuple[str, ...]:
     return tuple(unique)
 
 
+def personal_signature_kind(signature: object) -> str:
+    """Classify a connect-page signature without echoing it.
+
+    ``eoa`` is exactly 65 bytes. Any other decoded length from 1 byte through
+    ``X402_SIGNATURE_MAX_BYTES`` is ``smart_wallet`` (EIP-1271 is a later
+    release). Invalid hex, an empty value, and anything longer are ``bad``.
+    """
+    if not isinstance(signature, str) or not signature.startswith("0x"):
+        return "bad"
+    hexpart = signature[2:]
+    if not hexpart or len(hexpart) % 2 or any(ch not in "0123456789abcdefABCDEF" for ch in hexpart):
+        return "bad"
+    nbytes = len(hexpart) // 2
+    if nbytes > int(config.X402_SIGNATURE_MAX_BYTES):
+        return "bad"
+    if nbytes == 65:
+        return "eoa"
+    return "smart_wallet"
+
+
+def _normalized_personal_signature(signature: str) -> str:
+    """Map a trailing ``v`` of 0/1 onto 27/28. The message is not touched."""
+    raw = bytes.fromhex(signature[2:])
+    if len(raw) != 65:
+        raise X402Error("bad_signature", status=400)
+    v = raw[-1]
+    if v in (0, 1):
+        raw = raw[:-1] + bytes((v + 27,))
+    elif v not in (27, 28):
+        raise X402Error("bad_signature", status=400)
+    return "0x" + raw.hex()
+
+
 def recover_payee_signer(message: str, signature: str, *, address: str) -> str:
     """Recover the signer of the stored challenge or its trimmed form.
 
@@ -115,10 +148,13 @@ def recover_payee_signer(message: str, signature: str, *, address: str) -> str:
 
 
 def recover_personal_signer(message: str, signature: str) -> str:
-    if not isinstance(signature, str) or not _SIG.fullmatch(signature):
+    if personal_signature_kind(signature) != "eoa":
         raise X402Error("bad_signature", status=400)
     try:
-        recovered = Account.recover_message(encode_defunct(text=message), signature=signature)
+        normalized = _normalized_personal_signature(signature)
+        recovered = Account.recover_message(encode_defunct(text=message), signature=normalized)
+    except X402Error:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise X402Error("bad_signature", status=400) from exc
     return to_checksum_address(recovered)

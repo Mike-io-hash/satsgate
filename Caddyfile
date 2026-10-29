@@ -1,3 +1,22 @@
+# Headers for https://satsgate.org/connect. script-src stays 'self' with no
+# unsafe-eval. style-src includes 'unsafe-inline' because AppKit 1.8.24
+# (ThemeUtil.createAppKitTheme) inserts <style> elements. 'self' covers the
+# page stylesheet. connect-src starts from Reown's published AppKit CSP and
+# adds walletguide.walletconnect.network (the pinned wallet list), the Base
+# RPC https://mainnet.base.org, and the Coinbase hosts the pinned wallet SDK
+# calls (keys.coinbase.com, rpc.wallet.coinbase.com).
+(satsgate_connect_headers) {
+	header {
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src * 'self' data: blob: https://walletconnect.org https://walletconnect.com https://secure.walletconnect.com https://secure.walletconnect.org https://tokens-data.1inch.io https://tokens.1inch.io https://ipfs.io https://cdn.zerion.io; font-src 'self' https://fonts.gstatic.com https://fonts.reown.com; connect-src 'self' https://rpc.walletconnect.com https://rpc.walletconnect.org https://relay.walletconnect.com https://relay.walletconnect.org wss://relay.walletconnect.com wss://relay.walletconnect.org https://pulse.walletconnect.com https://pulse.walletconnect.org https://api.web3modal.com https://api.web3modal.org https://keys.walletconnect.com https://keys.walletconnect.org https://notify.walletconnect.com https://notify.walletconnect.org https://echo.walletconnect.com https://echo.walletconnect.org https://push.walletconnect.com https://push.walletconnect.org wss://www.walletlink.org https://www.walletlink.org https://cca-lite.coinbase.com https://keys.coinbase.com https://rpc.wallet.coinbase.com https://walletguide.walletconnect.network https://mainnet.base.org; frame-src 'self' https://verify.walletconnect.com https://verify.walletconnect.org https://secure.walletconnect.com https://secure.walletconnect.org https://secure-mobile.walletconnect.com https://secure-mobile.walletconnect.org; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'none'"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		X-Content-Type-Options "nosniff"
+		Cross-Origin-Opener-Policy "same-origin-allow-popups"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Strict-Transport-Security "max-age=31536000"
+	}
+}
+
 {$SATSGATE_HOSTNAME} {
 	encode zstd gzip
 
@@ -44,3 +63,54 @@
 # 		header_up -X-Satsgate-Buyer-Ip
 # 	}
 # }
+
+# Apex site. Set SATSGATE_SITE_HOSTNAME (satsgate.org) or Caddy will not start.
+# /connect is the wallet page. Only /v1/connect/* is proxied to core.
+# Every other path keeps the redirect to the GitHub repository.
+{$SATSGATE_SITE_HOSTNAME} {
+	encode zstd gzip
+
+	handle /connect/config.json {
+		import satsgate_connect_headers
+		header Content-Type application/json
+		header Cache-Control no-store
+		respond `{"projectId":"{$SATSGATE_REOWN_PROJECT_ID}"}` 200
+	}
+
+	handle /v1/connect/* {
+		reverse_proxy satsgate:8000 {
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+			header_up -X-Satsgate-Buyer-Ip
+		}
+	}
+
+	handle /connect/assets/* {
+		import satsgate_connect_headers
+		uri strip_prefix /connect
+		root * /srv/connect
+		file_server
+	}
+
+	handle /connect {
+		import satsgate_connect_headers
+		header Cache-Control no-store
+		root * /srv/connect
+		rewrite * /index.html
+		file_server
+	}
+
+	handle /connect/* {
+		import satsgate_connect_headers
+		header Cache-Control no-store
+		uri strip_prefix /connect
+		root * /srv/connect
+		try_files {path} /index.html
+		file_server
+	}
+
+	handle {
+		redir https://github.com/Mike-io-hash/satsgate 301
+	}
+}

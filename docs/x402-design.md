@@ -187,6 +187,8 @@ No migration ships with this document. The next implementation PR adds columns a
 | `payee_evm_verified_at` | Unix time. Null means x402 cannot be turned on. |
 | `payee_evm_message` | Exact EIP-191 string the server asked them to sign. |
 | `payee_evm_signature` | The signature. Not a secret, but not returned in the public directory. |
+| `payee_evm_connect_hash` | SHA-256 of the one-time connect token. Null when there is no live link. The raw token is not stored. |
+| `payee_evm_connect_expires` | Unix time when that link stops working. |
 
 Changing the address clears `payee_evm_verified_at` and turns `sites.rail_x402` off for that client until a new signature verifies. This mirrors the rule that a client has one Lightning payee, but a change does require a new proof. `POST /v1/client/payee` does not start accepting an EVM address in the same field.
 
@@ -247,6 +249,7 @@ Merchant account, all on the account key. A restricted `sgr_` key cannot set a p
 
 - `POST /v1/client/payee/evm/challenge` returns a one-time message: domain, client id, checksummed address, nonce, expiry. Nothing is written on chain.
 - `POST /v1/client/payee/evm` sends the address and the EIP-191 signature of that message. A signature over the same text with only trailing whitespace removed, or with CRLF line endings, is accepted. Core recovers the address and sets `payee_evm_verified_at`. A wrong signer, a stale or reused nonce, or any other change to the message is 400 and does not change the stored address.
+- `POST /v1/client/payee/evm/connect` (account key only) returns a one-time browser URL. The token is in the fragment. The page calls `GET /v1/connect/evm`, `POST /v1/connect/evm/challenge`, and `POST /v1/connect/evm/verify` with `X-Connect-Token`. A restricted key cannot create the link.
 - `PATCH /v1/sites/{slug}` accepts `rail_lightning` and `rail_x402`. Turning x402 on without a verified address is 400 `payee_evm_not_verified`. Turning both off is 400. Default for a new site is Lightning on, x402 off.
 - `POST /v1/sites/{slug}/routes` and the route `PATCH` accept `price_currency` (`sats` or `usd`) and, when USD, `price_usd_atomic`. `price_sats` stays required for a sats-priced route. Bounds stay inside `clean_price` for sats. USD must be at least 1 atomic unit and at most a config cap (proposed `$1,000`, `100_000_000` atomic, so a typo cannot quote a fortune).
 
@@ -298,7 +301,8 @@ Satsgate never converts a settled payment. If the buyer pays the USDC amount, th
 
 ## 7. Security
 
-- Signature check for payTo is EIP-191 over the server's message. The message includes a nonce stored on the client row and an expiry of 10 minutes. Trailing whitespace may be absent, and CRLF counts as LF. The recovered address must equal the address in the body, ignoring checksum case. No on-chain call.
+- Signature check for payTo is EIP-191 over the server's message. The message includes a nonce stored on the client row and an expiry of 30 minutes (`SATSGATE_X402_PAYEE_CHALLENGE_SECONDS`, default 1800, clamped to 300–3600). Trailing whitespace may be absent, and CRLF counts as LF. The recovered address must equal the address in the body, ignoring checksum case. A signature `v` of 0 or 1 is accepted as 27 or 28. The message bytes are not rewritten. No on-chain call.
+- The connect token is single-use, hashed at rest, and scoped to the EVM challenge and verify routes. It is not an API key. An `sgc_` value in `X-Api-Key` is rejected. The browser link puts the token in the fragment so it is not sent on the request line. Verify success clears it. A signature that is not 65 bytes is `400 smart_wallet_not_supported`. EIP-1271 is not checked.
 - Replay is the unique `(network, asset, payer, nonce)` row, inserted before `/verify`. The on-chain nonce is the backstop. The row stops two gate workers. An origin failure skips `/settle`. A settle timeout retries `/settle` on the same row. Lightning replay is the payment hash: `settled_at` means the invoice is paid, and `verifications` means the credit was taken. A second presentation of the same proof does not debit twice.
 - Amount, asset, network, and payTo are compared to the offer and to the hardcoded USDC address for that network. A mainnet payload is rejected while `SATSGATE_X402_CDP` is off, even if the signature is valid.
 - `validBefore` must fall inside the offer window. An authorization that is valid for longer than `maxTimeoutSeconds` is rejected, so a buyer cannot reuse a signature after the locked price has expired.

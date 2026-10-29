@@ -1,5 +1,8 @@
 .env
 .venv/
 node_modules/
+web/connect/node_modules/
+web/connect/dist/
+web/connect/public/config.json
 *.sqlite3
 __pycache__/

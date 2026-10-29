@@ -119,11 +119,11 @@ def test_unusable_secret_keeps_mainnet_off_and_does_not_log_the_value(tmp_path, 
         SATSGATE_X402_CDP_KEY_SECRET=secret,
     )
     assert module.config.X402_MAINNET_ENABLED is False
-    assert module.config.APP_VERSION == "0.15.1"
+    assert module.config.APP_VERSION == "0.16.0"
     assert secret not in caplog.text
     assert "USDC mainnet disabled" in caplog.text
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.15.1"
+        assert http.get("/health").json()["version"] == "0.16.0"
         status = http.get("/v1/admin/x402", headers={"X-Admin-Token": "test-admin-token"}).json()
         assert status["mainnet_enabled"] is False
         assert status["cdp"]["reason"] == "credentials"

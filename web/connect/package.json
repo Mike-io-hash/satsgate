@@ -1,0 +1,22 @@
+{
+  "name": "satsgate-connect",
+  "private": true,
+  "version": "0.16.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@reown/appkit": "1.8.24",
+    "@reown/appkit-adapter-ethers": "1.8.24",
+    "ethers": "6.17.0"
+  },
+  "devDependencies": {
+    "vite": "7.3.7"
+  }
+}
