@@ -250,6 +250,8 @@ def _migrate_x402(conn: sqlite3.Connection) -> None:
         ("payee_evm_signature", "ALTER TABLE clients ADD COLUMN payee_evm_signature TEXT"),
         ("payee_evm_pending_message", "ALTER TABLE clients ADD COLUMN payee_evm_pending_message TEXT"),
         ("payee_evm_pending_expires", "ALTER TABLE clients ADD COLUMN payee_evm_pending_expires INTEGER"),
+        ("payee_evm_connect_hash", "ALTER TABLE clients ADD COLUMN payee_evm_connect_hash TEXT"),
+        ("payee_evm_connect_expires", "ALTER TABLE clients ADD COLUMN payee_evm_connect_expires INTEGER"),
     ):
         if name not in client_cols:
             conn.execute(ddl)

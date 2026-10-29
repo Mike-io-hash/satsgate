@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -164,6 +165,16 @@ def _account_client(x_api_key: str | None) -> db.Client | JSONResponse:
     if auth.scope != db_keys.SCOPE_ACCOUNT:
         return _insufficient_scope(auth.scope)
     return auth.client
+
+
+def _connect_session(token: str | None) -> dict | JSONResponse:
+    """Connect-link session. An API key in this header is not a connect token."""
+    if not token or len(token) > 200:
+        return JSONResponse(status_code=401, content={"ok": False, "error": "connect_link_invalid"})
+    try:
+        return db_x402.connect_session(config.DB_PATH, token)
+    except x402_mod.X402Error as exc:
+        return JSONResponse(status_code=exc.status, content={"ok": False, "error": exc.code})
 
 
 def _paywall_principal(x_api_key: str | None, resource: str) -> db_keys.Principal | JSONResponse:
@@ -357,6 +368,10 @@ def well_known_satsgate(request: Request) -> dict:
                 "set_payee": {"method": "POST", "path": "/v1/client/payee"},
                 "evm_payee_challenge": {"method": "POST", "path": "/v1/client/payee/evm/challenge"},
                 "evm_payee": {"method": "POST", "path": "/v1/client/payee/evm"},
+                "evm_payee_connect": {"method": "POST", "path": "/v1/client/payee/evm/connect"},
+                "connect_evm": {"method": "GET", "path": "/v1/connect/evm"},
+                "connect_evm_challenge": {"method": "POST", "path": "/v1/connect/evm/challenge"},
+                "connect_evm_verify": {"method": "POST", "path": "/v1/connect/evm/verify"},
                 "api_keys_create": {"method": "POST", "path": "/v1/api-keys"},
                 "api_keys_list": {"method": "GET", "path": "/v1/api-keys"},
                 "api_keys_revoke": {"method": "POST", "path": "/v1/api-keys/{key_id}/revoke"},
@@ -723,6 +738,121 @@ def v1_client_evm_payee(
     return {
         "ok": True,
         "client_id": client.id,
+        "payee_evm_address": saved["address"],
+        "payee_evm_verified": True,
+        "rails_cleared": saved["rails_cleared"],
+        "note": "x402 stays off until you enable it on a site. Changing the address turns it off again.",
+    }
+
+
+@app.post("/v1/client/payee/evm/connect")
+def v1_client_evm_connect(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
+    """Mint a one-time browser link. The account key is not sent to the page."""
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    try:
+        created = db_x402.create_connect_link(config.DB_PATH, client_id=client.id)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "unavailable"})
+    return {
+        "ok": True,
+        "connect_url": created["connect_url"],
+        "expires_at": created["expires_at"],
+        "note": (
+            "Open this link in a browser to connect a wallet. "
+            "It works once and expires at expires_at. Do not share it."
+        ),
+    }
+
+
+@app.get("/v1/connect/evm")
+def v1_connect_evm(x_connect_token: str | None = Header(default=None, alias="X-Connect-Token")):
+    """What the page may show before the wallet connects. No API key."""
+    session = _connect_session(x_connect_token)
+    if isinstance(session, JSONResponse):
+        return session
+    return {
+        "ok": True,
+        "client_id": session["client_id"],
+        "current_payee_evm_address": session["address"],
+        "current_payee_evm_verified": session["verified"],
+        "expires_at": session["expires_at"],
+        "challenge_seconds": int(config.X402_PAYEE_CHALLENGE_SECONDS),
+    }
+
+
+@app.post("/v1/connect/evm/challenge")
+def v1_connect_evm_challenge(
+    body: EvmPayeeChallengeIn,
+    x_connect_token: str | None = Header(default=None, alias="X-Connect-Token"),
+):
+    """Same challenge as the account-key route. A bad token does not start one."""
+    session = _connect_session(x_connect_token)
+    if isinstance(session, JSONResponse):
+        return session
+    try:
+        challenge = db_x402.begin_payee_challenge(
+            config.DB_PATH,
+            client_id=session["client_id"],
+            address=body.address,
+        )
+    except x402_mod.X402Error as exc:
+        return JSONResponse(status_code=exc.status, content={"ok": False, "error": exc.code})
+    except ValueError:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "unavailable"})
+    return {
+        "ok": True,
+        "address": challenge["address"],
+        "message": challenge["message"],
+        "expires_at": challenge["expires_at"],
+        "note": "Sign this message with that address. A wallet may drop the trailing newline. Nothing is written on chain.",
+    }
+
+
+@app.post("/v1/connect/evm/verify")
+async def v1_connect_evm_verify(
+    request: Request,
+    x_connect_token: str | None = Header(default=None, alias="X-Connect-Token"),
+):
+    """Verify the signature. A non-65-byte signature is refused before recovery.
+
+    The body is parsed here so a long signature is not echoed in a 422.
+    Success clears the connect token. Failure leaves it in place.
+    """
+    session = _connect_session(x_connect_token)
+    if isinstance(session, JSONResponse):
+        return session
+    raw = await request.body()
+    if len(raw) > config.X402_SIGNATURE_MAX_BYTES * 2 + 512:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "bad_signature"})
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "bad_signature"})
+    if not isinstance(payload, dict):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "bad_signature"})
+    signature = payload.get("signature")
+    kind = x402_mod.personal_signature_kind(signature)
+    if kind == "smart_wallet":
+        return JSONResponse(status_code=400, content={"ok": False, "error": "smart_wallet_not_supported"})
+    if kind != "eoa":
+        return JSONResponse(status_code=400, content={"ok": False, "error": "bad_signature"})
+    try:
+        saved = db_x402.verify_payee_signature(
+            config.DB_PATH,
+            client_id=session["client_id"],
+            address=payload.get("address"),
+            signature=signature,
+            consume_connect=True,
+        )
+    except x402_mod.X402Error as exc:
+        return JSONResponse(status_code=exc.status, content={"ok": False, "error": exc.code})
+    except ValueError:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "unavailable"})
+    return {
+        "ok": True,
+        "client_id": session["client_id"],
         "payee_evm_address": saved["address"],
         "payee_evm_verified": True,
         "rails_cleared": saved["rails_cleared"],

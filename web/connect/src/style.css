@@ -1,0 +1,117 @@
+:root {
+  color: #14221b;
+  background: #f3f6f4;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  line-height: 1.5;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+}
+
+main {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 3rem;
+}
+
+.brand {
+  margin: 0;
+  font-size: 0.85rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #0e7a4b;
+}
+
+h1 {
+  margin: 0.25rem 0 1rem;
+  font-size: 1.7rem;
+  line-height: 1.25;
+}
+
+h2 { margin: 0 0 0.5rem; }
+
+.note, .warning, .never, .current, .expiry, .hint, .error {
+  padding: 0.75rem 0.9rem;
+  border-radius: 0.6rem;
+}
+
+.note { background: #e7f5ee; }
+.warning { background: #fff4e5; }
+.never { background: #fff; border: 1px solid #d5e0d8; }
+.current, .expiry, .hint { background: #fff; }
+.error { background: #fdecea; color: #6d1c1c; }
+
+a { color: #0b5e3a; }
+
+.addr {
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+  background: #fff;
+  padding: 0.6rem 0.7rem;
+  border-radius: 0.4rem;
+}
+
+button {
+  min-height: 2.75rem;
+  margin: 0.4rem 0.4rem 0.4rem 0;
+  padding: 0.55rem 1rem;
+  border-radius: 0.5rem;
+  border: 1px solid transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.primary {
+  background: #0e7a4b;
+  color: #fff;
+}
+
+.ghost {
+  background: #fff;
+  border-color: #b7c9be;
+  color: #14221b;
+}
+
+.check {
+  display: flex;
+  gap: 0.7rem;
+  align-items: flex-start;
+  margin: 0.8rem 0;
+}
+
+.check input {
+  width: 1.25rem;
+  height: 1.25rem;
+  margin-top: 0.2rem;
+}
+
+textarea {
+  width: 100%;
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 0.9rem;
+  padding: 0.7rem;
+  border: 1px solid #d5e0d8;
+  border-radius: 0.4rem;
+  background: #fff;
+  color: inherit;
+}
+
+footer {
+  margin-top: 2rem;
+  color: #3d5248;
+  font-size: 0.95rem;
+}
+
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible {
+  outline: 2px solid #0e7a4b;
+  outline-offset: 2px;
+}

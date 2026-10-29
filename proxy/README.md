@@ -2,7 +2,7 @@
 
 A reverse proxy a merchant runs beside an existing HTTP API. The buyer hits the proxy. The proxy sells the request through [satsgate](https://api.satsgate.org) and forwards only a paid request to the origin. The merchant does not write paywall code.
 
-The proxy is version **0.13.0**. It talks to the satsgate core paywall (challenge, verify, status, charge, and x402 verify/settle). Core is **0.15.1**. The proxy does not sell credit packs and does not call the facilitator. Top up on the core with Lightning, or with USDC at `GET /v1/topup/{plan_id}/x402` when `SATSGATE_TREASURY_EVM_ADDRESS` is set. While the operator CDP switch is on, that pack is Base mainnet USDC only. The hosted gate is a separate program. Buyer USDC on a proxied route goes to the merchant's verified `payTo`.
+The proxy is version **0.13.0**. It talks to the satsgate core paywall (challenge, verify, status, charge, and x402 verify/settle). Core is **0.16.0**. The proxy does not sell credit packs and does not call the facilitator. Top up on the core with Lightning, or with USDC at `GET /v1/topup/{plan_id}/x402` when `SATSGATE_TREASURY_EVM_ADDRESS` is set. While the operator CDP switch is on, that pack is Base mainnet USDC only. The hosted gate is a separate program. Buyer USDC on a proxied route goes to the merchant's verified `payTo`.
 
 ## USDC payments: Base network only
 

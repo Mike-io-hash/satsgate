@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import time
 
@@ -24,6 +25,65 @@ def get_evm_payee(db_path: str, *, client_id: int) -> dict | None:
     return {
         "address": row["payee_evm_address"],
         "verified_at": None if row["payee_evm_verified_at"] is None else int(row["payee_evm_verified_at"]),
+    }
+
+
+_CONNECT_TOKEN = re.compile(r"^sgc_[A-Za-z0-9_-]{16,128}$")
+
+
+def create_connect_link(db_path: str, *, client_id: int, now: int | None = None) -> dict:
+    """Store a hashed one-time connect token. The raw token is only in the returned URL."""
+    now = int(time.time()) if now is None else int(now)
+    token = "sgc_" + secrets.token_urlsafe(32)
+    expires = now + int(config.PAYEE_CONNECT_SECONDS)
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            """
+            UPDATE clients
+            SET payee_evm_connect_hash = ?, payee_evm_connect_expires = ?
+            WHERE id = ?
+            """,
+            (db.hash_api_key(token), expires, int(client_id)),
+        )
+        if cur.rowcount == 0:
+            conn.execute("ROLLBACK")
+            raise ValueError("client does not exist")
+        conn.execute("COMMIT")
+    return {
+        "connect_url": f"{config.CONNECT_PUBLIC_BASE}#t={token}",
+        "expires_at": expires,
+    }
+
+
+def connect_session(db_path: str, token: str, *, now: int | None = None) -> dict:
+    """Resolve a connect token. Missing, expired, and unknown tokens share one error."""
+    now = int(time.time()) if now is None else int(now)
+    if not isinstance(token, str) or not _CONNECT_TOKEN.fullmatch(token):
+        raise x402.X402Error("connect_link_invalid", status=401)
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT id, payee_evm_address, payee_evm_verified_at, payee_evm_connect_expires
+            FROM clients
+            WHERE payee_evm_connect_hash = ?
+            """,
+            (db.hash_api_key(token),),
+        ).fetchone()
+    if row is None or row["payee_evm_connect_expires"] is None or int(row["payee_evm_connect_expires"]) < now:
+        raise x402.X402Error("connect_link_invalid", status=401)
+    address = row["payee_evm_address"]
+    if not address:
+        shown = None
+        verified = False
+    else:
+        shown = x402.checksum_address(address)
+        verified = row["payee_evm_verified_at"] is not None
+    return {
+        "client_id": int(row["id"]),
+        "address": shown,
+        "verified": verified,
+        "expires_at": int(row["payee_evm_connect_expires"]),
     }
 
 
@@ -50,7 +110,15 @@ def begin_payee_challenge(db_path: str, *, client_id: int, address: str, now: in
     return {"address": checksum, "message": message, "expires_at": expires}
 
 
-def verify_payee_signature(db_path: str, *, client_id: int, address: str, signature: str, now: int | None = None) -> dict:
+def verify_payee_signature(
+    db_path: str,
+    *,
+    client_id: int,
+    address: str,
+    signature: str,
+    now: int | None = None,
+    consume_connect: bool = False,
+) -> dict:
     """Recover the signer of the stored challenge. A bad signature changes nothing."""
     now = int(time.time()) if now is None else int(now)
     checksum = x402.checksum_address(address)
@@ -76,19 +144,36 @@ def verify_payee_signature(db_path: str, *, client_id: int, address: str, signat
             raise
         previous = row["payee_evm_address"]
         changed = previous is not None and x402.checksum_address(previous) != checksum
-        conn.execute(
-            """
-            UPDATE clients
-            SET payee_evm_address = ?,
-                payee_evm_verified_at = ?,
-                payee_evm_message = ?,
-                payee_evm_signature = ?,
-                payee_evm_pending_message = NULL,
-                payee_evm_pending_expires = NULL
-            WHERE id = ?
-            """,
-            (checksum, now, message, signature, int(client_id)),
-        )
+        if consume_connect:
+            conn.execute(
+                """
+                UPDATE clients
+                SET payee_evm_address = ?,
+                    payee_evm_verified_at = ?,
+                    payee_evm_message = ?,
+                    payee_evm_signature = ?,
+                    payee_evm_pending_message = NULL,
+                    payee_evm_pending_expires = NULL,
+                    payee_evm_connect_hash = NULL,
+                    payee_evm_connect_expires = NULL
+                WHERE id = ?
+                """,
+                (checksum, now, message, signature, int(client_id)),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE clients
+                SET payee_evm_address = ?,
+                    payee_evm_verified_at = ?,
+                    payee_evm_message = ?,
+                    payee_evm_signature = ?,
+                    payee_evm_pending_message = NULL,
+                    payee_evm_pending_expires = NULL
+                WHERE id = ?
+                """,
+                (checksum, now, message, signature, int(client_id)),
+            )
         if changed:
             conn.execute(
                 "UPDATE sites SET rail_x402 = 0, updated_at = ? WHERE client_id = ?",

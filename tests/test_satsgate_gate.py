@@ -889,7 +889,9 @@ def test_compose_passes_site_env_and_keeps_the_gate_private():
     assert "handle /internal/*" in caddy
     live = [line for line in caddy.splitlines() if "header_up -X-Satsgate-Buyer-Ip" in line and not line.strip().startswith("#")]
     commented = [line for line in caddy.splitlines() if "header_up -X-Satsgate-Buyer-Ip" in line and line.strip().startswith("#")]
-    assert len(live) == 1
+    # The public API catch-all, and the apex /v1/connect/* proxy. The gate block stays commented.
+    assert len(live) == 2
+    assert "handle /v1/connect/*" in caddy
     assert len(commented) == 1
     assert not any(line.strip().startswith("gate.satsgate.org") for line in caddy.splitlines())
     assert "# gate.satsgate.org {" in caddy

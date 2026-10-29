@@ -57,6 +57,9 @@ services:
       SATSGATE_X402_FACILITATOR_URL: ${SATSGATE_X402_FACILITATOR_URL:-https://x402.org/facilitator}
       SATSGATE_X402_NETWORK: ${SATSGATE_X402_NETWORK:-eip155:84532}
       SATSGATE_X402_OFFER_SECONDS: ${SATSGATE_X402_OFFER_SECONDS:-60}
+      SATSGATE_X402_PAYEE_CHALLENGE_SECONDS: ${SATSGATE_X402_PAYEE_CHALLENGE_SECONDS:-1800}
+      SATSGATE_PAYEE_CONNECT_SECONDS: ${SATSGATE_PAYEE_CONNECT_SECONDS:-3600}
+      SATSGATE_CONNECT_PUBLIC_BASE: ${SATSGATE_CONNECT_PUBLIC_BASE:-https://satsgate.org/connect}
       SATSGATE_X402_CDP: ${SATSGATE_X402_CDP:-0}
       SATSGATE_X402_CDP_KEY_ID: ${SATSGATE_X402_CDP_KEY_ID:-}
       SATSGATE_X402_CDP_KEY_SECRET: ${SATSGATE_X402_CDP_KEY_SECRET:-}
@@ -139,8 +142,13 @@ services:
       - "443:443"
     environment:
       SATSGATE_HOSTNAME: ${SATSGATE_HOSTNAME}
+      # Required. An empty value makes Caddy refuse the whole file, including the API site.
+      SATSGATE_SITE_HOSTNAME: ${SATSGATE_SITE_HOSTNAME}
+      # Reown AppKit project ID. Not a secret. Caddy writes it into /connect/config.json.
+      SATSGATE_REOWN_PROJECT_ID: ${SATSGATE_REOWN_PROJECT_ID:-}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./web/connect/dist:/srv/connect:ro
       - caddy_data:/data
       - caddy_config:/config
     networks:
