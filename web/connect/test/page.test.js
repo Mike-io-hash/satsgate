@@ -5,11 +5,13 @@ import { describe, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import { formatAddressBlocks } from '../src/address.js'
-import { COPY, ERROR_MESSAGES, GENERIC_ERROR, expirySentence, messageForError } from '../src/copy.js'
+import { confirmView, renderConfirmScreen } from '../src/confirm-email.js'
+import { COPY, ERROR_MESSAGES, GENERIC_ERROR, emailSaveFailed, expirySentence, messageForError } from '../src/copy.js'
+import { continuePlan, emailMode, saveEmailThenContinue } from '../src/email-step.js'
 import { isUserRejection, phoneSignHint } from '../src/errors.js'
 import { utf8ToHex } from '../src/hex.js'
 import { isProjectId } from '../src/project.js'
-import { readConnectToken, takeConnectToken } from '../src/token.js'
+import { isEmailConfirmPath, readConnectToken, readEmailToken, takeConnectToken, takeEmailToken } from '../src/token.js'
 
 const SAMPLE = '0x4A9E2CA774BB87110ffF3CB8a250e935cFE52Ce3'
 
@@ -40,6 +42,30 @@ describe('connect token', () => {
     assert.equal(history.url.includes('#'), false)
     assert.equal(history.url.includes('sgc_'), false)
   })
+
+  test('reads an sge_ token from the fragment and strips it', () => {
+    assert.equal(readEmailToken('#t=sge_abcDEF-123_zzzzzzzz'), 'sge_abcDEF-123_zzzzzzzz')
+    assert.equal(readEmailToken('#t=sgc_abcDEF-123_zzzzzzzz'), null)
+    assert.equal(readEmailToken('#t=sge_short'), null)
+    const location = {
+      pathname: '/connect/confirm-email',
+      search: '',
+      hash: '#t=sge_abcDEF-123_zzzzzzzz',
+    }
+    const history = {
+      url: '',
+      replaceState(_state, _title, url) {
+        this.url = url
+      },
+    }
+    const token = takeEmailToken(location, history)
+    assert.equal(token, 'sge_abcDEF-123_zzzzzzzz')
+    assert.equal(history.url, '/connect/confirm-email')
+    assert.equal(history.url.includes('sge_'), false)
+    assert.equal(isEmailConfirmPath('/connect/confirm-email'), true)
+    assert.equal(isEmailConfirmPath('/connect/confirm-email/'), true)
+    assert.equal(isEmailConfirmPath('/connect/'), false)
+  })
 })
 
 describe('error copy', () => {
@@ -48,7 +74,10 @@ describe('error copy', () => {
       stale_challenge: 'The signing window expired. Tap Continue to get a new message.',
       bad_signature: 'The signature does not match this address. Make sure you sign with the same wallet and account you connected.',
       smart_wallet_not_supported:
-        'This looks like a smart-contract wallet (for example Safe or Coinbase Smart Wallet). Those are not supported yet. Use a regular wallet address you control.',
+        'Smart-contract wallets are turned off on this server. Use a regular wallet address you control.',
+      smart_wallet_not_on_base: 'This smart wallet is not on Base. Deploy it on Base, or use another wallet.',
+      smart_wallet_check_unavailable:
+        'We could not reach Base to check this wallet. Nothing changed. Try again in a minute.',
       connect_link_invalid:
         'This link is missing, expired, or already used. Ask for a new one with POST /v1/client/payee/evm/connect.',
       rate_limited: 'Too many attempts. Wait a minute and try again.',
@@ -198,6 +227,83 @@ describe('page source', () => {
     assert.equal(main.includes('expirySentence'), true)
     assert.equal(main.includes('${COPY.stay}'), false)
     assert.equal(main.includes('style='), false)
+    assert.equal(main.includes("coinbasePreference: 'all'"), true)
+    const boot = main.slice(main.indexOf('async function boot'))
+    assert.equal(boot.includes('isEmailConfirmPath'), true)
+    assert.equal(boot.indexOf('isEmailConfirmPath') < boot.indexOf('loadSession'), true)
+    assert.equal(boot.includes('setupModal'), false)
+    assert.equal(boot.includes('createAppKit'), false)
+  })
+})
+
+describe('alert email step', () => {
+  test('shows the field only when alerts are available and none is confirmed', () => {
+    assert.equal(emailMode(null), 'hidden')
+    assert.equal(emailMode({ email_alerts_available: false, alert_email_status: 'none' }), 'hidden')
+    assert.equal(emailMode({ email_alerts_available: true, alert_email_status: 'none' }), 'none')
+    assert.equal(emailMode({ email_alerts_available: true, alert_email_status: 'pending' }), 'pending')
+    assert.equal(emailMode({ email_alerts_available: true, alert_email_status: 'confirmed' }), 'confirmed')
+  })
+
+  test('the empty-field reminder shows once, then Continue proceeds', () => {
+    assert.equal(continuePlan({ mode: 'none', draft: '', reminded: false }), 'remind')
+    assert.equal(continuePlan({ mode: 'none', draft: '  ', reminded: true }), 'sign')
+    assert.equal(continuePlan({ mode: 'none', draft: 'a@b.co', reminded: false }), 'save-and-sign')
+    assert.equal(continuePlan({ mode: 'pending', draft: '', reminded: false }), 'sign')
+    assert.equal(continuePlan({ mode: 'confirmed', draft: 'a@b.co', reminded: false }), 'sign')
+    assert.equal(continuePlan({ mode: 'hidden', draft: '', reminded: false }), 'sign')
+  })
+
+  test('a failed email save still continues to signing', async () => {
+    let signed = false
+    const note = await saveEmailThenContinue({
+      post: async () => {
+        throw new Error('no')
+      },
+      sign: async () => {
+        signed = true
+      },
+      draft: 'a@b.co',
+    })
+    assert.equal(signed, true)
+    assert.equal(note, 'no')
+    assert.equal(
+      emailSaveFailed('That does not look like an email address.'),
+      "We couldn't save the email: That does not look like an email address. You can add it later with the API.",
+    )
+  })
+})
+
+describe('email confirmation screen', () => {
+  test('renders the confirm button and does not confirm until it is pressed', () => {
+    const clicks = []
+    const root = { children: [], replaceChildren(...nodes) { this.children = nodes }, append(node) { this.children.push(node) } }
+    const document = {
+      createElement(tag) {
+        return {
+          tag,
+          type: '',
+          textContent: '',
+          listeners: {},
+          setAttribute() {},
+          addEventListener(name, fn) { this.listeners[name] = fn },
+          append() {},
+        }
+      },
+    }
+    const view = confirmView({ pending: 's***@proton.me', clientId: 12 })
+    assert.equal(view.body, 'Confirm s***@proton.me for security alerts on Satsgate account #12.')
+    assert.equal(view.button, 'Confirm')
+    renderConfirmScreen(document, root, view, () => clicks.push('confirm'))
+    assert.equal(clicks.length, 0)
+    const button = root.children.find((node) => node.tag === 'button')
+    assert.equal(button.textContent, 'Confirm')
+    button.listeners.click()
+    assert.deepEqual(clicks, ['confirm'])
+    const invalid = confirmView({ invalid: true })
+    assert.equal(invalid.button, null)
+    assert.match(invalid.body, /PUT \/v1\/client\/alert-email/)
+    assert.equal(confirmView({ done: true }).body, COPY.confirmedEmail)
   })
 })
 

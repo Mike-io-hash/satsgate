@@ -2,3 +2,6 @@ pytest>=8.0.0
 ruff>=0.6.0
 bandit>=1.7.9
 pip-audit>=2.7.0
+# In-process EVM for the EIP-1271 / ERC-6492 payee test. Not imported by the app.
+eth-tester==0.14.0b1
+py-evm==0.12.1b1

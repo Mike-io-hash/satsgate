@@ -41,7 +41,9 @@ To the extent the law allows, Satsgate is not liable for lost sats, lost credits
 
 ## Privacy
 
-Buyers do not get Satsgate accounts. This service is not anonymous. An IP address is used to rate-limit that buyer. What is stored for the limit is a hash of a truncated address, not a profile. Payment hashes are stored so a paid invoice can be matched to its grant and its remaining uses. A USDC payment also stores the settlement transaction hash. The transaction itself is public on Base. The facilitator may screen addresses. The public directory shows the site name, slug, description, gate URL, and route prices. It does not show the origin, the origin secret, or the owner.
+Buyers do not get Satsgate accounts. This service is not anonymous. There is no KYC. An IP address is used to rate-limit that buyer. What is stored for the limit is a hash of a truncated address, not a profile. Payment hashes are stored so a paid invoice can be matched to its grant and its remaining uses. A USDC payment also stores the settlement transaction hash. The transaction itself is public on Base. The facilitator may screen addresses. The public directory shows the site name, slug, description, gate URL, and route prices. It does not show the origin, the origin secret, or the owner.
+
+If you add an email for security alerts, Satsgate stores it only to send the confirmation and those alerts. It is optional. It is not used for marketing and is not shared, except with our email provider (Resend, EU region) to deliver the message. It is not shown in public, not written to logs, and is deleted when you remove it. Without one, Satsgate keeps no email for your account.
 
 ## Changes
 
@@ -49,4 +51,4 @@ This draft will change during legal review. A final version will say how later c
 
 ## Contact
 
-Questions and reports go to the GitHub issues for this repository.
+Questions and reports go to the GitHub issues for this repository. Security reports go to GitHub Security Advisories. When an alert-email address is configured for the service, that address is also the contact in a payout-change email (`SATSGATE_SUPPORT_EMAIL`, `satsgateapp@proton.me` on the hosted service).

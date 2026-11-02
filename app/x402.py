@@ -47,11 +47,19 @@ TEST_DESCRIPTION = "Test payment on Base Sepolia. Not Base mainnet."
 
 
 class X402Error(Exception):
-    def __init__(self, code: str, *, reason: str | None = None, status: int = 402) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        reason: str | None = None,
+        status: int = 402,
+        retry_after: int | None = None,
+    ) -> None:
         super().__init__(code)
         self.code = code
         self.reason = reason if reason and _REASON.fullmatch(reason) else None
         self.status = status
+        self.retry_after = None if retry_after is None else max(1, int(retry_after))
 
 
 def public_reason(value: object) -> str | None:
@@ -102,8 +110,9 @@ def personal_signature_kind(signature: object) -> str:
     """Classify a connect-page signature without echoing it.
 
     ``eoa`` is exactly 65 bytes. Any other decoded length from 1 byte through
-    ``X402_SIGNATURE_MAX_BYTES`` is ``smart_wallet`` (EIP-1271 is a later
-    release). Invalid hex, an empty value, and anything longer are ``bad``.
+    ``X402_SIGNATURE_MAX_BYTES`` is ``smart_wallet``. Invalid hex, an empty
+    value (including ``0x``), and anything longer are ``bad``. ``0x`` is still
+    accepted later, and only on the contract path.
     """
     if not isinstance(signature, str) or not signature.startswith("0x"):
         return "bad"
@@ -158,6 +167,86 @@ def recover_personal_signer(message: str, signature: str) -> str:
     except Exception as exc:  # noqa: BLE001
         raise X402Error("bad_signature", status=400) from exc
     return to_checksum_address(recovered)
+
+
+def eip191_digest(message: str) -> bytes:
+    """The digest Safe and Coinbase Smart Wallet check after ``personal_sign``.
+
+    This is ``keccak256("\\x19Ethereum Signed Message:\\n" + len + bytes)``,
+    the same bytes ``_hash_eip191_message(encode_defunct(text=message))`` returns.
+    The wallet's own SafeMessage or replaySafeHash wrapping stays inside the wallet.
+    """
+    from eth_account.messages import _hash_eip191_message
+
+    return _hash_eip191_message(encode_defunct(text=message))
+
+
+def eoa_controls(message: str, signature: str, address: str) -> bool:
+    """True when a 65-byte signature recovers to the claimed address. No RPC."""
+    if personal_signature_kind(signature) != "eoa":
+        return False
+    expected = checksum_address(address).lower()
+    for candidate in payee_message_candidates(message):
+        try:
+            recovered = recover_personal_signer(candidate, signature)
+        except X402Error:
+            continue
+        if recovered.lower() == expected:
+            return True
+    return False
+
+
+def _signature_bytes(signature: object) -> bytes | None:
+    if not isinstance(signature, str) or not signature.startswith("0x"):
+        return None
+    hexpart = signature[2:]
+    if len(hexpart) % 2 or any(ch not in "0123456789abcdefABCDEF" for ch in hexpart):
+        return None
+    if len(hexpart) // 2 > int(config.X402_SIGNATURE_MAX_BYTES):
+        return None
+    try:
+        return bytes.fromhex(hexpart) if hexpart else b""
+    except ValueError:
+        return None
+
+
+def verify_payee_control(message: str, signature: str, *, address: str, client_id: int) -> str:
+    """Return ``eoa`` or ``contract`` when this signature controls ``address``.
+
+    A matching 65-byte recovery returns before any RPC. A mismatch is not final:
+    a 1-of-1 Safe signature is 65 bytes and recovers to the owner. With
+    ``SATSGATE_SMART_WALLETS=0`` the old answers are kept and Base is not called.
+    """
+    from . import evm_rpc
+
+    if eoa_controls(message, signature, address):
+        return "eoa"
+    raw = _signature_bytes(signature)
+    if raw is None:
+        raise X402Error("bad_signature", status=400)
+    if not config.SMART_WALLETS:
+        if raw and len(raw) != 65:
+            raise X402Error("smart_wallet_not_supported", status=400)
+        raise X402Error("bad_signature", status=400)
+    allowed, retry_after = evm_rpc.allow_smart_check(int(client_id))
+    if not allowed:
+        raise X402Error("rate_limited", status=429, retry_after=retry_after)
+    digests: list[bytes] = []
+    for candidate in payee_message_candidates(message):
+        digest = eip191_digest(candidate)
+        if digest not in digests:
+            digests.append(digest)
+    try:
+        valid = evm_rpc.is_valid_contract_signature(checksum_address(address), tuple(digests), raw)
+    except evm_rpc.NotOnBase:
+        if len(raw) in {0, 65}:
+            raise X402Error("bad_signature", status=400) from None
+        raise X402Error("smart_wallet_not_on_base", status=400) from None
+    except evm_rpc.RpcUnavailable:
+        raise X402Error("smart_wallet_check_unavailable", status=503) from None
+    if not valid:
+        raise X402Error("bad_signature", status=400)
+    return "contract"
 
 
 def mainnet_enabled() -> bool:

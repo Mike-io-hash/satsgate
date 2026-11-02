@@ -13,11 +13,14 @@ from typing import Any
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from . import config
 from . import db
+from . import db_alert_email
 from . import db_clients
 from . import db_keys
+from . import email_send
 from . import db_reports
 from . import db_sites
 from . import db_verify
@@ -71,12 +74,23 @@ async def _lifespan(_app: FastAPI):
     if config.RATES_ENABLED:
         thread = threading.Thread(target=_rates_loop, args=(stop,), name="satsgate-rates", daemon=True)
         thread.start()
+    email_stop = threading.Event()
+    email_thread = None
+    if email_send.sender_should_run():
+        email_thread = threading.Thread(
+            target=email_send.loop, args=(email_stop,), name="satsgate-email", daemon=True
+        )
+        email_thread.start()
     try:
         yield
     finally:
         stop.set()
+        email_stop.set()
+        email_send.wake.set()
         if thread is not None:
             thread.join(timeout=1)
+        if email_thread is not None:
+            email_thread.join(timeout=1)
         ssrf.close()
 
 
@@ -369,9 +383,14 @@ def well_known_satsgate(request: Request) -> dict:
                 "evm_payee_challenge": {"method": "POST", "path": "/v1/client/payee/evm/challenge"},
                 "evm_payee": {"method": "POST", "path": "/v1/client/payee/evm"},
                 "evm_payee_connect": {"method": "POST", "path": "/v1/client/payee/evm/connect"},
+                "alert_email": {"method": "PUT", "path": "/v1/client/alert-email"},
+                "alert_email_delete": {"method": "DELETE", "path": "/v1/client/alert-email"},
                 "connect_evm": {"method": "GET", "path": "/v1/connect/evm"},
                 "connect_evm_challenge": {"method": "POST", "path": "/v1/connect/evm/challenge"},
                 "connect_evm_verify": {"method": "POST", "path": "/v1/connect/evm/verify"},
+                "connect_alert_email": {"method": "POST", "path": "/v1/connect/alert-email"},
+                "connect_alert_email_preview": {"method": "GET", "path": "/v1/connect/alert-email"},
+                "connect_alert_email_confirm": {"method": "POST", "path": "/v1/connect/alert-email/confirm"},
                 "api_keys_create": {"method": "POST", "path": "/v1/api-keys"},
                 "api_keys_list": {"method": "GET", "path": "/v1/api-keys"},
                 "api_keys_revoke": {"method": "POST", "path": "/v1/api-keys/{key_id}/revoke"},
@@ -432,6 +451,7 @@ def v1_client(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
         return client
 
     evm = db_x402.get_evm_payee(config.DB_PATH, client_id=client.id)
+    alerts = db_alert_email.describe(config.DB_PATH, client_id=client.id)
     return {
         "ok": True,
         "client_id": client.id,
@@ -439,6 +459,11 @@ def v1_client(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
         "payee_lightning_address": client.payee_lightning_address,
         "payee_evm_address": evm["address"] if evm else None,
         "payee_evm_verified": bool(evm and evm["verified_at"]),
+        "payee_evm_kind": evm["kind"] if evm else "eoa",
+        "alert_email": alerts["alert_email"],
+        "alert_email_status": alerts["alert_email_status"],
+        "alert_email_pending": alerts["alert_email_pending"],
+        "email_alerts_available": db_alert_email.alerts_available(),
     }
 
 
@@ -686,9 +711,40 @@ class EvmPayeeChallengeIn(BaseModel):
     address: str = Field(..., min_length=42, max_length=42)
 
 
-class EvmPayeeIn(BaseModel):
-    address: str = Field(..., min_length=42, max_length=42)
-    signature: str = Field(..., min_length=132, max_length=132)
+def _x402_error(exc: x402_mod.X402Error) -> JSONResponse:
+    if exc.retry_after:
+        return JSONResponse(
+            status_code=exc.status,
+            headers={"Retry-After": str(exc.retry_after)},
+            content={"ok": False, "error": exc.code, "retry_after_seconds": exc.retry_after},
+        )
+    return JSONResponse(status_code=exc.status, content={"ok": False, "error": exc.code})
+
+
+def _payee_verified_body(client_id: int, saved: dict) -> dict:
+    return {
+        "ok": True,
+        "client_id": client_id,
+        "payee_evm_address": saved["address"],
+        "payee_evm_verified": True,
+        "payee_evm_kind": saved["kind"],
+        "rails_cleared": saved["rails_cleared"],
+        "note": "x402 stays off until you enable it on a site. Changing the address turns it off again.",
+    }
+
+
+async def _read_payee_body(request: Request) -> tuple[object, object] | JSONResponse:
+    """Parse address and signature without echoing a long signature in a 422."""
+    raw = await request.body()
+    if len(raw) > config.X402_SIGNATURE_MAX_BYTES * 2 + 512:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "bad_signature"})
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "bad_signature"})
+    if not isinstance(payload, dict):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "bad_signature"})
+    return payload.get("address"), payload.get("signature")
 
 
 @app.post("/v1/client/payee/evm/challenge")
@@ -716,33 +772,35 @@ def v1_client_evm_challenge(
 
 
 @app.post("/v1/client/payee/evm")
-def v1_client_evm_payee(
-    body: EvmPayeeIn,
+async def v1_client_evm_payee(
+    request: Request,
     x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
 ):
     """Verify the signed message and save one EVM payTo. A bad signature does not change the stored address."""
     client = _account_client(x_api_key)
     if isinstance(client, JSONResponse):
         return client
-    try:
-        saved = db_x402.verify_payee_signature(
+    parsed = await _read_payee_body(request)
+    if isinstance(parsed, JSONResponse):
+        return parsed
+    address, signature = parsed
+
+    def _verify():
+        return db_x402.verify_payee_signature(
             config.DB_PATH,
             client_id=client.id,
-            address=body.address,
-            signature=body.signature,
+            address=address,
+            signature=signature,
+            via="API",
         )
+
+    try:
+        saved = await run_in_threadpool(_verify)
     except x402_mod.X402Error as exc:
-        return JSONResponse(status_code=exc.status, content={"ok": False, "error": exc.code})
+        return _x402_error(exc)
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
-    return {
-        "ok": True,
-        "client_id": client.id,
-        "payee_evm_address": saved["address"],
-        "payee_evm_verified": True,
-        "rails_cleared": saved["rails_cleared"],
-        "note": "x402 stays off until you enable it on a site. Changing the address turns it off again.",
-    }
+    return _payee_verified_body(client.id, saved)
 
 
 @app.post("/v1/client/payee/evm/connect")
@@ -772,13 +830,19 @@ def v1_connect_evm(x_connect_token: str | None = Header(default=None, alias="X-C
     session = _connect_session(x_connect_token)
     if isinstance(session, JSONResponse):
         return session
+    alerts = db_alert_email.describe(config.DB_PATH, client_id=session["client_id"])
     return {
         "ok": True,
         "client_id": session["client_id"],
         "current_payee_evm_address": session["address"],
         "current_payee_evm_verified": session["verified"],
+        "payee_evm_kind": session["kind"],
         "expires_at": session["expires_at"],
         "challenge_seconds": int(config.X402_PAYEE_CHALLENGE_SECONDS),
+        "alert_email": alerts["alert_email"],
+        "alert_email_status": alerts["alert_email_status"],
+        "alert_email_pending": alerts["alert_email_pending"],
+        "email_alerts_available": db_alert_email.alerts_available(),
     }
 
 
@@ -815,49 +879,145 @@ async def v1_connect_evm_verify(
     request: Request,
     x_connect_token: str | None = Header(default=None, alias="X-Connect-Token"),
 ):
-    """Verify the signature. A non-65-byte signature is refused before recovery.
+    """Verify the signature. Success clears the connect token. Failure leaves it in place.
 
-    The body is parsed here so a long signature is not echoed in a 422.
-    Success clears the connect token. Failure leaves it in place.
+    The body is parsed here so a long signature is not echoed in a 422. A contract
+    signature is checked on Base outside the event loop.
     """
     session = _connect_session(x_connect_token)
     if isinstance(session, JSONResponse):
         return session
+    parsed = await _read_payee_body(request)
+    if isinstance(parsed, JSONResponse):
+        return parsed
+    address, signature = parsed
+
+    def _verify():
+        return db_x402.verify_payee_signature(
+            config.DB_PATH,
+            client_id=session["client_id"],
+            address=address,
+            signature=signature,
+            consume_connect=True,
+            connect_token=x_connect_token,
+            via="connect page",
+        )
+
+    try:
+        saved = await run_in_threadpool(_verify)
+    except x402_mod.X402Error as exc:
+        return _x402_error(exc)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "unavailable"})
+    return _payee_verified_body(session["client_id"], saved)
+
+
+def _alert_body(result: dict) -> dict:
+    body = {"ok": True}
+    body.update(result)
+    return body
+
+
+async def _read_alert_email(request: Request) -> object | JSONResponse:
+    """Read the email field. A bad body is invalid_email and does not echo the address."""
     raw = await request.body()
-    if len(raw) > config.X402_SIGNATURE_MAX_BYTES * 2 + 512:
-        return JSONResponse(status_code=400, content={"ok": False, "error": "bad_signature"})
+    if len(raw) > 1024:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_email"})
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
-        return JSONResponse(status_code=400, content={"ok": False, "error": "bad_signature"})
-    if not isinstance(payload, dict):
-        return JSONResponse(status_code=400, content={"ok": False, "error": "bad_signature"})
-    signature = payload.get("signature")
-    kind = x402_mod.personal_signature_kind(signature)
-    if kind == "smart_wallet":
-        return JSONResponse(status_code=400, content={"ok": False, "error": "smart_wallet_not_supported"})
-    if kind != "eoa":
-        return JSONResponse(status_code=400, content={"ok": False, "error": "bad_signature"})
+        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_email"})
+    if not isinstance(payload, dict) or "email" not in payload:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_email"})
+    return payload.get("email")
+
+
+@app.put("/v1/client/alert-email")
+async def v1_client_alert_email_put(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+):
+    """Set or replace the pending alert address. The account key is required."""
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    email = await _read_alert_email(request)
+    if isinstance(email, JSONResponse):
+        return email
     try:
-        saved = db_x402.verify_payee_signature(
+        saved = db_alert_email.set_pending(
             config.DB_PATH,
-            client_id=session["client_id"],
-            address=payload.get("address"),
-            signature=signature,
-            consume_connect=True,
+            client_id=client.id,
+            email=email,
+            allow_when_confirmed=True,
         )
     except x402_mod.X402Error as exc:
-        return JSONResponse(status_code=exc.status, content={"ok": False, "error": exc.code})
+        return _x402_error(exc)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+    return _alert_body(saved)
+
+
+@app.delete("/v1/client/alert-email")
+def v1_client_alert_email_delete(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
+    """Remove the confirmed address and any pending one. The account key is required."""
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    try:
+        saved = db_alert_email.remove(config.DB_PATH, client_id=client.id)
+    except x402_mod.X402Error as exc:
+        return _x402_error(exc)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+    return _alert_body(saved)
+
+
+@app.post("/v1/connect/alert-email")
+async def v1_connect_alert_email(
+    request: Request,
+    x_connect_token: str | None = Header(default=None, alias="X-Connect-Token"),
+):
+    """First alert address only. A confirmed address has to be changed with the account key.
+
+    This does not consume the connect token.
+    """
+    session = _connect_session(x_connect_token)
+    if isinstance(session, JSONResponse):
+        return session
+    email = await _read_alert_email(request)
+    if isinstance(email, JSONResponse):
+        return email
+    try:
+        saved = db_alert_email.set_pending(
+            config.DB_PATH,
+            client_id=session["client_id"],
+            email=email,
+            allow_when_confirmed=False,
+        )
+    except x402_mod.X402Error as exc:
+        return _x402_error(exc)
     except ValueError:
         return JSONResponse(status_code=400, content={"ok": False, "error": "unavailable"})
-    return {
-        "ok": True,
-        "client_id": session["client_id"],
-        "payee_evm_address": saved["address"],
-        "payee_evm_verified": True,
-        "rails_cleared": saved["rails_cleared"],
-        "note": "x402 stays off until you enable it on a site. Changing the address turns it off again.",
-    }
+    return _alert_body(saved)
+
+
+@app.get("/v1/connect/alert-email")
+def v1_connect_alert_email_preview(x_email_token: str | None = Header(default=None, alias="X-Email-Token")):
+    """What the confirmation screen may show. The token is not consumed."""
+    try:
+        return db_alert_email.preview(config.DB_PATH, x_email_token or "")
+    except x402_mod.X402Error as exc:
+        return _x402_error(exc)
+
+
+@app.post("/v1/connect/alert-email/confirm")
+def v1_connect_alert_email_confirm(x_email_token: str | None = Header(default=None, alias="X-Email-Token")):
+    """Confirm on a POST. A mail scanner that only fetches the link does not confirm it."""
+    try:
+        return db_alert_email.confirm(config.DB_PATH, x_email_token or "")
+    except x402_mod.X402Error as exc:
+        return _x402_error(exc)
 
 
 class ApiKeyCreateIn(BaseModel):

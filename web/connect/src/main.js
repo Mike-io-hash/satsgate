@@ -4,8 +4,9 @@ import { EthersAdapter } from '@reown/appkit-adapter-ethers'
 import { base } from '@reown/appkit/networks'
 import { getAddress } from 'ethers'
 
-import { ApiError, getConfig, getSession, postChallenge, postVerify } from './api.js'
+import { ApiError, getConfig, getEmailPreview, getSession, postAlertEmail, postChallenge, postEmailConfirm, postVerify } from './api.js'
 import { formatAddressBlocks } from './address.js'
+import { confirmView, renderConfirmScreen } from './confirm-email.js'
 import {
   BASE_USDC_URL,
   COPY,
@@ -13,13 +14,15 @@ import {
   ERROR_MESSAGES,
   GENERIC_ERROR,
   SEPOLIA_USDC_URL,
+  emailSaveFailed,
   expirySentence,
   messageForError,
 } from './copy.js'
+import { continuePlan, emailMode } from './email-step.js'
 import { isUserRejection, phoneSignHint } from './errors.js'
 import { utf8ToHex } from './hex.js'
 import { isProjectId } from './project.js'
-import { takeConnectToken } from './token.js'
+import { isEmailConfirmPath, takeConnectToken, takeEmailToken } from './token.js'
 
 const root = document.querySelector('#app')
 const state = {
@@ -35,6 +38,12 @@ const state = {
   result: null,
   busy: false,
   modal: null,
+  emailDraft: '',
+  emailReminded: false,
+  emailNote: '',
+  checkingBase: false,
+  emailToken: null,
+  confirm: null,
 }
 
 function h(tag, props, children) {
@@ -176,6 +185,7 @@ function renderReady() {
       state.configured ? null : h('p', { class: 'error', role: 'alert' }, [COPY.unconfigured]),
       errorLine(),
       button,
+      h('p', { class: 'hint' }, [COPY.safe]),
     ]),
   )
 }
@@ -206,7 +216,7 @@ function renderConfirm() {
       type: 'button',
       id: 'continue',
       class: 'primary',
-      click: () => requestChallenge(),
+      click: () => onContinue(),
     },
     [COPY.continue],
   )
@@ -217,10 +227,51 @@ function renderConfirm() {
       h('p', { class: 'addr' }, [blocks(address)]),
       copy,
       h('label', { class: 'check' }, [box, h('span', {}, [COPY.checkbox])]),
+      emailBlock(),
       errorLine(),
       go,
     ]),
   )
+}
+
+function emailBlock() {
+  const mode = emailMode(state.info)
+  if (mode === 'hidden') return null
+  if (mode === 'confirmed') {
+    const masked = state.info.alert_email || ''
+    return h('p', { class: 'hint' }, [`Security alerts go to ${masked}.`])
+  }
+  const pending = mode === 'pending'
+  const label = pending ? COPY.emailDifferent : COPY.emailLabel
+  const field = h('input', {
+    type: 'email',
+    id: 'alert-email',
+    autocomplete: 'email',
+    input: (event) => {
+      state.emailDraft = event.target.value
+    },
+  })
+  field.value = state.emailDraft
+  const reminder = state.emailReminded && !String(state.emailDraft || '').trim() && mode === 'none'
+  return h('div', {}, [
+    pending ? h('p', { class: 'hint' }, [`Waiting for you to confirm ${state.info.alert_email_pending}.`]) : null,
+    h('label', { class: 'field', for: 'alert-email' }, [label, field]),
+    h('p', { class: 'helper' }, [COPY.emailHelp]),
+    reminder ? h('p', { class: 'reminder' }, [COPY.emailRemind]) : null,
+    reminder
+      ? h('button', {
+          type: 'button',
+          class: 'ghost',
+          click: () => {
+            const input = root.querySelector('#alert-email')
+            if (input) input.focus()
+          },
+        }, [COPY.addEmail])
+      : null,
+    reminder
+      ? h('button', { type: 'button', class: 'ghost', click: () => requestChallenge() }, [COPY.continueWithout])
+      : null,
+  ])
 }
 
 function renderReview() {
@@ -244,9 +295,12 @@ function renderReview() {
       h('p', {}, [COPY.signing]),
       message,
       hint ? h('p', { class: 'hint' }, [hint]) : null,
+      state.checkingBase && state.busy ? h('p', { class: 'hint' }, [COPY.checking]) : null,
+      state.emailNote ? h('p', { class: 'hint' }, [state.emailNote]) : null,
       errorLine(),
       state.error === ERROR_MESSAGES.stale_challenge ? again : null,
-      state.error === ERROR_MESSAGES.smart_wallet_not_supported
+      state.error === ERROR_MESSAGES.smart_wallet_not_supported ||
+      state.error === ERROR_MESSAGES.smart_wallet_not_on_base
         ? h('button', { type: 'button', class: 'ghost', click: () => state.modal && state.modal.open() }, [COPY.otherWallet])
         : null,
       sign,
@@ -260,6 +314,7 @@ function renderSuccess() {
     h('section', {}, [
       h('h2', {}, [COPY.verified]),
       h('p', { class: 'addr verified' }, [blocks(address)]),
+      state.result && state.result.payee_evm_kind === 'contract' ? h('p', { class: 'hint' }, [COPY.contractWallet]) : null,
       state.result && state.result.rails_cleared ? h('p', { class: 'warning' }, [COPY.railsCleared]) : null,
       h('p', {}, [COPY.closePage]),
     ]),
@@ -284,8 +339,16 @@ function renderProblem() {
   )
 }
 
+function renderEmailConfirm() {
+  const view = confirmView(state.confirm)
+  const panel = h('section', {}, [])
+  renderConfirmScreen(document, panel, view, () => submitEmailConfirm())
+  shell(panel)
+}
+
 function render() {
-  if (state.view === 'loading') renderLoading()
+  if (state.view === 'email-confirm') renderEmailConfirm()
+  else if (state.view === 'loading') renderLoading()
   else if (state.view === 'invalid') renderInvalid()
   else if (state.view === 'problem') renderProblem()
   else if (state.view === 'confirm') renderConfirm()
@@ -293,6 +356,27 @@ function render() {
   else if (state.view === 'success') renderSuccess()
   else if (state.view === 'mismatch') renderMismatch()
   else renderReady()
+}
+
+async function onContinue() {
+  const mode = emailMode(state.info)
+  const plan = continuePlan({ mode, draft: state.emailDraft, reminded: state.emailReminded })
+  if (plan === 'remind') {
+    state.emailReminded = true
+    render()
+    return
+  }
+  if (plan === 'save-and-sign') {
+    const typed = String(state.emailDraft || '').trim()
+    try {
+      await postAlertEmail(state.token, typed)
+      state.emailNote = COPY.emailSaved
+    } catch (error) {
+      const reason = error instanceof ApiError ? messageForError(error.code) : messageForError('unreachable')
+      state.emailNote = emailSaveFailed(reason)
+    }
+  }
+  await requestChallenge()
 }
 
 async function requestChallenge() {
@@ -331,6 +415,8 @@ async function signMessage() {
       method: 'personal_sign',
       params: [utf8ToHex(state.challenge.message), address],
     })
+    state.checkingBase = typeof signature === 'string' && signature.length !== 132
+    if (state.checkingBase) render()
     const result = await postVerify(state.token, address, signature)
     let server = ''
     try {
@@ -345,6 +431,7 @@ async function signMessage() {
     applyError(error)
   } finally {
     state.busy = false
+    state.checkingBase = false
     render()
   }
 }
@@ -370,7 +457,9 @@ function setupModal(projectId) {
       url: 'https://satsgate.org',
       icons: ['https://satsgate.org/connect/icon.svg'],
     },
-    coinbasePreference: 'eoaOnly',
+    // 'all' offers Coinbase Smart Wallet next to the extension. defaultAccountTypes
+    // is the Reown embedded account, which stays an EOA because email and social login are off.
+    coinbasePreference: 'all',
     defaultAccountTypes: { eip155: 'eoa' },
     allowUnsupportedChain: true,
     enableNetworkSwitch: false,
@@ -427,7 +516,45 @@ async function loadSession() {
   render()
 }
 
+async function loadEmailConfirm() {
+  state.view = 'email-confirm'
+  if (!state.emailToken) {
+    state.confirm = { invalid: true }
+    render()
+    return
+  }
+  state.confirm = { loading: true }
+  render()
+  try {
+    const preview = await getEmailPreview(state.emailToken)
+    state.confirm = { pending: preview.alert_email_pending, clientId: preview.client_id }
+  } catch {
+    state.confirm = { invalid: true }
+  }
+  render()
+}
+
+async function submitEmailConfirm() {
+  if (!state.emailToken || state.busy) return
+  state.busy = true
+  render()
+  try {
+    await postEmailConfirm(state.emailToken)
+    state.confirm = { done: true }
+  } catch {
+    state.confirm = { invalid: true }
+  } finally {
+    state.busy = false
+    render()
+  }
+}
+
 async function boot() {
+  if (isEmailConfirmPath(window.location.pathname)) {
+    state.emailToken = takeEmailToken(window.location, window.history)
+    await loadEmailConfirm()
+    return
+  }
   state.token = takeConnectToken(window.location, window.history)
   render()
   if (!state.token) {

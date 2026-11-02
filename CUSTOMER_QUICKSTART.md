@@ -49,7 +49,9 @@ The same packs can be bought with USDC when the operator has set `SATSGATE_TREAS
 
 A hosted site that takes USDC starts in test mode. Try on Base Sepolia with your agent first, then switch the site to live. See [`gate/README.md`](./gate/README.md).
 
-To set the USDC address, create a one-time link with `POST /v1/client/payee/evm/connect` (the account key) and open it in a browser. The page connects a wallet you already use and asks for one signature. It does not ask for the account key, a seed phrase, or a private key. USDC is on Base only. The manual challenge and verify calls still work.
+To set the USDC address, create a one-time link with `POST /v1/client/payee/evm/connect` (the account key) and open it in a browser. The page connects a wallet you already use and asks for one signature. It does not ask for the account key, a seed phrase, or a private key. USDC is on Base only. A Safe on Base and a Coinbase Smart Wallet work on that page. The manual challenge and verify calls still work, including a smart-wallet signature.
+
+Add an alert email (recommended) on the connect page or with `PUT /v1/client/alert-email`, and confirm it from your inbox. You'll get an email whenever a payout address changes. Remove it with `DELETE /v1/client/alert-email`. The address is optional. Satsgate does not use it for marketing.
 
 ## 2) Register your payee (where your users will pay)
 

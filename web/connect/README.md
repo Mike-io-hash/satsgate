@@ -44,7 +44,7 @@ Pinned in `package.json`:
 - `ethers` 6.17.0 (the adapter accepts ethers 6)
 - `vite` 7.3.7
 
-`metadata.url` is `https://satsgate.org`. The icon is `/connect/icon.svg` on the same origin. Networks are Base only. The page does not ask the wallet to switch chain before `personal_sign`. Coinbase Wallet is set to `eoaOnly`. Email, social login, onramp, swaps, send, history, and analytics are off.
+`metadata.url` is `https://satsgate.org`. The icon is `/connect/icon.svg` on the same origin. Networks are Base only. The page does not ask the wallet to switch chain before `personal_sign`. Coinbase Wallet is `coinbasePreference: 'all'`, so Coinbase Smart Wallet is offered next to the extension. `defaultAccountTypes` stays `{ eip155: 'eoa' }` because that setting is the Reown embedded account, and email and social login stay off. A Safe on Base connects through WalletConnect. The page still asks only for `personal_sign`. An optional alert email is collected before signing when the server has email turned on. `/connect/confirm-email` is the same bundle and does not load AppKit.
 
 ## CSP
 

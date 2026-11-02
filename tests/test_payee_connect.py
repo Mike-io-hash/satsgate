@@ -380,8 +380,27 @@ def test_connect_public_base_requires_an_https_path(tmp_path):
     assert module.config.CONNECT_PUBLIC_BASE == "https://pay.example/connect"
 
 
+def _install_empty_base(module):
+    """A 65-byte mismatch now asks Base. This poster answers 'no code' and never dials out."""
+
+    def poster(url, payload, headers=None, timeout=None):
+        method = payload.get("method")
+        if method == "eth_chainId":
+            result = "0x2105"
+        elif method == "eth_getCode":
+            result = "0x"
+        else:
+            return 200, {"jsonrpc": "2.0", "id": 1, "error": {"code": 3, "message": "execution reverted"}}
+        return 200, {"jsonrpc": "2.0", "id": 1, "result": result}
+
+    import importlib
+
+    importlib.import_module("app.evm_rpc").poster = poster
+
+
 def test_connect_route_keeps_the_trimmed_signature_rule(tmp_path):
     module = _load_app(tmp_path)
+    _install_empty_base(module)
     owner = Account.create()
     other = Account.create()
     with TestClient(module.app) as http:
@@ -454,8 +473,9 @@ def test_v_zero_and_twentyseven_both_verify(tmp_path):
             assert stored == signature
 
 
-def test_long_signature_is_a_smart_wallet_and_changes_nothing(tmp_path):
+def test_long_signature_without_code_on_base_changes_nothing(tmp_path):
     module = _load_app(tmp_path)
+    _install_empty_base(module)
     owner = Account.create()
     with TestClient(module.app) as http:
         key = _buy(http)
@@ -473,19 +493,21 @@ def test_long_signature_is_a_smart_wallet_and_changes_nothing(tmp_path):
             json={"address": owner.address, "signature": "0x" + "ab" * 66},
         )
         assert rejected.status_code == 400, rejected.text
-        assert rejected.json() == {"ok": False, "error": "smart_wallet_not_supported"}
+        assert rejected.json() == {"ok": False, "error": "smart_wallet_not_on_base"}
         assert _client_row() == before
         account_route = http.post(
             "/v1/client/payee/evm",
             headers={"X-Api-Key": key},
             json={"address": owner.address, "signature": "0x" + "ab" * 66},
         )
-        assert account_route.status_code == 422
+        assert account_route.status_code == 400, account_route.text
+        assert account_route.json() == {"ok": False, "error": "smart_wallet_not_on_base"}
         assert _client_row() == before
 
 
 def test_a_failed_verify_keeps_the_token(tmp_path):
     module = _load_app(tmp_path)
+    _install_empty_base(module)
     owner = Account.create()
     stranger = Account.create()
     with TestClient(module.app) as http:
