@@ -2,14 +2,15 @@ import { ApiError } from './api-error.js'
 
 export { ApiError }
 
-async function request(path, { method = 'GET', token, body } = {}) {
+async function request(path, { method = 'GET', token, emailToken, body } = {}) {
   let response
   try {
     response = await fetch(path, {
       method,
       cache: 'no-store',
       headers: {
-        'X-Connect-Token': token,
+        ...(token ? { 'X-Connect-Token': token } : {}),
+        ...(emailToken ? { 'X-Email-Token': emailToken } : {}),
         ...(body ? { 'Content-Type': 'application/json' } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
@@ -49,4 +50,16 @@ export function postChallenge(token, address) {
 
 export function postVerify(token, address, signature) {
   return request('/v1/connect/evm/verify', { method: 'POST', token, body: { address, signature } })
+}
+
+export function postAlertEmail(token, email) {
+  return request('/v1/connect/alert-email', { method: 'POST', token, body: { email } })
+}
+
+export function getEmailPreview(emailToken) {
+  return request('/v1/connect/alert-email', { emailToken })
+}
+
+export function postEmailConfirm(emailToken) {
+  return request('/v1/connect/alert-email/confirm', { method: 'POST', emailToken })
 }

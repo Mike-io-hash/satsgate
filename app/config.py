@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # Load env vars from .env if present. Existing process env wins.
 load_dotenv()
 
-APP_VERSION = "0.16.0"
+APP_VERSION = "0.17.0"
 
 # production is the safe default. Local mock/dev only runs when this is explicit.
 SATSGATE_ENV = os.environ.get("SATSGATE_ENV", "production").strip().lower() or "production"
@@ -337,6 +337,60 @@ def _mainnet_enabled() -> bool:
 
 X402_CDP_REQUESTED = _cdp_requested()
 X402_MAINNET_ENABLED = _mainnet_enabled()
+
+def _bare_email(value: str) -> bool:
+    if not value or len(value) > 254 or value.count("@") != 1 or any(ch.isspace() for ch in value):
+        return False
+    local, domain = value.split("@", 1)
+    if not local or len(local) > 64 or '"' in local or "<" in local or ">" in local:
+        return False
+    if "." not in domain or domain.startswith(".") or domain.endswith(".") or ".." in domain:
+        return False
+    return all(part and not part.startswith("-") and not part.endswith("-") for part in domain.split("."))
+
+
+def _email_from() -> str:
+    raw = os.environ.get("SATSGATE_EMAIL_FROM", "Satsgate <alerts@satsgate.org>").strip()
+    if raw.endswith(">") and "<" in raw:
+        name, _, inner = raw.rpartition("<")
+        address = inner[:-1].strip()
+        if name.strip() and "<" not in name and _bare_email(address):
+            return raw
+    if _bare_email(raw):
+        return raw
+    raise RuntimeError("SATSGATE_EMAIL_FROM must be an email address or Name <email>")
+
+
+def _support_email() -> str:
+    raw = os.environ.get("SATSGATE_SUPPORT_EMAIL", "").strip()
+    if not raw:
+        return ""
+    if not _bare_email(raw):
+        raise RuntimeError("SATSGATE_SUPPORT_EMAIL must be a bare email address")
+    return raw
+
+
+def _base_rpc_url() -> str:
+    raw = os.environ.get("SATSGATE_BASE_RPC_URL", "https://mainnet.base.org").strip()
+    parsed = urlsplit(raw)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError("SATSGATE_BASE_RPC_URL must be an https URL without userinfo, a query, or a fragment")
+    return raw.rstrip("/")
+
+
+EMAIL_FROM = _email_from()
+SUPPORT_EMAIL = _support_email()
+RESEND_API_KEY = os.environ.get("SATSGATE_RESEND_API_KEY", "").strip()
+EMAIL_ENABLED = os.environ.get("SATSGATE_EMAIL_ENABLED", "1").strip() != "0"
+BASE_RPC_URL = _base_rpc_url()
+SMART_WALLETS = os.environ.get("SATSGATE_SMART_WALLETS", "1").strip() != "0"
 
 from .cdp_auth import install_redactor  # noqa: E402
 

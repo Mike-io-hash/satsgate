@@ -25,6 +25,12 @@ Production startup refuses the default signing secret, secrets shorter than 32 b
 
 These checks do not make a malicious Lightning Address provider honest. The provider still chooses the invoice destination. They stop a provider (or a misconfigured payee) from returning an invoice for a different amount, network, or description, and they stop one satsgate client from redeeming another client's token.
 
+## Payout changes and alerts
+
+A payee signature proves that the connected wallet controls the address. It does not prove that the person holding the Satsgate account key is the same person who set it up. Someone who copies the account key (`sg_`) can sign with a wallet of their own, or can change the Lightning address with no signature at all. The defence is an optional alert email. Satsgate mails that address when a USDC or Lightning payout address changes, and when the alert address itself is changed or removed. A new address does not start receiving those alerts until the person confirms a one-time link. Until then the previous address still gets them, including a notice that a change was requested.
+
+If you get an alert you did not expect, your account key may have been copied. Write to the support address in the email (or to GitHub Security Advisories, linked below) and the operator will pause your sites. Do not send the API key, a seed phrase, or a private key. Satsgate does not ask for them. There is no way to rotate the account key in this version.
+
 ## Reporting a Vulnerability
 
 Please **do not** open a public GitHub issue for security vulnerabilities.

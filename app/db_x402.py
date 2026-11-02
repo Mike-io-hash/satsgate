@@ -7,7 +7,7 @@ import re
 import secrets
 import time
 
-from . import config, db, x402
+from . import config, db, db_alert_email, email_send, x402
 from .db import ChallengeLimit, _connect, enforce_challenge_capacity
 
 
@@ -15,7 +15,7 @@ def get_evm_payee(db_path: str, *, client_id: int) -> dict | None:
     with _connect(db_path) as conn:
         row = conn.execute(
             """
-            SELECT payee_evm_address, payee_evm_verified_at
+            SELECT payee_evm_address, payee_evm_verified_at, payee_evm_kind
             FROM clients WHERE id = ?
             """,
             (int(client_id),),
@@ -25,6 +25,7 @@ def get_evm_payee(db_path: str, *, client_id: int) -> dict | None:
     return {
         "address": row["payee_evm_address"],
         "verified_at": None if row["payee_evm_verified_at"] is None else int(row["payee_evm_verified_at"]),
+        "kind": "contract" if row["payee_evm_kind"] == "contract" else "eoa",
     }
 
 
@@ -64,7 +65,7 @@ def connect_session(db_path: str, token: str, *, now: int | None = None) -> dict
     with _connect(db_path) as conn:
         row = conn.execute(
             """
-            SELECT id, payee_evm_address, payee_evm_verified_at, payee_evm_connect_expires
+            SELECT id, payee_evm_address, payee_evm_verified_at, payee_evm_kind, payee_evm_connect_expires
             FROM clients
             WHERE payee_evm_connect_hash = ?
             """,
@@ -84,6 +85,7 @@ def connect_session(db_path: str, token: str, *, now: int | None = None) -> dict
         "address": shown,
         "verified": verified,
         "expires_at": int(row["payee_evm_connect_expires"]),
+        "kind": "contract" if row["payee_evm_kind"] == "contract" else "eoa",
     }
 
 
@@ -118,38 +120,58 @@ def verify_payee_signature(
     signature: str,
     now: int | None = None,
     consume_connect: bool = False,
+    connect_token: str | None = None,
+    via: str = "API",
 ) -> dict:
-    """Recover the signer of the stored challenge. A bad signature changes nothing."""
+    """Prove control of the pending address, then write it.
+
+    The signature check, including any Base ``eth_call``, runs outside the
+    write transaction. The write re-reads the challenge and, for a connect
+    link, the token. A bad signature changes nothing.
+    """
     now = int(time.time()) if now is None else int(now)
     checksum = x402.checksum_address(address)
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT * FROM clients WHERE id = ?", (int(client_id),)).fetchone()
+    if row is None:
+        raise ValueError("client does not exist")
+    message, expires = _pending_challenge(row, now)
+    if checksum != x402.checksum_address(_address_in_message(message)):
+        raise x402.X402Error("bad_signature", status=400)
+    if consume_connect and not _connect_token_ok(row, connect_token, now):
+        raise x402.X402Error("connect_link_invalid", status=401)
+    kind = x402.verify_payee_control(message, signature, address=checksum, client_id=int(client_id))
+    queued = False
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT * FROM clients WHERE id = ?", (int(client_id),)).fetchone()
         if row is None:
             conn.execute("ROLLBACK")
             raise ValueError("client does not exist")
-        message = row["payee_evm_pending_message"]
-        expires = row["payee_evm_pending_expires"]
-        if not message or expires is None or int(expires) < now:
+        if consume_connect and not _connect_token_ok(row, connect_token, now):
             conn.execute("ROLLBACK")
-            raise x402.X402Error("stale_challenge", status=400)
-        expected = x402.checksum_address(_address_in_message(message))
-        if checksum != expected:
-            conn.execute("ROLLBACK")
-            raise x402.X402Error("bad_signature", status=400)
+            raise x402.X402Error("connect_link_invalid", status=401)
         try:
-            x402.recover_payee_signer(message, signature, address=checksum)
+            current_message, _current_expires = _pending_challenge(row, now)
         except x402.X402Error:
             conn.execute("ROLLBACK")
             raise
+        if current_message != message:
+            conn.execute("ROLLBACK")
+            raise x402.X402Error("stale_challenge", status=400)
+        if checksum != x402.checksum_address(_address_in_message(current_message)):
+            conn.execute("ROLLBACK")
+            raise x402.X402Error("bad_signature", status=400)
         previous = row["payee_evm_address"]
-        changed = previous is not None and x402.checksum_address(previous) != checksum
+        rails_cleared = previous is not None and x402.checksum_address(previous) != checksum
+        address_changed = previous is None or x402.checksum_address(previous) != checksum
         if consume_connect:
             conn.execute(
                 """
                 UPDATE clients
                 SET payee_evm_address = ?,
                     payee_evm_verified_at = ?,
+                    payee_evm_kind = ?,
                     payee_evm_message = ?,
                     payee_evm_signature = ?,
                     payee_evm_pending_message = NULL,
@@ -158,7 +180,7 @@ def verify_payee_signature(
                     payee_evm_connect_expires = NULL
                 WHERE id = ?
                 """,
-                (checksum, now, message, signature, int(client_id)),
+                (checksum, now, kind, message, signature, int(client_id)),
             )
         else:
             conn.execute(
@@ -166,21 +188,55 @@ def verify_payee_signature(
                 UPDATE clients
                 SET payee_evm_address = ?,
                     payee_evm_verified_at = ?,
+                    payee_evm_kind = ?,
                     payee_evm_message = ?,
                     payee_evm_signature = ?,
                     payee_evm_pending_message = NULL,
                     payee_evm_pending_expires = NULL
                 WHERE id = ?
                 """,
-                (checksum, now, message, signature, int(client_id)),
+                (checksum, now, kind, message, signature, int(client_id)),
             )
-        if changed:
+        if rails_cleared:
             conn.execute(
                 "UPDATE sites SET rail_x402 = 0, updated_at = ? WHERE client_id = ?",
                 (now, int(client_id)),
             )
+        if address_changed:
+            queued = db_alert_email.queue_payout(
+                conn,
+                client_id=int(client_id),
+                to_email=row["alert_email"],
+                kind="payee_evm_changed",
+                new_address=checksum,
+                previous=None if previous is None else x402.checksum_address(previous),
+                via=via,
+                rails_cleared=rails_cleared,
+                now=now,
+            )
+            if queued:
+                db_alert_email.raise_if_guarded()
         conn.execute("COMMIT")
-    return {"address": checksum, "verified_at": now, "rails_cleared": changed}
+    if queued:
+        email_send.notify()
+    return {"address": checksum, "verified_at": now, "rails_cleared": rails_cleared, "kind": kind}
+
+
+def _pending_challenge(row, now: int) -> tuple[str, int]:
+    message = row["payee_evm_pending_message"]
+    expires = row["payee_evm_pending_expires"]
+    if not message or expires is None or int(expires) < now:
+        raise x402.X402Error("stale_challenge", status=400)
+    return message, int(expires)
+
+
+def _connect_token_ok(row, token: str | None, now: int) -> bool:
+    if not isinstance(token, str) or not token:
+        return False
+    if row["payee_evm_connect_hash"] != db.hash_api_key(token):
+        return False
+    expires = row["payee_evm_connect_expires"]
+    return expires is not None and int(expires) >= int(now)
 
 
 def _address_in_message(message: str) -> str:

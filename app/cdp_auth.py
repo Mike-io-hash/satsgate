@@ -104,7 +104,13 @@ class _Redactor(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         secret = os.environ.get("SATSGATE_X402_CDP_KEY_SECRET", "")
         key_id = os.environ.get("SATSGATE_X402_CDP_KEY_ID", "")
-        needles = [item.strip() for item in (secret, key_id) if isinstance(item, str) and len(item.strip()) >= 8]
+        resend = os.environ.get("SATSGATE_RESEND_API_KEY", "")
+        rpc_url = os.environ.get("SATSGATE_BASE_RPC_URL", "https://mainnet.base.org")
+        needles = [
+            item.strip()
+            for item in (secret, key_id, resend, rpc_url)
+            if isinstance(item, str) and len(item.strip()) >= 8
+        ]
         if not needles:
             return True
         record.msg = _scrub(record.msg, needles)
@@ -128,7 +134,7 @@ def _scrub(value, needles: list[str]):
 
 def install_redactor() -> None:
     filt = _Redactor()
-    for name in ("satsgate.x402", "httpx", "httpcore"):
+    for name in ("satsgate.x402", "satsgate.email", "satsgate.evm", "httpx", "httpcore"):
         logger = logging.getLogger(name)
         if any(isinstance(item, _Redactor) for item in logger.filters):
             continue

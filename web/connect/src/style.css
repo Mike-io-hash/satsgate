@@ -156,6 +156,38 @@ button:disabled {
   flex: none;
 }
 
+.field {
+  display: block;
+  margin: 12px 0 4px;
+  font-size: 14.5px;
+  font-weight: 700;
+}
+
+.field input {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  min-height: 2.75rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid #e3e7e8;
+  border-radius: 10px;
+  font: inherit;
+  font-weight: 400;
+}
+
+.helper {
+  color: #5b6a6c;
+  font-size: 13.5px;
+  margin: 4px 0 8px;
+}
+
+.reminder {
+  background: #fff;
+  border: 1px solid #e3e7e8;
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+
 textarea {
   width: 100%;
   font-family: ui-monospace, Menlo, monospace;
@@ -177,7 +209,7 @@ footer {
 
 footer p { margin: 0; font-size: 13px; }
 
-button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible {
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, .field input:focus-visible {
   outline: 2px solid #0b7a5c;
   outline-offset: 2px;
 }

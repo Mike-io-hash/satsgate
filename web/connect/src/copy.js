@@ -38,12 +38,38 @@ export const COPY = {
   loading: 'Checking this link…',
   tryAgain: 'Try again',
   otherWallet: 'Use a different wallet',
+  safe: "Using a Safe? In the Safe app on Base, open WalletConnect and paste the link from 'Copy link'. If your Safe needs more than one signer, the other owners must sign in the Safe app before the window ends.",
+  checking: 'Checking the signature on Base…',
+  contractWallet: 'This is a smart-contract wallet on Base. USDC on other networks sent to this address may not be recoverable.',
+  emailLabel: 'Email for security alerts (recommended)',
+  emailHelp: 'We email you only when your payout address or this email changes. No marketing. Optional.',
+  emailSaved: 'Check your inbox to confirm. Alerts start after you confirm.',
+  emailRemind: 'Without an alert email, nobody will tell you if your payout address changes.',
+  addEmail: 'Add email',
+  continueWithout: 'Continue without',
+  emailDifferent: 'Use a different email',
+  confirmedEmail: "Confirmed ✓. You'll get an email if your payout address changes.",
+  emailLinkInvalid: 'This link is missing, expired, or already used. Ask for a new one with PUT /v1/client/alert-email.',
+}
+
+export function emailSaveFailed(reason) {
+  const text = String(reason || '').replace(/[.。]+$/u, '')
+  return `We couldn't save the email: ${text}. You can add it later with the API.`
+}
+
+export function confirmEmailSentence(masked, clientId) {
+  return `Confirm ${masked} for security alerts on Satsgate account #${clientId}.`
 }
 
 export const ERROR_MESSAGES = {
   stale_challenge: 'The signing window expired. Tap Continue to get a new message.',
   bad_signature: 'The signature does not match this address. Make sure you sign with the same wallet and account you connected.',
-  smart_wallet_not_supported: 'This looks like a smart-contract wallet (for example Safe or Coinbase Smart Wallet). Those are not supported yet. Use a regular wallet address you control.',
+  smart_wallet_not_supported: 'Smart-contract wallets are turned off on this server. Use a regular wallet address you control.',
+  smart_wallet_not_on_base: 'This smart wallet is not on Base. Deploy it on Base, or use another wallet.',
+  smart_wallet_check_unavailable: 'We could not reach Base to check this wallet. Nothing changed. Try again in a minute.',
+  alert_email_already_set: 'Change it with PUT /v1/client/alert-email.',
+  email_unavailable: 'Alert email is not available on this server. You can add it later with the API.',
+  invalid_email: 'That does not look like an email address.',
   connect_link_invalid: 'This link is missing, expired, or already used. Ask for a new one with POST /v1/client/payee/evm/connect.',
   rate_limited: 'Too many attempts. Wait a minute and try again.',
   unreachable: 'Satsgate could not be reached. Try again in a minute.',

@@ -228,8 +228,27 @@ def test_x402_is_off_by_default_and_lightning_is_unchanged(tmp_path, monkeypatch
         assert both.json()["error"] == "rails_required"
 
 
+def _install_empty_base(module):
+    """A 65-byte mismatch now asks Base. This poster answers 'no code' and never dials out."""
+
+    def poster(url, payload, headers=None, timeout=None):
+        method = payload.get("method")
+        if method == "eth_chainId":
+            result = "0x2105"
+        elif method == "eth_getCode":
+            result = "0x"
+        else:
+            return 200, {"jsonrpc": "2.0", "id": 1, "error": {"code": 3, "message": "execution reverted"}}
+        return 200, {"jsonrpc": "2.0", "id": 1, "result": result}
+
+    import importlib
+
+    importlib.import_module("app.evm_rpc").poster = poster
+
+
 def test_payee_signature_and_usd_route_offer_only_when_priced(tmp_path, monkeypatch):
     module = _load_app(tmp_path)
+    _install_empty_base(module)
     _patch_dns(monkeypatch, module)
     owner = Account.create()
     other = Account.create()
@@ -306,6 +325,7 @@ def _swap_line(message: str, prefix: str, value: str) -> str:
 
 def test_payee_signature_accepts_trimmed_text_and_rejects_any_other_change(tmp_path, monkeypatch):
     module = _load_app(tmp_path)
+    _install_empty_base(module)
     _patch_dns(monkeypatch, module)
     owner = Account.create()
     other = Account.create()
@@ -600,7 +620,7 @@ def test_old_site_routes_keep_their_sats_price(tmp_path):
     assert row == (21, "sats", None)
     price = next(column for column in notnull if column[1] == "price_sats")
     assert price[3] == 0
-    assert module.config.APP_VERSION == "0.16.0"
+    assert module.config.APP_VERSION == "0.17.0"
 
 
 def test_address_change_clears_the_x402_rail(tmp_path, monkeypatch):

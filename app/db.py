@@ -252,6 +252,12 @@ def _migrate_x402(conn: sqlite3.Connection) -> None:
         ("payee_evm_pending_expires", "ALTER TABLE clients ADD COLUMN payee_evm_pending_expires INTEGER"),
         ("payee_evm_connect_hash", "ALTER TABLE clients ADD COLUMN payee_evm_connect_hash TEXT"),
         ("payee_evm_connect_expires", "ALTER TABLE clients ADD COLUMN payee_evm_connect_expires INTEGER"),
+        ("payee_evm_kind", "ALTER TABLE clients ADD COLUMN payee_evm_kind TEXT"),
+        ("alert_email", "ALTER TABLE clients ADD COLUMN alert_email TEXT"),
+        ("alert_email_confirmed_at", "ALTER TABLE clients ADD COLUMN alert_email_confirmed_at INTEGER"),
+        ("alert_email_pending", "ALTER TABLE clients ADD COLUMN alert_email_pending TEXT"),
+        ("alert_email_pending_hash", "ALTER TABLE clients ADD COLUMN alert_email_pending_hash TEXT"),
+        ("alert_email_pending_expires", "ALTER TABLE clients ADD COLUMN alert_email_pending_expires INTEGER"),
     ):
         if name not in client_cols:
             conn.execute(ddl)
@@ -358,6 +364,34 @@ def _migrate_x402(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_offers_client ON payment_offers(client_id, created_at)")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_offers_buyer ON payment_offers(client_id, buyer_ip_hash, created_at)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS email_outbox (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          client_id INTEGER NOT NULL,
+          kind TEXT NOT NULL,
+          to_email TEXT,
+          to_hash TEXT NOT NULL,
+          params_json TEXT NOT NULL,
+          status TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          next_attempt_at INTEGER NOT NULL,
+          created_at INTEGER NOT NULL,
+          sent_at INTEGER,
+          last_status INTEGER,
+          FOREIGN KEY(client_id) REFERENCES clients(id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_email_outbox_due ON email_outbox(status, next_attempt_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_email_outbox_client_kind ON email_outbox(client_id, kind, created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_email_outbox_dest ON email_outbox(to_hash, kind, created_at)"
     )
     _migrate_x402_topup(conn)
 
