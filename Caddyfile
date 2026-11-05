@@ -46,23 +46,24 @@
 	}
 }
 
-# gate.satsgate.org is not active. Uncomment this block only after the DNS
-# record exists and Caddy can obtain a certificate. The gate container has
-# no published port. This block is the only public path to it.
-# Buyer-IP is stripped here too. The gate reads X-Forwarded-For from Caddy
+# The gate container has no published port. This block is the only public path
+# to it. Buyer-IP is stripped here. The gate reads X-Forwarded-For from Caddy
 # and sends X-Satsgate-Buyer-Ip to core itself.
-# Do not strip PAYMENT-SIGNATURE, PAYMENT-REQUIRED, or PAYMENT-RESPONSE.
-# Those are the x402 v2 headers. Caddy forwards them by default.
-#
-# gate.satsgate.org {
-# 	encode zstd gzip
-# 	reverse_proxy gate:8000 {
-# 		header_up X-Forwarded-For {remote_host}
-# 		header_up X-Forwarded-Proto {scheme}
-# 		header_up X-Real-IP {remote_host}
-# 		header_up -X-Satsgate-Buyer-Ip
-# 	}
-# }
+# Do not strip PAYMENT-SIGNATURE, PAYMENT-REQUIRED, PAYMENT-RESPONSE, or
+# Satsgate-Receipt. Caddy forwards them by default.
+# The body cap is 64KB. The gate does not read the body.
+gate.satsgate.org {
+	encode zstd gzip
+	request_body {
+		max_size 64KB
+	}
+	reverse_proxy gate:8000 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Real-IP {remote_host}
+		header_up -X-Satsgate-Buyer-Ip
+	}
+}
 
 # Apex site. Set SATSGATE_SITE_HOSTNAME (satsgate.org) or Caddy will not start.
 # /connect is the wallet page. Only /v1/connect/* is proxied to core.
@@ -108,6 +109,11 @@
 		root * /srv/connect
 		try_files {path} /index.html
 		file_server
+	}
+
+	# /demo/live/... and /demo/test/... reach the seller as /live/... and /test/...
+	handle_path /demo/* {
+		reverse_proxy demo-seller:8000
 	}
 
 	handle {

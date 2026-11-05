@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # Load env vars from .env if present. Existing process env wins.
 load_dotenv()
 
-APP_VERSION = "0.17.0"
+APP_VERSION = "0.18.0"
 
 # production is the safe default. Local mock/dev only runs when this is explicit.
 SATSGATE_ENV = os.environ.get("SATSGATE_ENV", "production").strip().lower() or "production"
@@ -181,6 +181,44 @@ SITES_MAX_PER_ACCOUNT = _optional_int("SATSGATE_SITES_MAX_PER_ACCOUNT", 3, minim
 SITES_MAX_ROUTES = _optional_int("SATSGATE_SITES_MAX_ROUTES", 20, minimum=1, maximum=200)
 SITES_AUTO_APPROVE = os.environ.get("SATSGATE_SITES_AUTO_APPROVE", "0").strip().lower() in {"1", "true", "yes", "on"}
 _SITE_SECRET_RAW = os.environ.get("SATSGATE_SITE_SECRET_KEY", "").strip()
+
+
+def _receipt_seconds() -> int:
+    raw = _optional_int("SATSGATE_RECEIPT_SECONDS", 86400, minimum=60, maximum=86400)
+    cap = int(PAYWALL_ACCESS_CAP_SECONDS)
+    if raw > cap:
+        logging.getLogger("satsgate.receipts").warning(
+            "SATSGATE_RECEIPT_SECONDS %s is above the access cap %s; receipts use %s seconds",
+            raw,
+            cap,
+            cap,
+        )
+        return cap
+    return raw
+
+
+RECEIPT_SECONDS = _receipt_seconds()
+
+
+def _terms_version() -> str:
+    raw = os.environ.get("SATSGATE_TERMS_VERSION", "").strip()
+    if raw and (len(raw) > 64 or any(ch.isspace() for ch in raw)):
+        raise RuntimeError("SATSGATE_TERMS_VERSION must be a single token of at most 64 characters")
+    return raw
+
+
+def _terms_url() -> str:
+    raw = os.environ.get("SATSGATE_TERMS_URL", "").strip()
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise RuntimeError("SATSGATE_TERMS_URL must be an https URL without userinfo")
+    return raw
+
+
+TERMS_VERSION = _terms_version()
+TERMS_URL = _terms_url()
 
 
 def _gate_public_base() -> str:
@@ -387,6 +425,40 @@ def _base_rpc_url() -> str:
 
 EMAIL_FROM = _email_from()
 SUPPORT_EMAIL = _support_email()
+
+
+def _abuse_contact() -> str:
+    raw = os.environ.get("SATSGATE_ABUSE_CONTACT", "").strip()
+    if not raw:
+        return SUPPORT_EMAIL
+    if not _bare_email(raw):
+        raise RuntimeError("SATSGATE_ABUSE_CONTACT must be a bare email address")
+    return raw
+
+
+ABUSE_CONTACT = _abuse_contact()
+
+
+def _geoblock_countries() -> frozenset[str]:
+    raw = os.environ.get("SATSGATE_GEOBLOCK_COUNTRIES", "").strip()
+    if not raw:
+        return frozenset()
+    codes: set[str] = set()
+    for part in raw.split(","):
+        code = part.strip().upper()
+        if not code:
+            continue
+        if len(code) != 2 or not code.isalpha():
+            raise RuntimeError("SATSGATE_GEOBLOCK_COUNTRIES must be a comma list of ISO country codes")
+        codes.add(code)
+    return frozenset(codes)
+
+
+GEOBLOCK_COUNTRIES = _geoblock_countries()
+GEOIP_DB = os.environ.get("SATSGATE_GEOIP_DB", "/data/geoip/dbip-country-lite.mmdb").strip() or (
+    "/data/geoip/dbip-country-lite.mmdb"
+)
+OFAC_EVM_FILE = os.environ.get("SATSGATE_OFAC_EVM_FILE", "/data/ofac/ofac_evm.txt").strip() or "/data/ofac/ofac_evm.txt"
 RESEND_API_KEY = os.environ.get("SATSGATE_RESEND_API_KEY", "").strip()
 EMAIL_ENABLED = os.environ.get("SATSGATE_EMAIL_ENABLED", "1").strip() != "0"
 BASE_RPC_URL = _base_rpc_url()
@@ -529,6 +601,11 @@ def validate_startup() -> None:
         )
     if any(part.strip() in _FORBIDDEN_PROXY_VALUES for part in GATE_PEERS.split(",") if part.strip()):
         raise RuntimeError("SATSGATE_GATE_PEERS must list specific proxy IPs or CIDRs, not '*' or the whole internet")
+    if SITES_AUTO_APPROVE and not TERMS_VERSION:
+        raise RuntimeError(
+            "Refusing to start: SATSGATE_SITES_AUTO_APPROVE is on and SATSGATE_TERMS_VERSION is empty. "
+            "Set the terms version or turn auto-approve off."
+        )
     # A malformed key fails boot. An unset key does not: current clients keep working.
     site_secret_key()
     if GATE_TOKEN and not is_local_env():

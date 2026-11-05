@@ -80,6 +80,11 @@ class Store:
         cols = {row[1] for row in self._conn.execute("PRAGMA table_info(quotes)")}
         if "x402_json" not in cols:
             self._conn.execute("ALTER TABLE quotes ADD COLUMN x402_json TEXT")
+        token_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(tokens)")}
+        if "receipt" not in token_cols:
+            self._conn.execute("ALTER TABLE tokens ADD COLUMN receipt TEXT")
+        if "redeem_url" not in token_cols:
+            self._conn.execute("ALTER TABLE tokens ADD COLUMN redeem_url TEXT")
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS spend_usd (
@@ -174,8 +179,8 @@ class Store:
             INSERT INTO tokens (
                 cache_key, method, url, macaroon, preimage, payment_hash, resource,
                 amount_sats, max_uses, access_seconds, uses_remaining, access_until,
-                invoice_expires_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                invoice_expires_at, updated_at, receipt, redeem_url
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(cache_key) DO UPDATE SET
                 method = excluded.method,
                 url = excluded.url,
@@ -189,7 +194,9 @@ class Store:
                 uses_remaining = excluded.uses_remaining,
                 access_until = excluded.access_until,
                 invoice_expires_at = excluded.invoice_expires_at,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                receipt = excluded.receipt,
+                redeem_url = excluded.redeem_url
             """,
             (
                 row["cache_key"],
@@ -206,6 +213,8 @@ class Store:
                 row.get("access_until"),
                 row.get("invoice_expires_at"),
                 row["updated_at"],
+                row.get("receipt"),
+                row.get("redeem_url"),
             ),
         )
         self._conn.commit()

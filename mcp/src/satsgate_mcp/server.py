@@ -23,6 +23,7 @@ _INSTRUCTIONS = (
     "Do not send it together with an L402 Authorization. "
     "A used-up Lightning token is quoted again and is not paid inside the same call unless auto-pay is enabled "
     "and the invoice is inside the configured sats budget. "
+    "On the hosted gate, content comes from the seller after a signed receipt. Satsgate does not serve it. "
     "Do not ask the user to paste a wallet connection string, an API key, or a private key into the chat."
 )
 

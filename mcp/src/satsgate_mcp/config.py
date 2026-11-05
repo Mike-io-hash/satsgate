@@ -72,6 +72,7 @@ class Settings:
     timeout: float
     registry: str
     max_body_bytes: int
+    gate_hosts: tuple[str, ...] = ("gate.satsgate.org",)
 
     def __repr__(self) -> str:
         nwc = "set" if self.nwc_uri else "unset"
@@ -124,4 +125,11 @@ def load_settings() -> Settings:
         timeout=float(timeout if timeout is not None else 20),
         registry=os.environ.get("SATSGATE_MCP_REGISTRY", "").strip(),
         max_body_bytes=max_body if max_body is not None else 1_000_000,
+        gate_hosts=_gate_hosts(),
     )
+
+
+def _gate_hosts() -> tuple[str, ...]:
+    raw = os.environ.get("SATSGATE_MCP_GATE_HOSTS", "gate.satsgate.org")
+    hosts = tuple(part.strip().lower() for part in raw.split(",") if part.strip())
+    return hosts or ("gate.satsgate.org",)

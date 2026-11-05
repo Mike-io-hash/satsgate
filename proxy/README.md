@@ -2,7 +2,7 @@
 
 A reverse proxy a merchant runs beside an existing HTTP API. The buyer hits the proxy. The proxy sells the request through [satsgate](https://api.satsgate.org) and forwards only a paid request to the origin. The merchant does not write paywall code.
 
-The proxy is version **0.13.0**. It talks to the satsgate core paywall (challenge, verify, status, charge, and x402 verify/settle). Core is **0.17.0**. The proxy does not sell credit packs and does not call the facilitator. Top up on the core with Lightning, or with USDC at `GET /v1/topup/{plan_id}/x402` when `SATSGATE_TREASURY_EVM_ADDRESS` is set. While the operator CDP switch is on, that pack is Base mainnet USDC only. The hosted gate is a separate program. Buyer USDC on a proxied route goes to the merchant's verified `payTo`.
+The proxy is version **0.14.0**. Default `mode: paywall` talks to the satsgate core paywall (challenge, verify, status, charge, and x402 verify/settle). Core is **0.18.0**. `mode: receipt` does not call core and does not use an API key. It checks `Satsgate-Receipt` with the site secret and forwards a successful check to the origin. The proxy does not sell credit packs and does not call the facilitator. Top up on the core with Lightning, or with USDC at `GET /v1/topup/{plan_id}/x402` when `SATSGATE_TREASURY_EVM_ADDRESS` is set. While the operator CDP switch is on, that pack is Base mainnet USDC only. The hosted gate is a separate program and only sells receipts. Buyer USDC on a proxied paywall route goes to the merchant's verified `payTo`. In receipt mode the buyer already paid the gate.
 
 ## USDC payments: Base network only
 
@@ -44,7 +44,7 @@ Satsgate never custodies, receives, forwards, or refunds buyer funds. The USDC m
    docker compose -f proxy/docker-compose.yml up --build
    ```
 
-   Buyers use the proxy's published port. `GET /healthz` is the proxy (`{"ok":true,"component":"satsgate-proxy","version":"0.13.0"}`). It is not forwarded.
+   Buyers use the proxy's published port. `GET /healthz` is the proxy (`{"ok":true,"component":"satsgate-proxy","version":"0.14.0"}`). It is not forwarded.
 
    Startup logs `key fp` and 12 hex characters. That is the start of SHA-256 of the API key. It is not a prefix of the key, and the key itself is not written to the log.
 
@@ -55,7 +55,32 @@ pip install -r proxy/requirements.txt
 PYTHONPATH=proxy/src python -m satsgate_proxy --config proxy/satsgate-proxy.yaml
 ```
 
-The image listens as uid 65532. Build it from the repo root: `docker build -f proxy/Dockerfile -t satsgate-proxy:0.13.0 .`
+The image listens as uid 65532. Build it from the repo root: `docker build -f proxy/Dockerfile -t satsgate-proxy:0.14.0 .`
+
+## Receipt mode
+
+Set `mode: receipt` and a `receipt` block. There is no `core` block and no `sgr_` key. The buyer pays `https://gate.satsgate.org/<site><path>`, then calls this proxy with `Satsgate-Receipt`. A 2xx from the origin commits one use. The origin still sees the HMAC in `X-Satsgate-Signature`.
+
+```yaml
+mode: receipt
+core:
+  base_url: https://api.satsgate.org
+upstream:
+  base_url: https://origin.example
+origin:
+  secret_env: SATSGATE_ORIGIN_SECRET
+receipt:
+  site: my-shop
+  gate_base: https://gate.satsgate.org
+  store: /data/receipts.sqlite3
+routes:
+  - path: /blog/post
+    price_sats: 21
+```
+
+`core.base_url` is still required by the config parser. Receipt mode does not call it and does not read `SATSGATE_API_KEY`. `price_sats` is stored on the route and is not charged here. The buyer already paid the gate.
+
+`proxy/snippets/fastapi_receipt.py` is the five-line SDK wrapper. `proxy/snippets/express_receipt.js` checks the same test vectors in `tests/fixtures/receipt_vectors.json` with Node's `crypto` module and no npm dependency.
 
 ## What a buyer sees
 

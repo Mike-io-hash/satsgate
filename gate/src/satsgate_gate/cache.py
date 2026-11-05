@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -28,9 +28,9 @@ class CachedSite:
     origin_url: str
     payee: str | None
     routes: tuple[GateRoute, ...]
-    origin_secret: str = field(repr=False)
     rail_lightning: bool = True
     rail_x402: bool = False
+    x402_mode: str = ""
 
     def route(self, path: str) -> GateRoute | None:
         for item in self.routes:

@@ -15,7 +15,7 @@ def get_evm_payee(db_path: str, *, client_id: int) -> dict | None:
     with _connect(db_path) as conn:
         row = conn.execute(
             """
-            SELECT payee_evm_address, payee_evm_verified_at, payee_evm_kind
+            SELECT payee_evm_address, payee_evm_verified_at, payee_evm_kind, payee_flagged_at
             FROM clients WHERE id = ?
             """,
             (int(client_id),),
@@ -26,6 +26,7 @@ def get_evm_payee(db_path: str, *, client_id: int) -> dict | None:
         "address": row["payee_evm_address"],
         "verified_at": None if row["payee_evm_verified_at"] is None else int(row["payee_evm_verified_at"]),
         "kind": "contract" if row["payee_evm_kind"] == "contract" else "eoa",
+        "flagged_at": None if row["payee_flagged_at"] is None else int(row["payee_flagged_at"]),
     }
 
 
@@ -92,6 +93,10 @@ def connect_session(db_path: str, token: str, *, now: int | None = None) -> dict
 def begin_payee_challenge(db_path: str, *, client_id: int, address: str, now: int | None = None) -> dict:
     now = int(time.time()) if now is None else int(now)
     checksum = x402.checksum_address(address)
+    from . import ofac
+
+    if ofac.listed(checksum):
+        raise x402.X402Error("payee_not_allowed", status=403)
     nonce = "0x" + secrets.token_hex(16)
     expires = now + int(config.X402_PAYEE_CHALLENGE_SECONDS)
     message = x402.payee_message(client_id=client_id, address=checksum, nonce=nonce, expires=expires)
@@ -131,6 +136,10 @@ def verify_payee_signature(
     """
     now = int(time.time()) if now is None else int(now)
     checksum = x402.checksum_address(address)
+    from . import ofac
+
+    if ofac.listed(checksum):
+        raise x402.X402Error("payee_not_allowed", status=403)
     with _connect(db_path) as conn:
         row = conn.execute("SELECT * FROM clients WHERE id = ?", (int(client_id),)).fetchone()
     if row is None:
@@ -248,9 +257,63 @@ def _address_in_message(message: str) -> str:
 
 def payee_verified(db_path: str, *, client_id: int) -> str | None:
     info = get_evm_payee(db_path, client_id=client_id)
-    if info is None or not info["address"] or info["verified_at"] is None:
+    if info is None or not info["address"] or info["verified_at"] is None or info.get("flagged_at"):
         return None
     return x402.checksum_address(info["address"])
+
+
+def payee_is_flagged(db_path: str, *, client_id: int) -> bool:
+    info = get_evm_payee(db_path, client_id=client_id)
+    return bool(info and info.get("flagged_at"))
+
+
+def verified_payees(db_path: str) -> list[dict]:
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, payee_evm_address, payee_flagged_at, alert_email, alert_email_confirmed_at
+            FROM clients
+            WHERE payee_evm_verified_at IS NOT NULL AND payee_evm_address IS NOT NULL
+            """
+        ).fetchall()
+    return [
+        {
+            "client_id": int(row["id"]),
+            "address": row["payee_evm_address"],
+            "flagged_at": None if row["payee_flagged_at"] is None else int(row["payee_flagged_at"]),
+            "alert_email": row["alert_email"] if row["alert_email_confirmed_at"] else None,
+        }
+        for row in rows
+    ]
+
+
+def flag_payee(db_path: str, *, client_id: int, now: int) -> bool:
+    """Mark the payee and turn x402 off. The outbox stores a shortened address only."""
+    from . import db_alert_email
+
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM clients WHERE id = ?", (int(client_id),)).fetchone()
+        if row is None or row["payee_flagged_at"] is not None:
+            conn.execute("ROLLBACK")
+            return False
+        conn.execute("UPDATE clients SET payee_flagged_at = ? WHERE id = ?", (int(now), int(client_id)))
+        conn.execute(
+            "UPDATE sites SET rail_x402 = 0, updated_at = ? WHERE client_id = ?",
+            (int(now), int(client_id)),
+        )
+        queued = False
+        if row["alert_email"] and row["alert_email_confirmed_at"]:
+            db_alert_email.queue_ofac(
+                conn,
+                client_id=int(client_id),
+                to_email=row["alert_email"],
+                address=row["payee_evm_address"],
+                now=int(now),
+            )
+            queued = True
+        conn.execute("COMMIT")
+    return queued
 
 
 def _limits(
@@ -730,6 +793,7 @@ def mark_settled_and_charge(
     now: int,
     amount_usd_atomic: int,
     api_key_id: int | None = None,
+    before_commit=None,
 ) -> dict:
     """Store the tx and debit one credit. A second call does not debit again.
 
@@ -763,6 +827,25 @@ def mark_settled_and_charge(
             conn.execute("ROLLBACK")
             raise ValueError("client does not exist")
         current = int(bal_row[0])
+        if int(cost) == 0:
+            window = int(access_seconds) if access_seconds is not None else (
+                int(config.PAYWALL_ACCESS_CAP_SECONDS) if max_uses is not None else None
+            )
+            access_until = None if window is None else now + window
+            conn.execute(
+                """
+                UPDATE x402_authorizations
+                SET state = 'settled', tx_hash = ?, settled_at = COALESCE(settled_at, ?),
+                    credit_charged = 1, uses_consumed = 1, access_until = COALESCE(access_until, ?),
+                    updated_at = ?
+                WHERE network = ? AND asset = ? AND payer = ? AND nonce = ?
+                """,
+                (tx_hash, now, access_until, now, network, asset, payer, nonce),
+            )
+            if before_commit is not None:
+                before_commit(conn)
+            conn.execute("COMMIT")
+            return {"charged": 0, "credits": current, "tx_hash": tx_hash}
         if current < int(cost):
             conn.execute(
                 """
@@ -812,6 +895,8 @@ def mark_settled_and_charge(
             (tx_hash, now, access_until, now, network, asset, payer, nonce),
         )
         new_balance = conn.execute("SELECT credits FROM clients WHERE id = ?", (int(client_id),)).fetchone()
+        if before_commit is not None:
+            before_commit(conn)
         conn.execute("COMMIT")
     return {"charged": int(cost), "credits": int(new_balance[0]), "tx_hash": tx_hash}
 

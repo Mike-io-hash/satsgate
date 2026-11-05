@@ -16,6 +16,6 @@ Concepts:
 
 from .client import SatsgateClient, SatsgateError
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = ["SatsgateClient", "SatsgateError"]

@@ -426,6 +426,62 @@ def _migrate_x402_topup(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE ledger ADD COLUMN network TEXT")
     if "amount_usd_atomic" not in ledger_cols:
         conn.execute("ALTER TABLE ledger ADD COLUMN amount_usd_atomic INTEGER")
+    _migrate_receipts(conn)
+
+
+def _migrate_receipts(conn: sqlite3.Connection) -> None:
+    """Receipt table and nullable account/site columns. Existing rows stay valid."""
+    client_cols = {row["name"] for row in conn.execute("PRAGMA table_info(clients)").fetchall()}
+    for name, ddl in (
+        ("suspended_at", "ALTER TABLE clients ADD COLUMN suspended_at INTEGER"),
+        ("suspend_reason", "ALTER TABLE clients ADD COLUMN suspend_reason TEXT"),
+        ("payee_flagged_at", "ALTER TABLE clients ADD COLUMN payee_flagged_at INTEGER"),
+    ):
+        if name not in client_cols:
+            conn.execute(ddl)
+    site_cols = {row["name"] for row in conn.execute("PRAGMA table_info(sites)").fetchall()}
+    for name, ddl in (
+        ("origin_verified_at", "ALTER TABLE sites ADD COLUMN origin_verified_at INTEGER"),
+        ("terms_version", "ALTER TABLE sites ADD COLUMN terms_version TEXT"),
+        ("terms_accepted_at", "ALTER TABLE sites ADD COLUMN terms_accepted_at INTEGER"),
+    ):
+        if name not in site_cols:
+            conn.execute(ddl)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gate_receipts (
+          rid TEXT PRIMARY KEY,
+          payment_hash TEXT NOT NULL UNIQUE,
+          site_id INTEGER NOT NULL,
+          client_id INTEGER NOT NULL,
+          path TEXT NOT NULL,
+          rail TEXT NOT NULL,
+          amount_sats INTEGER,
+          amount_usd_atomic INTEGER,
+          network TEXT,
+          uses INTEGER NOT NULL,
+          iat INTEGER NOT NULL,
+          exp INTEGER NOT NULL,
+          kid TEXT NOT NULL,
+          charged INTEGER NOT NULL,
+          FOREIGN KEY(site_id) REFERENCES sites(id),
+          FOREIGN KEY(client_id) REFERENCES clients(id)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_gate_receipts_site ON gate_receipts(site_id, exp)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS origin_check_attempts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          site_id INTEGER NOT NULL,
+          created_at INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_origin_checks_site ON origin_check_attempts(site_id, created_at)"
+    )
 
 
 def hash_api_key(api_key: str) -> str:
@@ -699,6 +755,49 @@ def spend_credits(db_path: str, *, client_id: int, cost: int, reason: str, ref: 
         new_balance = int(new_balance_row[0]) if new_balance_row else 0
         conn.execute("COMMIT")
         return new_balance
+
+
+def client_is_suspended(db_path: str, *, client_id: int) -> bool:
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT suspended_at FROM clients WHERE id = ?", (int(client_id),)).fetchone()
+    return row is not None and row["suspended_at"] is not None
+
+
+def suspend_client(db_path: str, *, client_id: int, reason: str, now: int | None = None) -> bool:
+    """Disable every site of the account. Unsuspend does not turn them back on."""
+    now = int(time.time()) if now is None else int(now)
+    text = (reason or "").strip()[:200]
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT id FROM clients WHERE id = ?", (int(client_id),)).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            return False
+        conn.execute(
+            "UPDATE clients SET suspended_at = ?, suspend_reason = ? WHERE id = ?",
+            (now, text or None, int(client_id)),
+        )
+        conn.execute(
+            "UPDATE sites SET status = 'disabled', updated_at = ? WHERE client_id = ?",
+            (now, int(client_id)),
+        )
+        conn.execute("COMMIT")
+    return True
+
+
+def unsuspend_client(db_path: str, *, client_id: int) -> bool:
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT id, suspended_at FROM clients WHERE id = ?", (int(client_id),)).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            return False
+        conn.execute(
+            "UPDATE clients SET suspended_at = NULL, suspend_reason = NULL WHERE id = ?",
+            (int(client_id),),
+        )
+        conn.execute("COMMIT")
+    return True
 
 
 def get_balance(db_path: str, *, client_id: int) -> int:

@@ -75,6 +75,23 @@ print(sg.ledger(limit=50))
 
 A restricted key starts with `sgr_`. It can call `paywall_challenge`, `paywall_verify`, and `poll_paywall`. Top-up, payee changes, key management, balance, client, ledger, and usage calls return HTTP 403 `insufficient_scope`. `resource_prefix` limits the three paywall calls to resources that start with that prefix (HTTP 403 `resource_not_allowed`). A revoked key returns HTTP 401 `api_key_revoked`.
 
+## Receipts (0.7.0)
+
+`satsgate_sdk.receipts` checks a hosted-gate receipt without calling Satsgate. The secret is the site `origin_secret`. `verify_receipt` checks the HS256 signature, `aud`, `sub`, `iss`, `exp`, and `uses`. `MemoryReceiptStore` and `SqliteReceiptStore` reserve a use and commit it on a 2xx. `SatsgateReceiptMiddleware` is the ASGI wrapper. `python -m satsgate_sdk.receipts verify` checks one token. Vectors shared with the Express snippet are `tests/fixtures/receipt_vectors.json`.
+
+```python
+from satsgate_sdk.receipts import SatsgateReceiptMiddleware, SqliteReceiptStore
+
+app = SatsgateReceiptMiddleware(
+    app,
+    site="my-shop",
+    secret=os.environ["SATSGATE_SITE_SECRET"],
+    store=SqliteReceiptStore("/data/receipts.sqlite3"),
+)
+```
+
+The demo seller is `sdk/python/examples/receipt_seller.py`. `x402-test` is mounted at `/live` and `demo-test` at `/test`. Each accepts only its own receipts.
+
 ## Cache
 
 `paywall_verify(..., use_cache=True)` remembers a successful `payment_hash` until `cache_until`.

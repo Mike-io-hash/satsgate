@@ -281,6 +281,9 @@ def test_migration_adds_tables_and_leaves_a_realistic_database(tmp_path, monkeyp
         "alert_email_pending",
         "alert_email_pending_hash",
         "alert_email_pending_expires",
+        "suspended_at",
+        "suspend_reason",
+        "payee_flagged_at",
     ]
     expected = dict(before)
     expected["clients"] = before["clients"] + payee_columns
@@ -296,7 +299,7 @@ def test_migration_adds_tables_and_leaves_a_realistic_database(tmp_path, monkeyp
     assert site_count == 0
 
     with TestClient(module.app) as http:
-        assert http.get("/health").json() == {"ok": True, "version": "0.17.0"}
+        assert http.get("/health").json() == {"ok": True, "version": "0.18.0"}
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})
         assert balance.status_code == 200
         assert balance.json()["credits"] == 42
@@ -582,13 +585,14 @@ def test_public_list_requires_approval_and_opt_in(http: TestClient):
 
 
 def test_auto_approve_is_opt_in(tmp_path, monkeypatch):
-    module = _load_app(tmp_path, SATSGATE_SITES_AUTO_APPROVE="1")
+    with pytest.raises(RuntimeError, match="TERMS_VERSION"):
+        _load_app(tmp_path, SATSGATE_SITES_AUTO_APPROVE="1")
+    module = _load_app(tmp_path, SATSGATE_SITES_AUTO_APPROVE="1", SATSGATE_TERMS_VERSION="2026-11-draft")
     _patch_dns(monkeypatch, module)
     with TestClient(module.app) as http:
         account = _buy(http)
-        created = _create(http, account, listed=True)
-        assert created["site"]["status"] == "approved"
-        assert http.get("/v1/sites").json()["sites"][0]["slug"] == "my-shop"
+        created = _create(http, account, listed=True, accept_terms="2026-11-draft")
+        assert created["site"]["status"] == "pending"
 
 
 def test_admin_routes_hide_when_the_token_is_unset(tmp_path, monkeypatch):
@@ -597,14 +601,14 @@ def test_admin_routes_hide_when_the_token_is_unset(tmp_path, monkeypatch):
     with TestClient(module.app) as http:
         assert http.post("/v1/admin/sites/my-shop/approve").status_code == 404
         assert http.get("/v1/admin/sites").status_code == 404
-        assert http.get("/health").json()["version"] == "0.17.0"
+        assert http.get("/health").json()["version"] == "0.18.0"
 
 
 def test_missing_site_secret_key_refuses_create_and_boots(tmp_path, monkeypatch):
     module = _load_app(tmp_path, SATSGATE_SITE_SECRET_KEY="")
     _patch_dns(monkeypatch, module)
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.17.0"
+        assert http.get("/health").json()["version"] == "0.18.0"
         account = _buy(http)
         response = http.post(
             "/v1/sites",

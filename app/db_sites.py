@@ -1,8 +1,9 @@
 """Sites and routes for the hosted proxy beta.
 
 Registration checks the origin once. A name can be pointed at a private
-address later (DNS rebinding). The gate resolves again on every forward and
-connects to the public address from that lookup.
+address later (DNS rebinding). Origin verification resolves again, through
+the SSRF guard, when the merchant calls verify-origin. The hosted gate does
+not connect to the origin.
 """
 
 from __future__ import annotations
@@ -361,6 +362,9 @@ def _site_owner(row, routes: list[dict]) -> dict:
         "created_at": int(row["created_at"]),
         "updated_at": int(row["updated_at"]),
         "approved_at": None if row["approved_at"] is None else int(row["approved_at"]),
+        "origin_verified_at": None if row["origin_verified_at"] is None else int(row["origin_verified_at"]),
+        "terms_version": row["terms_version"],
+        "terms_accepted_at": None if row["terms_accepted_at"] is None else int(row["terms_accepted_at"]),
         "rail_lightning": bool(int(row["rail_lightning"])),
         "rail_x402": bool(int(row["rail_x402"])),
         **_x402_mode_fields(row),
@@ -378,6 +382,9 @@ def _site_public(row, routes: list[dict]) -> dict:
     }
     if isinstance(description, str) and description:
         item["description"] = description
+    host = urlsplit(row["origin_url"]).hostname
+    if host:
+        item["seller_host"] = host
     item.update(_x402_mode_fields(row))
     return item
 
@@ -422,6 +429,7 @@ def create_site(
     origin_url: str,
     listed: bool,
     max_sites: int,
+    terms_version: str | None = None,
     resolver=None,
 ) -> dict:
     slug = clean_slug(slug)
@@ -430,8 +438,9 @@ def create_site(
     origin = validate_origin_url(origin_url, resolver=resolver)
     secret, blob, fingerprint = _new_origin_secret()
     now = int(time.time())
-    status = "approved" if config.SITES_AUTO_APPROVE else "pending"
-    approved_at = now if status == "approved" else None
+    status = "pending"
+    approved_at = None
+    accepted = terms_version if terms_version and terms_version == config.TERMS_VERSION else None
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         count = conn.execute("SELECT COUNT(*) FROM sites WHERE client_id = ?", (int(client_id),)).fetchone()
@@ -443,8 +452,9 @@ def create_site(
                 """
                 INSERT INTO sites(
                   client_id, slug, display_name, description, origin_url, status, listed,
-                  origin_secret_ciphertext, secret_fingerprint, created_at, updated_at, approved_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  origin_secret_ciphertext, secret_fingerprint, created_at, updated_at, approved_at,
+                  terms_version, terms_accepted_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     int(client_id),
@@ -459,6 +469,8 @@ def create_site(
                     now,
                     now,
                     approved_at,
+                    accepted,
+                    now if accepted else None,
                 ),
             )
         except Exception as exc:  # noqa: BLE001
@@ -511,6 +523,7 @@ def update_site(
     rail_x402: bool | None = None,
     x402_mode: str | None = None,
     set_x402_mode: bool = False,
+    accept_terms: str | None = None,
     resolver=None,
 ) -> dict | None:
     slug = clean_slug(slug)
@@ -522,8 +535,11 @@ def update_site(
         and rail_lightning is None
         and rail_x402 is None
         and not set_x402_mode
+        and accept_terms is None
     ):
         raise ValueError("empty_update")
+    if accept_terms is not None and accept_terms != config.TERMS_VERSION:
+        raise ValueError("terms_not_accepted")
     if set_x402_mode and x402_mode not in {"test", "live"}:
         raise ValueError("x402_mode_invalid")
     if set_x402_mode and x402_mode == "live" and not x402.mainnet_enabled():
@@ -562,11 +578,15 @@ def update_site(
             if payee is None or payee["payee_evm_verified_at"] is None:
                 conn.execute("ROLLBACK")
                 raise ValueError("payee_evm_not_verified")
+        origin_changed = new_origin is not None and new_origin != row["origin_url"]
         conn.execute(
             """
             UPDATE sites
             SET display_name = ?, description = ?, origin_url = ?, listed = ?,
-                rail_lightning = ?, rail_x402 = ?, x402_mode = ?, updated_at = ?
+                rail_lightning = ?, rail_x402 = ?, x402_mode = ?, updated_at = ?,
+                origin_verified_at = CASE WHEN ? THEN NULL ELSE origin_verified_at END,
+                terms_version = CASE WHEN ? THEN ? ELSE terms_version END,
+                terms_accepted_at = CASE WHEN ? THEN ? ELSE terms_accepted_at END
             WHERE slug = ? AND client_id = ?
             """,
             (
@@ -578,6 +598,11 @@ def update_site(
                 next_x402,
                 next_mode,
                 now,
+                1 if origin_changed else 0,
+                1 if accept_terms else 0,
+                accept_terms,
+                1 if accept_terms else 0,
+                now,
                 slug,
                 int(client_id),
             ),
@@ -585,7 +610,71 @@ def update_site(
         updated = _owned(conn, client_id=client_id, slug=slug)
         public = _site_owner(updated, _routes_for(conn, int(updated["id"])))
         conn.execute("COMMIT")
+    approved = maybe_auto_approve(db_path, slug=slug)
+    return approved if approved is not None else public
+
+
+def maybe_auto_approve(db_path: str, *, slug: str) -> dict | None:
+    """Move pending to approved only when the flag, origin, terms, and account allow it."""
+    if not config.SITES_AUTO_APPROVE or not config.TERMS_VERSION:
+        return None
+    now = int(time.time())
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM sites WHERE slug = ?", (slug,)).fetchone()
+        if row is None or row["status"] != "pending":
+            conn.execute("ROLLBACK")
+            return None
+        if row["origin_verified_at"] is None or row["terms_version"] != config.TERMS_VERSION:
+            conn.execute("ROLLBACK")
+            return None
+        client = conn.execute(
+            "SELECT suspended_at FROM clients WHERE id = ?",
+            (int(row["client_id"]),),
+        ).fetchone()
+        if client is None or client["suspended_at"] is not None:
+            conn.execute("ROLLBACK")
+            return None
+        conn.execute(
+            """
+            UPDATE sites
+            SET status = 'approved', approved_at = COALESCE(approved_at, ?), updated_at = ?
+            WHERE id = ?
+            """,
+            (now, now, int(row["id"])),
+        )
+        updated = conn.execute("SELECT * FROM sites WHERE id = ?", (int(row["id"]),)).fetchone()
+        public = _site_owner(updated, _routes_for(conn, int(updated["id"])))
+        conn.execute("COMMIT")
     return public
+
+
+def mark_origin_verified(db_path: str, *, site_id: int, now: int) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE sites SET origin_verified_at = ?, updated_at = ? WHERE id = ?",
+            (int(now), int(now), int(site_id)),
+        )
+
+
+def record_origin_attempt(db_path: str, *, site_id: int, now: int) -> bool:
+    """True when this site is still under 5 checks in the last hour."""
+    window = int(now) - 3600
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        count = conn.execute(
+            "SELECT COUNT(*) FROM origin_check_attempts WHERE site_id = ? AND created_at >= ?",
+            (int(site_id), window),
+        ).fetchone()
+        if count and int(count[0]) >= 5:
+            conn.execute("ROLLBACK")
+            return False
+        conn.execute(
+            "INSERT INTO origin_check_attempts(site_id, created_at) VALUES(?, ?)",
+            (int(site_id), int(now)),
+        )
+        conn.execute("COMMIT")
+    return True
 
 
 def delete_site(db_path: str, *, client_id: int, slug: str) -> bool:
@@ -617,7 +706,8 @@ def rotate_site_secret(db_path: str, *, client_id: int, slug: str) -> dict | Non
         conn.execute(
             """
             UPDATE sites
-            SET origin_secret_ciphertext = ?, secret_fingerprint = ?, updated_at = ?
+            SET origin_secret_ciphertext = ?, secret_fingerprint = ?, updated_at = ?,
+                origin_verified_at = NULL
             WHERE id = ?
             """,
             (blob, fingerprint, now, int(row["id"])),
@@ -833,7 +923,12 @@ def list_public_sites(db_path: str, *, limit: int, cursor: str | None) -> dict:
         page = rows[: int(limit)]
         sites = [_site_public(row, _routes_for(conn, int(row["id"]))) for row in page]
     next_cursor = page[-1]["slug"] if len(rows) > int(limit) and page else None
-    return {"ok": True, "hosted_registry": True, "sites": sites, "next_cursor": next_cursor}
+    body = {"ok": True, "hosted_registry": True, "sites": sites, "next_cursor": next_cursor}
+    if config.ABUSE_CONTACT:
+        body["abuse_contact"] = config.ABUSE_CONTACT
+    if config.TERMS_URL:
+        body["terms_url"] = config.TERMS_URL
+    return body
 
 
 def admin_list_sites(db_path: str, *, status: str | None, limit: int) -> list[dict]:

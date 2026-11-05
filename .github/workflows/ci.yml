@@ -21,8 +21,16 @@ jobs:
           python -m pip install -U pip
           pip install -r requirements.txt -r requirements-dev.txt -r proxy/requirements.txt -r mcp/requirements.txt -r gate/requirements.txt
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Express receipt vectors
+        run: node proxy/snippets/express_receipt.test.js
+
       - name: Ruff
-        run: ruff check app tests proxy/src proxy/snippets/fastapi_verify.py mcp/src mcp/scripts gate/src
+        run: ruff check app tests proxy/src proxy/snippets/fastapi_verify.py proxy/snippets/fastapi_receipt.py mcp/src mcp/scripts gate/src
 
       - name: Bandit
         run: bandit -r app proxy/src mcp/src gate/src -ll

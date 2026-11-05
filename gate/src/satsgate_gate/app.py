@@ -1,4 +1,7 @@
-"""ASGI app. ``https://gate.satsgate.org/<slug>/<path>`` sells the route, then forwards it."""
+"""ASGI app. ``https://gate.satsgate.org/<slug>/<path>`` sells a receipt and nothing else.
+
+The gate does not read the request body and does not call the seller.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +10,6 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import httpx
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -19,19 +21,15 @@ from satsgate_gate.client_ip import buyer_ip_for_core
 from satsgate_gate.config import Settings, load_settings
 from satsgate_gate.core_client import (
     CoreResult,
+    core_http_client,
     create_challenge,
     fetch_site,
     fetch_status,
-    charge_lightning,
-    settle_x402,
-    unlock_with_preimage,
-    unlock_without_preimage,
-    verify_x402,
+    request_lightning_receipt,
+    request_x402_receipt,
 )
-from satsgate_gate.forward import call_origin
-from satsgate_gate.macaroon import macaroon_fields
 from satsgate_gate.rate_limit import RateLimiter
-from satsgate_gate.ssrf import build_origin_client
+from satsgate_gate.redeem import origin_target, seller_host
 
 log = logging.getLogger("satsgate_gate")
 
@@ -45,7 +43,6 @@ _POLL_HINT = (
 _PENDING_HINT = (
     "The invoice is not settled yet. Retry the same Authorization header. Do not pay a new invoice."
 )
-# Encoded header, before core sees it. Core also caps the decoded JSON at 8 KB.
 _PAYMENT_SIGNATURE_MAX = 8192
 
 
@@ -58,7 +55,6 @@ def _json(status: int, error: str, **extra: object) -> JSONResponse:
 
 
 def parse_public_path(path: str) -> tuple[str, str] | None:
-    """``/slug`` and ``/slug/`` are route ``/``. A longer path is exact, query excluded."""
     if not path.startswith("/") or "\\" in path or "\x00" in path:
         return None
     raw = path[1:]
@@ -76,25 +72,7 @@ def parse_public_path(path: str) -> tuple[str, str] | None:
     return slug, route
 
 
-async def _read_body(request: Request, limit: int) -> bytes | JSONResponse:
-    declared = request.headers.get("content-length")
-    if declared is not None:
-        try:
-            size = int(declared)
-        except ValueError:
-            return _json(400, "invalid_content_length")
-        if size > limit:
-            return _json(413, "request_too_large")
-    chunks = bytearray()
-    async for chunk in request.stream():
-        if len(chunks) + len(chunk) > limit:
-            return _json(413, "request_too_large")
-        chunks.extend(chunk)
-    return bytes(chunks)
-
-
 def _payment_signature(request: Request) -> str | None:
-    """The raw header, or None when the buyer did not send one."""
     if "payment-signature" not in request.headers:
         return None
     return request.headers.get("payment-signature", "").strip()
@@ -110,29 +88,6 @@ def _l402_authorization(request: Request) -> str | None:
     return None
 
 
-def _split_token(header: str) -> tuple[str, str | None]:
-    try:
-        _scheme, token = header.split(None, 1)
-    except ValueError as exc:
-        raise ValueError("malformed Authorization header") from exc
-    token = token.strip()
-    if ":" in token:
-        macaroon, preimage = token.split(":", 1)
-    else:
-        macaroon, preimage = token, ""
-    if not macaroon or any(char.isspace() for char in macaroon):
-        raise ValueError("malformed L402 token")
-    if preimage == "":
-        return macaroon, None
-    try:
-        raw = bytes.fromhex(preimage)
-    except ValueError as exc:
-        raise ValueError("preimage is not hex") from exc
-    if len(raw) != 32:
-        raise ValueError("preimage is not hex")
-    return macaroon, preimage.lower()
-
-
 def _peer(request: Request) -> str:
     client = request.client
     if client is None or not client.host:
@@ -140,31 +95,33 @@ def _peer(request: Request) -> str:
     return client.host
 
 
-def _limited(result: CoreResult) -> JSONResponse:
-    retry = result.retry_after if result.retry_after is not None else 1
-    return _json(429, result.error or "rate_limited", retry_after_seconds=retry)
+def _redeem(site: CachedSite, route_path: str) -> str:
+    return origin_target(site.origin_url, route_path, "")
 
 
-def _pending(result: CoreResult) -> JSONResponse:
-    retry = result.retry_after if result.retry_after is not None else 1
-    return JSONResponse(
-        {
-            "ok": False,
-            "error": "payment_pending",
-            "retry_after_seconds": retry,
-            "payment_hash": result.payment_hash,
-            "hint": _PENDING_HINT,
-        },
-        status_code=402,
-        headers={"Retry-After": str(retry), "Cache-Control": "no-store"},
-    )
+def _delivery(site: CachedSite, route_path: str, settings: Settings) -> dict[str, object]:
+    body: dict[str, object] = {
+        "delivery": "receipt",
+        "redeem_url": _redeem(site, route_path),
+        "receipt_header": "Satsgate-Receipt",
+        "seller_host": seller_host(site.origin_url),
+    }
+    if settings.terms_url:
+        body["terms_url"] = settings.terms_url
+    return body
 
 
-def _challenge_response(result: CoreResult, reason: str | None) -> JSONResponse:
+def _link(url: str) -> str:
+    return f"<{url}>; rel=\"satsgate-redeem\""
+
+
+def _challenge_response(result: CoreResult, reason: str | None, site: CachedSite, route_path: str, settings: Settings) -> JSONResponse:
     challenge = result.challenge
     if challenge is None or (not challenge.offers_lightning and not challenge.offers_x402):
         return _json(502, "paywall_unavailable")
-    headers = {"Cache-Control": "no-store"}
+    url = _redeem(site, route_path)
+    headers = {"Cache-Control": "no-store", "Link": _link(url)}
+    delivery = _delivery(site, route_path, settings)
     if challenge.offers_lightning:
         body: dict[str, object] = {
             "ok": False,
@@ -178,6 +135,7 @@ def _challenge_response(result: CoreResult, reason: str | None) -> JSONResponse:
             "max_uses": challenge.max_uses,
             "access_seconds": challenge.access_seconds,
             "hint": _POLL_HINT,
+            **delivery,
         }
         headers["WWW-Authenticate"] = challenge.www_authenticate
     else:
@@ -187,6 +145,7 @@ def _challenge_response(result: CoreResult, reason: str | None) -> JSONResponse:
             "resource": challenge.resource,
             "max_uses": challenge.max_uses,
             "access_seconds": challenge.access_seconds,
+            **delivery,
         }
     if reason:
         body["reason"] = reason
@@ -200,28 +159,45 @@ def _challenge_response(result: CoreResult, reason: str | None) -> JSONResponse:
     return JSONResponse(body, status_code=402, headers=headers)
 
 
-def _x402_failure(result: CoreResult) -> JSONResponse:
+def _failure(result: CoreResult) -> JSONResponse:
     if result.action == "missing":
         return _json(404, "not_found")
-    code = result.error
-    status = result.http_status
-    if result.action == "rejected" and status in {400, 402, 409} and code.isidentifier():
+    if result.action == "limited":
+        retry = result.retry_after if result.retry_after is not None else 1
+        return _json(429, result.error or "rate_limited", retry_after_seconds=retry)
+    if result.action == "pending":
+        retry = result.retry_after if result.retry_after is not None else 1
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "payment_pending",
+                "retry_after_seconds": retry,
+                "payment_hash": result.payment_hash,
+                "hint": _PENDING_HINT,
+            },
+            status_code=402,
+            headers={"Retry-After": str(retry), "Cache-Control": "no-store"},
+        )
+    if result.action == "rejected" and result.http_status in {400, 401, 402, 403, 409} and result.error.isidentifier():
         extra: dict[str, object] = {}
         if result.reason:
             extra["reason"] = result.reason
-        return _json(status, code, **extra)
+        return _json(result.http_status, result.error, **extra)
     return _json(502, "paywall_unavailable")
 
 
-def _rate_limited(request: Request, slug: str, buyer_ip: str | None) -> JSONResponse | None:
+def _rate_limited(request: Request, slug: str, buyer_ip: str | None, *, test_mode: bool) -> JSONResponse | None:
     settings: Settings = request.app.state.settings
-    if settings.rl_per_site > 0:
-        allowed, retry = request.app.state.site_limiter.allow(f"site:{slug}")
+    per_site = settings.rl_test_per_site if test_mode else settings.rl_per_site
+    per_buyer = settings.rl_test_per_buyer if test_mode else settings.rl_per_buyer
+    site_limiter = request.app.state.test_site_limiter if test_mode else request.app.state.site_limiter
+    buyer_limiter = request.app.state.test_buyer_limiter if test_mode else request.app.state.buyer_limiter
+    if per_site > 0:
+        allowed, retry = site_limiter.allow(f"site:{slug}")
         if not allowed:
             return _json(429, "rate_limited", retry_after_seconds=retry)
-    if settings.rl_per_buyer > 0:
-        who = buyer_ip or _peer(request)
-        allowed, retry = request.app.state.buyer_limiter.allow(f"buyer:{who}")
+    if per_buyer > 0:
+        allowed, retry = buyer_limiter.allow(f"buyer:{buyer_ip or _peer(request)}")
         if not allowed:
             return _json(429, "rate_limited", retry_after_seconds=retry)
     return None
@@ -229,7 +205,7 @@ def _rate_limited(request: Request, slug: str, buyer_ip: str | None) -> JSONResp
 
 async def _load_site(request: Request, slug: str) -> CachedSite | JSONResponse:
     settings: Settings = request.app.state.settings
-    client: httpx.AsyncClient = request.app.state.core_client
+    client = request.app.state.core_client
     cache: SiteCache = request.app.state.cache
     state = await fetch_status(client, settings, slug)
     if state == "missing":
@@ -251,128 +227,39 @@ async def _load_site(request: Request, slug: str) -> CachedSite | JSONResponse:
     return loaded
 
 
-async def _unlock(request: Request, site: CachedSite, route_path: str, header: str) -> CoreResult:
-    from satsgate_gate.cache import GateRoute
-
-    route = site.route(route_path)
-    if not isinstance(route, GateRoute):
-        return CoreResult(action="missing", error="not_found")
-    client: httpx.AsyncClient = request.app.state.core_client
-    settings: Settings = request.app.state.settings
-    try:
-        macaroon, preimage = _split_token(header)
-    except ValueError as exc:
-        return CoreResult(action="fresh", error=str(exc))
-    fields = macaroon_fields(macaroon)
-    resource = site.resource(route.path)
-    if fields is not None and fields.get("res") and fields["res"] != resource:
-        return CoreResult(action="fresh", error="resource mismatch")
-    if preimage is None:
-        if fields is None or "ph" not in fields:
-            return CoreResult(action="fresh", error="invalid macaroon")
-        scheme = header.split(None, 1)[0]
-        return await unlock_without_preimage(
-            client,
-            settings,
-            site,
-            route,
-            authorization=f"{scheme} {macaroon}",
-            payment_hash=fields["ph"],
-        )
-    return await unlock_with_preimage(client, settings, site, route, header)
+def _receipt_response(result: CoreResult, site: CachedSite, route_path: str, *, head: bool) -> Response:
+    payload = dict(result.receipt or {})
+    payload["redeem_url"] = _redeem(site, route_path)
+    payload["receipt_header"] = "Satsgate-Receipt"
+    token = str(payload.get("receipt") or "")
+    expires = str(payload.get("expires_at_iso") or "")
+    headers = {"Cache-Control": "no-store", "Link": _link(str(payload["redeem_url"]))}
+    if token and "\r" not in token and "\n" not in token:
+        headers["Satsgate-Receipt"] = token
+    if expires and "\r" not in expires and "\n" not in expires:
+        headers["Satsgate-Receipt-Expires"] = expires
+    if result.payment_response:
+        headers["PAYMENT-RESPONSE"] = result.payment_response
+    if head:
+        return Response(status_code=200, headers=headers)
+    return Response(json.dumps(payload).encode("utf-8"), status_code=200, media_type="application/json", headers=headers)
 
 
-async def _pay_x402(request: Request, site: CachedSite, route, payment_signature: str) -> Response:
-    """Verify, call the origin, and settle only after a 2xx. The gate never calls the facilitator."""
-    settings: Settings = request.app.state.settings
-    client: httpx.AsyncClient = request.app.state.core_client
-    verified = await verify_x402(client, settings, site, route, payment_signature)
-    if verified.action == "missing":
-        request.app.state.cache.drop(site.slug)
-        return _json(404, "not_found")
-    if verified.action != "serve" or verified.amount_usd_atomic is None or not verified.payment_hash:
-        return _x402_failure(verified)
-    exchanged = await call_origin(
-        request,
-        settings,
-        site,
-        route_path=route.path,
-        payment_hash=verified.payment_hash,
-        resource=site.resource(route.path),
-        paid_usd_atomic=verified.amount_usd_atomic,
-    )
-    if exchanged.error or not (200 <= exchanged.status < 300):
-        return exchanged.response(use_spent=False if exchanged.error else None)
-    settled = await settle_x402(client, settings, site, route, payment_signature)
-    if settled.action != "settled" or not settled.payment_response:
-        return _x402_failure(settled)
-    return exchanged.response(use_spent=None, extra=(("PAYMENT-RESPONSE", settled.payment_response),))
-
-
-async def _serve_lightning(request: Request, site: CachedSite, route, authorization: str) -> Response | str | None:
-    """Confirm the Lightning payment, call the origin, and charge only on 2xx.
-
-    A transport failure or a non-2xx origin response does not debit. The same
-    macaroon can be retried. A grant that is already used up becomes a new 402.
-    The origin body is not returned when the charge loses the use.
-    """
-    settings: Settings = request.app.state.settings
-    unlocked = await _unlock(request, site, route.path, authorization)
-    if unlocked.action == "pending":
-        return _pending(unlocked)
-    if unlocked.action == "limited":
-        return _limited(unlocked)
-    if unlocked.action == "unavailable":
-        return _json(502, "paywall_unavailable")
-    if unlocked.action == "missing":
-        request.app.state.cache.drop(site.slug)
-        return _json(404, "not_found")
-    if unlocked.action != "forward":
-        return unlocked.error or None
-
-    payment_hash = unlocked.payment_hash
-    if not payment_hash:
-        fields = None
-        try:
-            macaroon, _preimage = _split_token(authorization)
-            fields = macaroon_fields(macaroon)
-        except ValueError:
-            fields = None
-        if fields is not None:
-            payment_hash = fields["ph"]
-    if not payment_hash:
-        log.warning("settled unlock had no payment hash")
-        return _json(502, "paywall_unavailable")
-    paid = unlocked.amount_sats if unlocked.amount_sats is not None else route.price_sats
-    if isinstance(paid, bool) or not isinstance(paid, int) or paid < 1:
-        log.warning("settled unlock had no sats amount")
-        return _json(502, "paywall_unavailable")
-    exchanged = await call_origin(
-        request,
-        settings,
-        site,
-        route_path=route.path,
-        payment_hash=payment_hash.lower(),
-        resource=site.resource(route.path),
-        paid_sats=paid,
-    )
-    if exchanged.error:
-        return exchanged.response(use_spent=False)
-    if not (200 <= exchanged.status < 300):
-        return exchanged.response(use_spent=None)
-    charged = await charge_lightning(
-        request.app.state.core_client,
-        settings,
-        site,
-        route,
-        authorization=authorization,
-        payment_hash=payment_hash.lower(),
-    )
-    if charged.action == "charged":
-        return exchanged.response(use_spent=None)
-    if charged.action == "fresh":
-        return charged.error or "token_used_up"
-    return _json(502, "paywall_unavailable")
+def _root(settings: Settings, *, head: bool) -> Response:
+    payload: dict[str, object] = {
+        "ok": True,
+        "service": "satsgate-gate",
+        "version": __version__,
+        "delivery": "receipt",
+    }
+    if settings.terms_url:
+        payload["terms_url"] = settings.terms_url
+    if settings.abuse_contact:
+        payload["abuse_contact"] = settings.abuse_contact
+    headers = {"Cache-Control": "no-store"}
+    if head:
+        return Response(status_code=200, media_type="application/json", headers=headers)
+    return JSONResponse(payload, headers=headers)
 
 
 async def handle(request: Request) -> Response:
@@ -381,9 +268,13 @@ async def handle(request: Request) -> Response:
     path = request.url.path
     if path == "/healthz" and method in {"GET", "HEAD"}:
         if method == "HEAD":
-            return Response(status_code=200, media_type="application/json")
-        payload = {"ok": True, "component": "satsgate-gate", "version": __version__}
-        return Response(json.dumps(payload).encode("utf-8"), status_code=200, media_type="application/json")
+            return Response(status_code=200, media_type="application/json", headers={"Cache-Control": "no-store"})
+        return JSONResponse(
+            {"ok": True, "component": "satsgate-gate", "version": __version__},
+            headers={"Cache-Control": "no-store"},
+        )
+    if path == "/" and method in {"GET", "HEAD"}:
+        return _root(settings, head=method == "HEAD")
 
     parsed = parse_public_path(path)
     if parsed is None:
@@ -396,32 +287,27 @@ async def handle(request: Request) -> Response:
             headers={"Allow": "GET, HEAD, POST, PUT, PATCH, DELETE", "Cache-Control": "no-store"},
         )
 
-    body = await _read_body(request, settings.max_request_bytes)
-    if isinstance(body, Response):
-        return body
-    request.state.body = body
-
     buyer_ip = buyer_ip_for_core(
         peer=_peer(request),
         forwarded_for=request.headers.get("x-forwarded-for"),
         trusted_proxies=settings.trusted_proxies,
     )
-    limited = _rate_limited(request, slug, buyer_ip)
-    if limited is not None:
-        return limited
-
     site = await _load_site(request, slug)
     if isinstance(site, Response):
         return site
+    limited = _rate_limited(request, slug, buyer_ip, test_mode=site.x402_mode == "test")
+    if limited is not None:
+        return limited
     route = site.route(route_path)
     if route is None:
         return _json(404, "not_found")
 
-    reason: str | None = None
     authorization = _l402_authorization(request)
     payment_signature = _payment_signature(request)
     if authorization is not None and payment_signature is not None:
         return _json(400, "one_rail_only")
+    client = request.app.state.core_client
+    paid: CoreResult | None = None
     if payment_signature is not None:
         if (
             not payment_signature
@@ -429,22 +315,32 @@ async def handle(request: Request) -> Response:
             or any(char in payment_signature for char in "\r\n")
         ):
             return _json(400, "bad_signature")
-        return await _pay_x402(request, site, route, payment_signature)
-    if authorization is not None:
-        served = await _serve_lightning(request, site, route, authorization)
-        if isinstance(served, Response):
-            return served
-        reason = served
+        paid = await request_x402_receipt(
+            client, settings, site, route, method=method, payment_signature=payment_signature
+        )
+    elif authorization is not None:
+        paid = await request_lightning_receipt(
+            client, settings, site, route, method=method, authorization=authorization
+        )
+    if paid is not None:
+        if paid.action == "receipt":
+            return _receipt_response(paid, site, route_path, head=method == "HEAD")
+        if paid.action == "missing":
+            request.app.state.cache.drop(slug)
+        return _failure(paid)
 
-    challenge = await create_challenge(request.app.state.core_client, settings, site, route, buyer_ip)
+    challenge = await create_challenge(client, settings, site, route, buyer_ip)
     if challenge.action == "missing":
         request.app.state.cache.drop(slug)
         return _json(404, "not_found")
     if challenge.action == "limited":
-        return _limited(challenge)
+        return _failure(challenge)
     if challenge.action != "challenge":
         return _json(502, "paywall_unavailable")
-    return _challenge_response(challenge, reason)
+    response = _challenge_response(challenge, None, site, route_path, settings)
+    if method == "HEAD":
+        return Response(status_code=402, headers=dict(response.headers))
+    return response
 
 
 @asynccontextmanager
@@ -453,41 +349,31 @@ async def _lifespan(app: Starlette) -> AsyncIterator[None]:
     if not settings.gate_token:
         log.warning("SATSGATE_GATE_TOKEN is unset; site requests cannot be charged")
     owns_core = not hasattr(app.state, "core_client")
-    owns_origin = not hasattr(app.state, "origin_client")
     if owns_core:
-        app.state.core_client = httpx.AsyncClient(
-            base_url=settings.core_base_url,
-            timeout=httpx.Timeout(settings.core_timeout),
-            follow_redirects=False,
-            trust_env=False,
-        )
-    if owns_origin:
-        app.state.origin_client = await build_origin_client(timeout=settings.upstream_timeout)
+        app.state.core_client = core_http_client(settings)
     try:
         yield
     finally:
         if owns_core:
             await app.state.core_client.aclose()
-        if owns_origin:
-            await app.state.origin_client.aclose()
 
 
 def create_app(settings: Settings | None = None) -> Starlette:
     settings = settings or load_settings()
     app = Starlette(
-        routes=[Route("/{path:path}", handle, methods=_METHODS)],
+        routes=[
+            Route("/", handle, methods=_METHODS),
+            Route("/{path:path}", handle, methods=_METHODS),
+        ],
         lifespan=_lifespan,
     )
     app.state.settings = settings
     app.state.cache = SiteCache(settings.cache_seconds)
-    app.state.site_limiter = RateLimiter(
-        window_seconds=settings.rl_window_seconds,
-        max_requests=max(1, settings.rl_per_site),
-    )
-    app.state.buyer_limiter = RateLimiter(
-        window_seconds=settings.rl_window_seconds,
-        max_requests=max(1, settings.rl_per_buyer),
-    )
+    window = settings.rl_window_seconds
+    app.state.site_limiter = RateLimiter(window_seconds=window, max_requests=max(1, settings.rl_per_site))
+    app.state.buyer_limiter = RateLimiter(window_seconds=window, max_requests=max(1, settings.rl_per_buyer))
+    app.state.test_site_limiter = RateLimiter(window_seconds=window, max_requests=max(1, settings.rl_test_per_site))
+    app.state.test_buyer_limiter = RateLimiter(window_seconds=window, max_requests=max(1, settings.rl_test_per_buyer))
     return app
 
 

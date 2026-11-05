@@ -736,7 +736,7 @@ def test_migration_adds_the_hash_column_and_leaves_old_rows_unlimited(tmp_path):
     assert "idx_challenges_buyer" in indexes
 
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.17.0"
+        assert http.get("/health").json()["version"] == "0.18.0"
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})
         assert balance.status_code == 200
         assert balance.json()["credits"] == 7
@@ -848,7 +848,7 @@ def test_sdk_sends_the_buyer_header(tmp_path):
         sys.path.insert(0, str(sdk_root))
     from satsgate_sdk import SatsgateClient, __version__
 
-    assert __version__ == "0.6.0"
+    assert __version__ == "0.7.0"
     with TestClient(module.app) as http:
         account = _buy_client(http)
         sg = SatsgateClient(base_url="http://testserver", api_key=account)

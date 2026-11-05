@@ -5,10 +5,14 @@ import time
 
 from fastapi import APIRouter, Header
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from . import config
+from . import db
 from . import db_admin
 from . import db_sites
+from .geoblock import status as geoblock_status
+from .ofac import status as ofac_status
 
 # Operator routes stay callable when SATSGATE_ADMIN_TOKEN is set, but the
 # public docs and OpenAPI document only the customer API in production.
@@ -112,3 +116,46 @@ def v1_admin_x402(x_admin_token: str | None = Header(default=None, alias="X-Admi
     from . import x402_cdp_status
 
     return x402_cdp_status.snapshot()
+
+
+@router.get("/v1/admin/compliance")
+def v1_admin_compliance(x_admin_token: str | None = Header(default=None, alias="X-Admin-Token")):
+    """OFAC list and geoblock database status. No addresses and no secrets."""
+    err = _require_admin(x_admin_token)
+    if err:
+        return err
+    body = {"ok": True, "version": config.APP_VERSION}
+    body.update(ofac_status())
+    body.update(geoblock_status())
+    return body
+
+
+class SuspendIn(BaseModel):
+    reason: str = Field(default="", max_length=200)
+
+
+@router.post("/v1/admin/clients/{client_id}/suspend")
+def v1_admin_suspend(
+    client_id: int,
+    body: SuspendIn,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+):
+    err = _require_admin(x_admin_token)
+    if err:
+        return err
+    if not db.suspend_client(config.DB_PATH, client_id=int(client_id), reason=body.reason):
+        return JSONResponse(status_code=404, content={"ok": False, "error": "client_not_found"})
+    return {"ok": True, "client_id": int(client_id), "suspended": True}
+
+
+@router.post("/v1/admin/clients/{client_id}/unsuspend")
+def v1_admin_unsuspend(
+    client_id: int,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+):
+    err = _require_admin(x_admin_token)
+    if err:
+        return err
+    if not db.unsuspend_client(config.DB_PATH, client_id=int(client_id)):
+        return JSONResponse(status_code=404, content={"ok": False, "error": "client_not_found"})
+    return {"ok": True, "client_id": int(client_id), "suspended": False}

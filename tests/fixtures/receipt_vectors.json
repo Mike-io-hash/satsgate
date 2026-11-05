@@ -1,0 +1,74 @@
+{
+  "secret": "abababababababababababababababababababababababababababababababab",
+  "previous_secret": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+  "other_secret": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+  "now": 1700000000,
+  "leeway": 30,
+  "cases": [
+    {
+      "name": "valid",
+      "token": "eyJhbGciOiJIUzI1NiIsImtpZCI6IjI3MWE0MTNiZDMzOWM1NzAiLCJ0eXAiOiJzYXRzZ2F0ZS1yZWNlaXB0K2p3dCJ9.eyJhbXQiOnsic2F0cyI6MjF9LCJhdWQiOiJteS1zaG9wIiwiZXhwIjoxNzAwMDAzNjAwLCJpYXQiOjE3MDAwMDAwMDAsImlzcyI6Imh0dHBzOi8vZ2F0ZS5zYXRzZ2F0ZS5vcmciLCJqdGkiOiJyY3BfYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsInBoIjoiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYiIsInJhaWwiOiJsaWdodG5pbmciLCJyZXMiOiJnYXRlOm15LXNob3A6L3JlcG9ydCIsInN1YiI6Ii9yZXBvcnQiLCJ1c2VzIjoxfQ.CROQP3uME9hoa284Z4IdR8Yc1sOtuoQGyjSEwHUqIhM",
+      "site": "my-shop",
+      "path": "/report",
+      "expect": "ok"
+    },
+    {
+      "name": "expired",
+      "token": "eyJhbGciOiJIUzI1NiIsImtpZCI6IjI3MWE0MTNiZDMzOWM1NzAiLCJ0eXAiOiJzYXRzZ2F0ZS1yZWNlaXB0K2p3dCJ9.eyJhbXQiOnsic2F0cyI6MjF9LCJhdWQiOiJteS1zaG9wIiwiZXhwIjoxNjk5OTk5ODgwLCJpYXQiOjE3MDAwMDAwMDAsImlzcyI6Imh0dHBzOi8vZ2F0ZS5zYXRzZ2F0ZS5vcmciLCJqdGkiOiJyY3BfYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiIsInBoIjoiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYiIsInJhaWwiOiJsaWdodG5pbmciLCJyZXMiOiJnYXRlOm15LXNob3A6L3JlcG9ydCIsInN1YiI6Ii9yZXBvcnQiLCJ1c2VzIjoxfQ.sfKaAiqaYjVmMhrcBR5We1DGPNhbJkF26urj5-CwsrM",
+      "site": "my-shop",
+      "path": "/report",
+      "expect": "receipt_expired"
+    },
+    {
+      "name": "wrong_site",
+      "token": "eyJhbGciOiJIUzI1NiIsImtpZCI6Ijg2ZmY5ZmQ1NzFkYzNkZGUiLCJ0eXAiOiJzYXRzZ2F0ZS1yZWNlaXB0K2p3dCJ9.eyJhbXQiOnsic2F0cyI6MjF9LCJhdWQiOiJvdGhlci1zaG9wIiwiZXhwIjoxNzAwMDAzNjAwLCJpYXQiOjE3MDAwMDAwMDAsImlzcyI6Imh0dHBzOi8vZ2F0ZS5zYXRzZ2F0ZS5vcmciLCJqdGkiOiJyY3BfY2NjY2NjY2NjY2NjY2NjY2NjY2NjYyIsInBoIjoiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYiIsInJhaWwiOiJsaWdodG5pbmciLCJyZXMiOiJnYXRlOm90aGVyLXNob3A6L3JlcG9ydCIsInN1YiI6Ii9yZXBvcnQiLCJ1c2VzIjoxfQ.2gbo38uppxt573zG-L3lFz-_12942wv1DxpgmwBBWE4",
+      "site": "my-shop",
+      "path": "/report",
+      "expect": "receipt_wrong_site"
+    },
+    {
+      "name": "wrong_site_reverse",
+      "token": "eyJhbGciOiJIUzI1NiIsImtpZCI6IjI3MWE0MTNiZDMzOWM1NzAiLCJ0eXAiOiJzYXRzZ2F0ZS1yZWNlaXB0K2p3dCJ9.eyJhbXQiOnsic2F0cyI6MjF9LCJhdWQiOiJteS1zaG9wIiwiZXhwIjoxNzAwMDAzNjAwLCJpYXQiOjE3MDAwMDAwMDAsImlzcyI6Imh0dHBzOi8vZ2F0ZS5zYXRzZ2F0ZS5vcmciLCJqdGkiOiJyY3BfZmZmZmZmZmZmZmZmZmZmZmZmZmZmZiIsInBoIjoiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYiIsInJhaWwiOiJsaWdodG5pbmciLCJyZXMiOiJnYXRlOm15LXNob3A6L3JlcG9ydCIsInN1YiI6Ii9yZXBvcnQiLCJ1c2VzIjoxfQ.3oTVb7GmN_T111fm9X8jTARJKBczqAWEQ4a--VBMOdo",
+      "verify_secret": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "site": "other-shop",
+      "path": "/report",
+      "expect": "receipt_wrong_site"
+    },
+    {
+      "name": "bad_signature",
+      "token": "eyJhbGciOiJIUzI1NiIsImtpZCI6IjI3MWE0MTNiZDMzOWM1NzAiLCJ0eXAiOiJzYXRzZ2F0ZS1yZWNlaXB0K2p3dCJ9.eyJhbXQiOnsic2F0cyI6MjF9LCJhdWQiOiJteS1zaG9wIiwiZXhwIjoxNzAwMDAzNjAwLCJpYXQiOjE3MDAwMDAwMDAsImlzcyI6Imh0dHBzOi8vZ2F0ZS5zYXRzZ2F0ZS5vcmciLCJqdGkiOiJyY3BfYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsInBoIjoiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYiIsInJhaWwiOiJsaWdodG5pbmciLCJyZXMiOiJnYXRlOm15LXNob3A6L3JlcG9ydCIsInN1YiI6Ii9yZXBvcnQiLCJ1c2VzIjoxfQ.CROQP3uME9hoa284Z4IdR8Yc1sOtuoQGyjSEwHUqIhA",
+      "site": "my-shop",
+      "path": "/report",
+      "expect": "receipt_invalid"
+    },
+    {
+      "name": "wrong_path",
+      "token": "eyJhbGciOiJIUzI1NiIsImtpZCI6IjI3MWE0MTNiZDMzOWM1NzAiLCJ0eXAiOiJzYXRzZ2F0ZS1yZWNlaXB0K2p3dCJ9.eyJhbXQiOnsic2F0cyI6MjF9LCJhdWQiOiJteS1zaG9wIiwiZXhwIjoxNzAwMDAzNjAwLCJpYXQiOjE3MDAwMDAwMDAsImlzcyI6Imh0dHBzOi8vZ2F0ZS5zYXRzZ2F0ZS5vcmciLCJqdGkiOiJyY3BfZGRkZGRkZGRkZGRkZGRkZGRkZGRkZCIsInBoIjoiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYiIsInJhaWwiOiJsaWdodG5pbmciLCJyZXMiOiJnYXRlOm15LXNob3A6L3JlcG9ydCIsInN1YiI6Ii9vdGhlciIsInVzZXMiOjF9.4llM-pKdppM3sMZQV7G8eboqv_6bmnnh4atuyLQ8p20",
+      "site": "my-shop",
+      "path": "/report",
+      "expect": "receipt_wrong_path"
+    },
+    {
+      "name": "alg_none",
+      "token": "eyJhbGciOiJub25lIiwia2lkIjoiMjcxYTQxM2JkMzM5YzU3MCIsInR5cCI6InNhdHNnYXRlLXJlY2VpcHQrand0In0.eyJhbXQiOnsic2F0cyI6MjF9LCJhdWQiOiJteS1zaG9wIiwiZXhwIjoxNzAwMDAzNjAwLCJpYXQiOjE3MDAwMDAwMDAsImlzcyI6Imh0dHBzOi8vZ2F0ZS5zYXRzZ2F0ZS5vcmciLCJqdGkiOiJyY3BfYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsInBoIjoiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYiIsInJhaWwiOiJsaWdodG5pbmciLCJyZXMiOiJnYXRlOm15LXNob3A6L3JlcG9ydCIsInN1YiI6Ii9yZXBvcnQiLCJ1c2VzIjoxfQ.",
+      "site": "my-shop",
+      "path": "/report",
+      "expect": "receipt_invalid"
+    },
+    {
+      "name": "bad_kid",
+      "token": "eyJhbGciOiJIUzI1NiIsImtpZCI6IjAwMDAwMDAwMDAwMDAwMDAiLCJ0eXAiOiJzYXRzZ2F0ZS1yZWNlaXB0K2p3dCJ9.eyJhbXQiOnsic2F0cyI6MjF9LCJhdWQiOiJteS1zaG9wIiwiZXhwIjoxNzAwMDAzNjAwLCJpYXQiOjE3MDAwMDAwMDAsImlzcyI6Imh0dHBzOi8vZ2F0ZS5zYXRzZ2F0ZS5vcmciLCJqdGkiOiJyY3BfYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsInBoIjoiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYiIsInJhaWwiOiJsaWdodG5pbmciLCJyZXMiOiJnYXRlOm15LXNob3A6L3JlcG9ydCIsInN1YiI6Ii9yZXBvcnQiLCJ1c2VzIjoxfQ.vzXb-46_FkW-jWnHXC_i_SwyvBLJ_opIuD2QJtq-oU0",
+      "site": "my-shop",
+      "path": "/report",
+      "expect": "receipt_invalid"
+    },
+    {
+      "name": "rotated",
+      "token": "eyJhbGciOiJIUzI1NiIsImtpZCI6IjM5ODVkYWM5MTMzZjgxNDQiLCJ0eXAiOiJzYXRzZ2F0ZS1yZWNlaXB0K2p3dCJ9.eyJhbXQiOnsic2F0cyI6MjF9LCJhdWQiOiJteS1zaG9wIiwiZXhwIjoxNzAwMDAzNjAwLCJpYXQiOjE3MDAwMDAwMDAsImlzcyI6Imh0dHBzOi8vZ2F0ZS5zYXRzZ2F0ZS5vcmciLCJqdGkiOiJyY3BfZWVlZWVlZWVlZWVlZWVlZWVlZWVlZSIsInBoIjoiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYiIsInJhaWwiOiJsaWdodG5pbmciLCJyZXMiOiJnYXRlOm15LXNob3A6L3JlcG9ydCIsInN1YiI6Ii9yZXBvcnQiLCJ1c2VzIjoxfQ.lodCtgeRQUL5N6FNifrirgrU5GkbWfG0OckOA06I9Qo",
+      "site": "my-shop",
+      "path": "/report",
+      "previous": true,
+      "expect": "ok"
+    }
+  ]
+}

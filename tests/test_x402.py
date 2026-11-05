@@ -424,47 +424,33 @@ def test_verify_settle_replay_and_failures(tmp_path, monkeypatch):
         calls, post = _poster(buyer)
         _install_poster(post)
 
-        verified = _gate(
+        issued_receipt = _gate(
             http,
             "POST",
-            "/internal/gate/x402/verify",
+            "/internal/gate/x402/receipt",
             json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
         )
-        assert verified.status_code == 200, verified.text
-        assert verified.json()["serve"] is True
+        assert issued_receipt.status_code == 200, issued_receipt.text
+        assert issued_receipt.json()["receipt"]
         assert _credits(http, key) == before
         assert calls[0][0].endswith("/verify")
         assert calls[0][1]["paymentRequirements"]["amount"] == "25000"
         assert calls[0][1]["paymentRequirements"]["payTo"] == owner.address
-
-        settled = _gate(
-            http,
-            "POST",
-            "/internal/gate/x402/settle",
-            json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
-        )
-        assert settled.status_code == 200, settled.text
-        assert settled.json()["charged"] == 1
-        assert settled.json()["credits"] == before - 1
-        decoded = json.loads(base64.b64decode(settled.headers["payment-response"]))
+        decoded = json.loads(base64.b64decode(issued_receipt.headers["payment-response"]))
         assert decoded["success"] is True
         assert decoded["transaction"] == _TX
-        assert decoded["tx"] == _TX
         assert decoded["network"] == "eip155:84532"
-        assert decoded["payer"]
-        assert _credits(http, key) == before - 1
         assert sum(1 for url, _body in calls if url.endswith("/settle")) == 1
 
         replay = _gate(
             http,
             "POST",
-            "/internal/gate/x402/settle",
+            "/internal/gate/x402/receipt",
             json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
         )
         assert replay.status_code == 200, replay.text
-        assert replay.json()["charged"] == 0
-        assert replay.json()["replay"] is True
-        assert _credits(http, key) == before - 1
+        assert replay.json()["receipt"] == issued_receipt.json()["receipt"]
+        assert _credits(http, key) == before
         assert sum(1 for url, _body in calls if url.endswith("/settle")) == 1
 
 
@@ -497,7 +483,7 @@ def test_local_rejections_do_not_call_the_facilitator_or_debit(tmp_path, monkeyp
             response = _gate(
                 http,
                 "POST",
-                "/internal/gate/x402/verify",
+                "/internal/gate/x402/receipt",
                 json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
             )
             assert response.status_code == 402, response.text
@@ -511,7 +497,7 @@ def test_local_rejections_do_not_call_the_facilitator_or_debit(tmp_path, monkeyp
         expired = _gate(
             http,
             "POST",
-            "/internal/gate/x402/verify",
+            "/internal/gate/x402/receipt",
             json={"slug": "my-shop", "path": "/paid", "payment_signature": stale},
         )
         assert expired.status_code == 402
@@ -534,17 +520,10 @@ def test_settle_failure_does_not_consume_a_credit(tmp_path, monkeypatch):
         encoded = _payload(issued.json()["payment_required"], buyer, issued.json()["expires_at"])
         calls, post = _poster(buyer, settle={"success": False, "errorReason": "insufficient_funds"})
         _install_poster(post)
-        verified = _gate(
-            http,
-            "POST",
-            "/internal/gate/x402/verify",
-            json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
-        )
-        assert verified.status_code == 200, verified.text
         failed = _gate(
             http,
             "POST",
-            "/internal/gate/x402/settle",
+            "/internal/gate/x402/receipt",
             json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
         )
         assert failed.status_code == 402, failed.text
@@ -573,7 +552,7 @@ def test_facilitator_rejects_a_signature_without_a_debit(tmp_path, monkeypatch):
         rejected = _gate(
             http,
             "POST",
-            "/internal/gate/x402/verify",
+            "/internal/gate/x402/receipt",
             json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
         )
         assert rejected.status_code == 402
@@ -620,7 +599,7 @@ def test_old_site_routes_keep_their_sats_price(tmp_path):
     assert row == (21, "sats", None)
     price = next(column for column in notnull if column[1] == "price_sats")
     assert price[3] == 0
-    assert module.config.APP_VERSION == "0.17.0"
+    assert module.config.APP_VERSION == "0.18.0"
 
 
 def test_address_change_clears_the_x402_rail(tmp_path, monkeypatch):
