@@ -116,6 +116,7 @@ class CoreResult:
     payment_response: str = ""
     amount_usd_atomic: int | None = None
     http_status: int = 0
+    receipt: dict | None = None
 
 
 def _json_body(response: httpx.Response) -> dict:
@@ -299,10 +300,9 @@ def _parse_site(slug: str, body: dict) -> CachedSite:
     if body.get("slug") != slug:
         raise ValueError("slug")
     origin = body.get("origin_url")
-    secret = body.get("origin_secret")
     client_id = body.get("client_id")
     routes = body.get("routes")
-    if not isinstance(origin, str) or not isinstance(secret, str) or not secret:
+    if not isinstance(origin, str) or not origin or body.get("origin_secret"):
         raise ValueError("origin")
     if isinstance(client_id, bool) or not isinstance(client_id, int):
         raise ValueError("client")
@@ -316,15 +316,18 @@ def _parse_site(slug: str, body: dict) -> CachedSite:
     payee = body.get("payee_lightning_address")
     if payee is not None and not isinstance(payee, str):
         raise ValueError("payee")
+    mode = body.get("x402_mode") or ""
+    if mode not in {"", "test", "live"}:
+        raise ValueError("mode")
     return CachedSite(
         slug=slug,
         client_id=client_id,
         origin_url=origin,
-        origin_secret=secret,
         payee=payee,
         routes=tuple(parsed),
         rail_lightning=_flag(body, "rail_lightning", default=True),
         rail_x402=_flag(body, "rail_x402", default=False),
+        x402_mode=mode,
     )
 
 
@@ -733,3 +736,79 @@ async def settle_x402(
     payment_signature: str,
 ) -> CoreResult:
     return await _x402_post(client, settings, site, route, payment_signature, settle=True)
+
+
+def _receipt_result(response: httpx.Response, *, default_retry: int) -> CoreResult:
+    body = _json_body(response)
+    error = _error_code(body)
+    status = response.status_code
+    if status == 404:
+        return CoreResult(action="missing", error="not_found")
+    if status == 429:
+        return CoreResult(
+            action="limited",
+            error=_public_code(error, "rate_limited"),
+            retry_after=_retry_after(response, body, default_retry),
+        )
+    if status == 402 and error == "payment_pending":
+        payment_hash = body.get("payment_hash") if isinstance(body.get("payment_hash"), str) else ""
+        return CoreResult(
+            action="pending",
+            error="payment_pending",
+            payment_hash=payment_hash,
+            retry_after=_retry_after(response, body, default_retry),
+        )
+    if status == 200 and isinstance(body.get("receipt"), str) and body.get("receipt"):
+        header = response.headers.get("payment-response")
+        encoded = header.strip() if isinstance(header, str) and header.strip() else body.get("payment_response")
+        payment_response = ""
+        if isinstance(encoded, str) and encoded.strip() and not any(char in encoded for char in "\r\n"):
+            payment_response = encoded.strip()
+        payment_hash = body.get("payment_hash") if isinstance(body.get("payment_hash"), str) else ""
+        return CoreResult(
+            action="receipt",
+            payment_hash=payment_hash,
+            payment_response=payment_response,
+            receipt=body,
+        )
+    if status in {400, 401, 402, 403, 409} and _PUBLIC_CODE.fullmatch(error):
+        reason = body.get("reason") if isinstance(body.get("reason"), str) else ""
+        return CoreResult(action="rejected", error=error, reason=reason, http_status=status, receipt=body)
+    log.warning("core receipt unavailable http %s error %s", status, error or "unavailable")
+    return CoreResult(action="unavailable", error="paywall_unavailable")
+
+
+async def _post_receipt(client, settings, path: str, payload: dict) -> CoreResult:
+    request = client.build_request(
+        "POST",
+        f"{settings.core_base_url}{path}",
+        headers=_headers(settings, None),
+        json=payload,
+    )
+    try:
+        response = await _send(client, request, settings.core_timeout)
+    except httpx.TimeoutException:
+        log.warning("core receipt timed out")
+        return CoreResult(action="unavailable", error="paywall_unavailable")
+    except httpx.HTTPError:
+        log.warning("core receipt failed")
+        return CoreResult(action="unavailable", error="paywall_unavailable")
+    return _receipt_result(response, default_retry=settings.pending_retry_after)
+
+
+async def request_lightning_receipt(client, settings, site, route, *, method: str, authorization: str) -> CoreResult:
+    return await _post_receipt(
+        client,
+        settings,
+        "/internal/gate/receipt",
+        {"slug": site.slug, "path": route.path, "method": method, "authorization": authorization},
+    )
+
+
+async def request_x402_receipt(client, settings, site, route, *, method: str, payment_signature: str) -> CoreResult:
+    return await _post_receipt(
+        client,
+        settings,
+        "/internal/gate/x402/receipt",
+        {"slug": site.slug, "path": route.path, "method": method, "payment_signature": payment_signature},
+    )
