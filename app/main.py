@@ -401,6 +401,7 @@ def well_known_satsgate(request: Request) -> dict:
                 "sites_update": {"method": "PATCH", "path": "/v1/sites/{slug}"},
                 "sites_delete": {"method": "DELETE", "path": "/v1/sites/{slug}"},
                 "sites_rotate_secret": {"method": "POST", "path": "/v1/sites/{slug}/rotate-secret"},
+                "sites_verify_origin": {"method": "POST", "path": "/v1/sites/{slug}/verify-origin"},
                 "site_routes_create": {"method": "POST", "path": "/v1/sites/{slug}/routes"},
                 "paywall_challenge": {"method": "POST", "path": "/v1/paywall/challenge"},
                 "paywall_verify": {"method": "POST", "path": "/v1/paywall/verify"},
@@ -423,6 +424,9 @@ def well_known_satsgate(request: Request) -> dict:
         "links": {
             "health": f"{base_url}/health",
         },
+        "abuse_contact": config.ABUSE_CONTACT or None,
+        "terms_url": config.TERMS_URL or None,
+        "delivery": "receipt",
     }
 
 
@@ -464,6 +468,7 @@ def v1_client(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
         "alert_email_status": alerts["alert_email_status"],
         "alert_email_pending": alerts["alert_email_pending"],
         "email_alerts_available": db_alert_email.alerts_available(),
+        "suspended": db.client_is_suspended(config.DB_PATH, client_id=client.id),
     }
 
 
@@ -809,6 +814,8 @@ def v1_client_evm_connect(x_api_key: str | None = Header(default=None, alias="X-
     client = _account_client(x_api_key)
     if isinstance(client, JSONResponse):
         return client
+    if db.client_is_suspended(config.DB_PATH, client_id=client.id):
+        return JSONResponse(status_code=403, content={"ok": False, "error": "account_suspended"})
     try:
         created = db_x402.create_connect_link(config.DB_PATH, client_id=client.id)
     except ValueError:
@@ -1111,6 +1118,36 @@ def _sites_caller(x_api_key: str | None, *, write: bool) -> db_keys.Principal | 
     return auth
 
 
+def _geoblock_quote(request: Request) -> JSONResponse | None:
+    from .geoblock import GeoblockUnavailable, blocked_country
+
+    peer = request.client.host if request.client else None
+    try:
+        ip = resolve_client_ip(
+            peer=peer,
+            forwarded_for=request.headers.get("x-forwarded-for"),
+            trusted_proxies=config.TRUSTED_PROXIES,
+        )
+        code = blocked_country(ip)
+    except GeoblockUnavailable:
+        return JSONResponse(
+            status_code=503,
+            content={"ok": False, "error": "geoblock_unavailable"},
+            headers={"Cache-Control": "no-store"},
+        )
+    if code is None:
+        return None
+    return JSONResponse(
+        status_code=451,
+        content={
+            "ok": False,
+            "error": "region_unavailable",
+            "detail": "Credit purchases are not available from this region.",
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def _sites_error(exc: Exception) -> JSONResponse:
     code = getattr(exc, "code", None) or str(exc)
     if code in {"slug_taken", "route_exists", "site_limit", "route_limit"}:
@@ -1128,6 +1165,7 @@ class SiteCreateIn(BaseModel):
     description: str | None = Field(default=None, max_length=300)
     origin_url: str = Field(..., min_length=8, max_length=300)
     listed: bool = False
+    accept_terms: str | None = Field(default=None, max_length=64)
 
 
 class SiteUpdateIn(BaseModel):
@@ -1145,6 +1183,7 @@ class SiteUpdateIn(BaseModel):
             "Turning x402 on without a mode stores test."
         ),
     )
+    accept_terms: str | None = Field(default=None, max_length=64)
 
 
 class RouteCreateIn(BaseModel):
@@ -1213,6 +1252,10 @@ def v1_sites_create(
     auth = _sites_caller(x_api_key, write=True)
     if isinstance(auth, JSONResponse):
         return auth
+    if db.client_is_suspended(config.DB_PATH, client_id=auth.client.id):
+        return JSONResponse(status_code=403, content={"ok": False, "error": "account_suspended"})
+    if config.TERMS_VERSION and body.accept_terms != config.TERMS_VERSION:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "terms_not_accepted"})
     try:
         created = db_sites.create_site(
             config.DB_PATH,
@@ -1223,6 +1266,7 @@ def v1_sites_create(
             origin_url=body.origin_url,
             listed=body.listed,
             max_sites=config.SITES_MAX_PER_ACCOUNT,
+            terms_version=body.accept_terms,
         )
     except (ValueError, db_sites.OriginError) as exc:
         return _sites_error(exc)
@@ -1277,6 +1321,7 @@ def v1_sites_update(
             rail_x402=body.rail_x402 if "rail_x402" in fields else None,
             x402_mode=body.x402_mode if "x402_mode" in fields else None,
             set_x402_mode="x402_mode" in fields,
+            accept_terms=body.accept_terms if "accept_terms" in fields else None,
         )
     except (ValueError, db_sites.OriginError) as exc:
         return _sites_error(exc)
@@ -1312,6 +1357,32 @@ def v1_sites_rotate_secret(slug: str, x_api_key: str | None = Header(default=Non
         "origin_secret": secret,
         "site": rotated,
         "note": "Save this origin secret. We will not show it again. The previous secret no longer matches.",
+    }
+
+
+@app.post("/v1/sites/{slug}/verify-origin")
+def v1_sites_verify_origin(slug: str, x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
+    """Ask the origin to prove the receipt checker is installed. Any site status is accepted."""
+    auth = _sites_caller(x_api_key, write=True)
+    if isinstance(auth, JSONResponse):
+        return auth
+    site = db_sites.get_site_for_client(config.DB_PATH, client_id=auth.client.id, slug=slug)
+    if site is None:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "site_not_found"})
+    from .origin_check import OriginCheckError, verify_origin
+
+    try:
+        checked = verify_origin(config.DB_PATH, site=site)
+    except OriginCheckError as exc:
+        headers = {"Cache-Control": "no-store"}
+        if exc.code == "rate_limited":
+            headers["Retry-After"] = "3600"
+        return JSONResponse(status_code=exc.status, content={"ok": False, "error": exc.code}, headers=headers)
+    return {
+        "ok": True,
+        "origin_verified_at": checked.get("origin_verified_at"),
+        "status": checked.get("status"),
+        "site": _without_secret(checked),
     }
 
 
@@ -1729,6 +1800,12 @@ def v1_topup_x402(
     client = _account_client(x_api_key)
     if isinstance(client, JSONResponse):
         return client
+    if db.client_is_suspended(config.DB_PATH, client_id=client.id):
+        return JSONResponse(status_code=403, content={"ok": False, "error": "account_suspended"})
+    if not (payment_signature and payment_signature.strip()):
+        blocked = _geoblock_quote(request)
+        if blocked is not None:
+            return blocked
     try:
         presented = payment_signature.strip() if payment_signature else ""
         if presented:
@@ -1785,6 +1862,8 @@ def v1_topup(
     client = _topup_client(x_api_key)
     if isinstance(client, JSONResponse):
         return client
+    if client is not None and db.client_is_suspended(config.DB_PATH, client_id=client.id):
+        return JSONResponse(status_code=403, content={"ok": False, "error": "account_suspended"})
 
     if authorization:
         try:
@@ -1798,6 +1877,10 @@ def v1_topup(
             return JSONResponse(status_code=401, content={"ok": False, "error": str(e)})
         except ValueError as e:
             return JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
+
+    blocked = _geoblock_quote(request)
+    if blocked is not None:
+        return blocked
 
     # CREAR CHALLENGE (402)
     memo = f"satsgate topup {plan.id}"

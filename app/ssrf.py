@@ -249,6 +249,7 @@ def safe_get_response(
     headers: dict | None = None,
     resolver: Callable | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    max_bytes: int = MAX_RESPONSE_BYTES,
 ) -> tuple[int, bytes]:
     """GET and return status plus a capped body. Redirects are rejected.
 
@@ -274,7 +275,7 @@ def safe_get_response(
             declared = response.headers.get("content-length")
             if declared is not None:
                 try:
-                    if int(declared) > MAX_RESPONSE_BYTES:
+                    if int(declared) > int(max_bytes):
                         raise SSRFError("response_too_large")
                 except ValueError as exc:
                     raise SSRFError("invalid_response") from exc
@@ -282,7 +283,7 @@ def safe_get_response(
             total = 0
             for chunk in response.iter_bytes():
                 total += len(chunk)
-                if total > MAX_RESPONSE_BYTES:
+                if total > int(max_bytes):
                     raise SSRFError("response_too_large")
                 chunks.append(chunk)
             return response.status_code, b"".join(chunks)

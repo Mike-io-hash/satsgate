@@ -7,5 +7,6 @@ PyJWT>=2.10.1
 cryptography>=43.0.0
 bolt11>=2.1.0
 pymacaroons>=0.13.0
+maxminddb>=2.6.0
 # bolt11 2.2 imports ConstBitStream, which bitstring 5 removed.
 bitstring>=4.1.4,<5
