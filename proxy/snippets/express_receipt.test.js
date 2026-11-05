@@ -9,7 +9,7 @@ const vectors = JSON.parse(fs.readFileSync(file, "utf8"));
 let failed = 0;
 for (const vector of vectors.cases) {
   const result = verifyReceipt(vector.token, {
-    secret: vectors.secret,
+    secret: vector.verify_secret || vectors.secret,
     previousSecrets: vector.previous ? [vectors.previous_secret] : [],
     site: vector.site,
     path: vector.path,

@@ -166,6 +166,10 @@ services:
       SATSGATE_SITE_SECRET_X402_TEST: ${SATSGATE_SITE_SECRET_X402_TEST:-}
       SATSGATE_SITE_SECRET_DEMO_TEST: ${SATSGATE_SITE_SECRET_DEMO_TEST:-}
       SATSGATE_GATE_PUBLIC_BASE: ${SATSGATE_GATE_PUBLIC_BASE:-https://gate.satsgate.org}
+      # Use counts survive a restart. An empty path would fall back to memory.
+      SATSGATE_RECEIPT_STORE: /data/receipts.sqlite3
+    volumes:
+      - demo_receipts:/data
     networks:
       internal:
 
@@ -198,6 +202,7 @@ volumes:
   satsgate_data:
   caddy_data:
   caddy_config:
+  demo_receipts:
 
 networks:
   internal:

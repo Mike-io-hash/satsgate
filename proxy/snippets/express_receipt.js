@@ -36,8 +36,7 @@ function verifyReceipt(token, options) {
     return { ok: false, code: "receipt_invalid" };
   }
   if (!header || header.alg !== "HS256" || header.typ !== typ) return { ok: false, code: "receipt_invalid" };
-  const matched = [options.secret, ...(options.previousSecrets || [])].filter((item) => item && kidFor(item) === header.kid);
-  if (!matched.length) return { ok: false, code: "receipt_invalid" };
+  const known = [options.secret, ...(options.previousSecrets || [])].filter((item) => item && kidFor(item) === header.kid);
   const signing = Buffer.from(parts[0] + "." + parts[1], "ascii");
   let presented;
   try {
@@ -45,12 +44,18 @@ function verifyReceipt(token, options) {
   } catch (_err) {
     return { ok: false, code: "receipt_invalid" };
   }
-  let signed = false;
-  for (const item of matched) {
-    const expected = crypto.createHmac("sha256", item).update(signing).digest();
-    if (presented.length === expected.length && crypto.timingSafeEqual(presented, expected)) signed = true;
+  if (known.length) {
+    let signed = false;
+    for (const item of known) {
+      const expected = crypto.createHmac("sha256", item).update(signing).digest();
+      if (presented.length === expected.length && crypto.timingSafeEqual(presented, expected)) signed = true;
+    }
+    if (!signed) return { ok: false, code: "receipt_invalid" };
+  } else if (claims.aud !== options.site) {
+    return { ok: false, code: "receipt_wrong_site" };
+  } else {
+    return { ok: false, code: "receipt_invalid" };
   }
-  if (!signed) return { ok: false, code: "receipt_invalid" };
   if (claims.aud !== options.site) return { ok: false, code: "receipt_wrong_site" };
   const expectedPath = normalizePath(options.path);
   const tokenPath = normalizePath(String(claims.sub || ""));

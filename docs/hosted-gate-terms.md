@@ -2,7 +2,7 @@
 
 **DRAFT. Pending legal review. These terms are not in effect.**
 
-This is a plain-language draft for the closed beta of the hosted gate at `https://gate.satsgate.org`. It is not legal advice. Do not treat it as the agreement you are operating under until a lawyer has reviewed it and a final version is published. Placeholders below (`SATSGATE_TERMS_VERSION`, `SATSGATE_TERMS_URL`, `SATSGATE_ABUSE_CONTACT`) are filled in at deploy. An empty terms version means these words are not the version an account can accept.
+This is a plain-language draft for the closed beta of the hosted gate at `https://gate.satsgate.org`. It is not legal advice. Do not treat it as the agreement you are operating under until a lawyer has reviewed it and a final version is published. On publication the whole banner, including "Pending legal review", is removed and replaced with the version and the effective date. Placeholders below (`SATSGATE_TERMS_VERSION`, `SATSGATE_TERMS_URL`, `SATSGATE_ABUSE_CONTACT`) are filled in at deploy. An empty terms version means these words are not the version an account can accept.
 
 ## What the hosted gate does
 
@@ -14,7 +14,7 @@ The service may change or stop at any time. There is no service level agreement 
 
 ## Your site
 
-You may register a site only if you own the origin, or you have the right to charge for it. You must follow the law that applies to you and to your buyers.
+You may register a site only if you own the origin, or you have the right to charge for it. You must follow the law that applies to you and to your buyers. Sellers and credit buyers are not sanctioned persons. Credit-pack quotes from Cuba, Iran, and North Korea are refused when that country list is configured.
 
 You may not use the gate for any of the following:
 
@@ -35,7 +35,7 @@ A buyer may also pay USDC on Base. That USDC goes to the Base address you verifi
 
 Credits are not money. They are not transferable and they are not redeemable. Credits are not refundable. Any refund from Satsgate, if one is given, is in credits only.
 
-A receipt lasts until `exp`. That is the route's `access_seconds` when you set one, otherwise `SATSGATE_RECEIPT_SECONDS` (default 24 hours), and never longer than 24 hours or the paywall access cap. `uses` is the route's `max_uses`, or 1. After expiry or after the uses are spent, the buyer needs a new payment.
+A receipt lasts until `exp`. That is the route's `access_seconds` when you set one, otherwise `SATSGATE_RECEIPT_SECONDS` (default 24 hours), and never longer than 24 hours or the paywall access cap. `uses` is the route's `max_uses`, or 1. After expiry or after the uses are spent, the buyer needs a new payment. If a receipt expires because the seller is down or slow, the buyer's claim is with the seller. Satsgate does not refund that receipt.
 
 ## Satsgate is not your buyer
 
@@ -45,7 +45,7 @@ To the extent the law allows, Satsgate is not liable for lost sats, lost credits
 
 ## Privacy
 
-Buyers do not get Satsgate accounts. This service is not anonymous. There is no KYC of buyers. An IP address is used to rate-limit that buyer. What is stored for the limit is a hash of a truncated address, not a profile.
+Buyers do not get Satsgate accounts. There is no KYC of buyers. The gate is non-custodial. An IP address is used to rate-limit that buyer. What is stored for the limit is a hash of a truncated address, not a profile. The site's origin host is public.
 
 When a country list is configured, credit-pack quotes use a local DB-IP Country Lite database to refuse listed countries. That database is © DB-IP, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). https://db-ip.com. The lookup is not used on the gate payment itself. An unknown country is allowed. If the database file is missing while a country list is set, new credit-pack quotes are refused.
 
@@ -59,7 +59,7 @@ Receipts, macaroons, preimages, and payment signatures are not written to logs.
 
 ## Changes
 
-This draft will change during legal review. A published version will set `SATSGATE_TERMS_VERSION` to a token and `SATSGATE_TERMS_URL` to the https page. Accepting a newer version is what auto-approve checks. Until that version is published, these words do not bind you or Satsgate.
+This draft will change during legal review. A published version will set `SATSGATE_TERMS_VERSION` to a token and `SATSGATE_TERMS_URL` to the https page. On that publication the whole draft banner, including "Pending legal review", is removed and replaced with the version and the effective date. Accepting a newer version is what auto-approve checks. Until that version is published, these words do not bind you or Satsgate.
 
 ## Contact
 

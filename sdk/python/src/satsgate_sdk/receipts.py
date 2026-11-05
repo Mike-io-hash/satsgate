@@ -112,21 +112,26 @@ def verify_receipt(
         raise ReceiptError("receipt_invalid")
     if header.get("alg") != "HS256" or header.get("typ") != typ:
         raise ReceiptError("receipt_invalid")
-    matched = [item for item in (secret, *tuple(previous_secrets)) if item and _kid(item) == header.get("kid")]
-    if not matched:
-        raise ReceiptError("receipt_invalid")
+    known = [item for item in (secret, *tuple(previous_secrets)) if item and _kid(item) == header.get("kid")]
     signing = f"{parts[0]}.{parts[1]}".encode("ascii")
     try:
         presented = _b64decode(parts[2])
     except ReceiptError:
         raise
-    ok = False
-    for item in matched:
-        expected = hmac.new(item.encode("utf-8"), signing, hashlib.sha256).digest()
-        if len(presented) == len(expected) and hmac.compare_digest(presented, expected):
-            ok = True
-            break
-    if not ok:
+    if known:
+        ok = False
+        for item in known:
+            expected = hmac.new(item.encode("utf-8"), signing, hashlib.sha256).digest()
+            if len(presented) == len(expected) and hmac.compare_digest(presented, expected):
+                ok = True
+                break
+        if not ok:
+            raise ReceiptError("receipt_invalid")
+    elif claims.get("aud") != site:
+        # Another site's key. Do not accept the token; the seller still needs
+        # the distinct error so a crossed demo receipt is not "invalid".
+        raise ReceiptError("receipt_wrong_site")
+    else:
         raise ReceiptError("receipt_invalid")
     if claims.get("aud") != site:
         raise ReceiptError("receipt_wrong_site")

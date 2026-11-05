@@ -13,10 +13,10 @@ from . import config, db, db_receipts, db_sites, receipts, x402, x402_service
 
 
 class ReceiptIssueError(Exception):
-    def __init__(self, code: str, status: int, **extra: object) -> None:
+    def __init__(self, code: str, http_status: int, **extra: object) -> None:
         super().__init__(code)
         self.code = code
-        self.status = status
+        self.status = int(http_status)
         self.extra = extra
 
 

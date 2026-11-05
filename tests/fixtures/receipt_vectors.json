@@ -1,6 +1,7 @@
 {
   "secret": "abababababababababababababababababababababababababababababababab",
   "previous_secret": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+  "other_secret": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
   "now": 1700000000,
   "leeway": 30,
   "cases": [
@@ -20,10 +21,25 @@
     },
     {
       "name": "wrong_site",
-      "token": "eyJhbGciOiJIUzI1NiIsImtpZCI6IjI3MWE0MTNiZDMzOWM1NzAiLCJ0eXAiOiJzYXRzZ2F0ZS1yZWNlaXB0K2p3dCJ9.eyJhbXQiOnsic2F0cyI6MjF9LCJhdWQiOiJvdGhlci1zaG9wIiwiZXhwIjoxNzAwMDAzNjAwLCJpYXQiOjE3MDAwMDAwMDAsImlzcyI6Imh0dHBzOi8vZ2F0ZS5zYXRzZ2F0ZS5vcmciLCJqdGkiOiJyY3BfY2NjY2NjY2NjY2NjY2NjY2NjY2NjYyIsInBoIjoiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYiIsInJhaWwiOiJsaWdodG5pbmciLCJyZXMiOiJnYXRlOm15LXNob3A6L3JlcG9ydCIsInN1YiI6Ii9yZXBvcnQiLCJ1c2VzIjoxfQ.jJAqvTsAt6rnS64Kz9MTPxI-5dniARKlXDG-Bl7dErg",
+      "token": "eyJhbGciOiJIUzI1NiIsImtpZCI6Ijg2ZmY5ZmQ1NzFkYzNkZGUiLCJ0eXAiOiJzYXRzZ2F0ZS1yZWNlaXB0K2p3dCJ9.eyJhbXQiOnsic2F0cyI6MjF9LCJhdWQiOiJvdGhlci1zaG9wIiwiZXhwIjoxNzAwMDAzNjAwLCJpYXQiOjE3MDAwMDAwMDAsImlzcyI6Imh0dHBzOi8vZ2F0ZS5zYXRzZ2F0ZS5vcmciLCJqdGkiOiJyY3BfY2NjY2NjY2NjY2NjY2NjY2NjY2NjYyIsInBoIjoiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYiIsInJhaWwiOiJsaWdodG5pbmciLCJyZXMiOiJnYXRlOm90aGVyLXNob3A6L3JlcG9ydCIsInN1YiI6Ii9yZXBvcnQiLCJ1c2VzIjoxfQ.2gbo38uppxt573zG-L3lFz-_12942wv1DxpgmwBBWE4",
       "site": "my-shop",
       "path": "/report",
       "expect": "receipt_wrong_site"
+    },
+    {
+      "name": "wrong_site_reverse",
+      "token": "eyJhbGciOiJIUzI1NiIsImtpZCI6IjI3MWE0MTNiZDMzOWM1NzAiLCJ0eXAiOiJzYXRzZ2F0ZS1yZWNlaXB0K2p3dCJ9.eyJhbXQiOnsic2F0cyI6MjF9LCJhdWQiOiJteS1zaG9wIiwiZXhwIjoxNzAwMDAzNjAwLCJpYXQiOjE3MDAwMDAwMDAsImlzcyI6Imh0dHBzOi8vZ2F0ZS5zYXRzZ2F0ZS5vcmciLCJqdGkiOiJyY3BfZmZmZmZmZmZmZmZmZmZmZmZmZmZmZiIsInBoIjoiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYiIsInJhaWwiOiJsaWdodG5pbmciLCJyZXMiOiJnYXRlOm15LXNob3A6L3JlcG9ydCIsInN1YiI6Ii9yZXBvcnQiLCJ1c2VzIjoxfQ.3oTVb7GmN_T111fm9X8jTARJKBczqAWEQ4a--VBMOdo",
+      "verify_secret": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "site": "other-shop",
+      "path": "/report",
+      "expect": "receipt_wrong_site"
+    },
+    {
+      "name": "bad_signature",
+      "token": "eyJhbGciOiJIUzI1NiIsImtpZCI6IjI3MWE0MTNiZDMzOWM1NzAiLCJ0eXAiOiJzYXRzZ2F0ZS1yZWNlaXB0K2p3dCJ9.eyJhbXQiOnsic2F0cyI6MjF9LCJhdWQiOiJteS1zaG9wIiwiZXhwIjoxNzAwMDAzNjAwLCJpYXQiOjE3MDAwMDAwMDAsImlzcyI6Imh0dHBzOi8vZ2F0ZS5zYXRzZ2F0ZS5vcmciLCJqdGkiOiJyY3BfYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsInBoIjoiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYiIsInJhaWwiOiJsaWdodG5pbmciLCJyZXMiOiJnYXRlOm15LXNob3A6L3JlcG9ydCIsInN1YiI6Ii9yZXBvcnQiLCJ1c2VzIjoxfQ.CROQP3uME9hoa284Z4IdR8Yc1sOtuoQGyjSEwHUqIhA",
+      "site": "my-shop",
+      "path": "/report",
+      "expect": "receipt_invalid"
     },
     {
       "name": "wrong_path",
