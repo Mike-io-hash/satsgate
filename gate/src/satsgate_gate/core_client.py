@@ -796,6 +796,16 @@ async def _post_receipt(client, settings, path: str, payload: dict) -> CoreResul
     return _receipt_result(response, default_retry=settings.pending_retry_after)
 
 
+def core_http_client(settings) -> httpx.AsyncClient:
+    """The only HTTP client the gate opens. It talks to core."""
+    return httpx.AsyncClient(
+        base_url=settings.core_base_url,
+        timeout=httpx.Timeout(settings.core_timeout),
+        follow_redirects=False,
+        trust_env=False,
+    )
+
+
 async def request_lightning_receipt(client, settings, site, route, *, method: str, authorization: str) -> CoreResult:
     return await _post_receipt(
         client,

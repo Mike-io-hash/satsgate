@@ -732,7 +732,7 @@ def test_migration_from_a_v05_database_keeps_unlimited_grants(tmp_path):
     assert debits == 1
 
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.17.0"
+        assert http.get("/health").json()["version"] == "0.18.0"
         assert _balance(http, legacy_key) == 9
         fresh = _challenge(http, legacy_key, resource="old/new")
         assert fresh["max_uses"] is None
@@ -765,7 +765,7 @@ def test_sdk_sends_policy_and_does_not_cache_a_consume(tmp_path):
         sys.path.insert(0, str(sdk_root))
     from satsgate_sdk import SatsgateClient, SatsgateError, __version__
 
-    assert __version__ == "0.6.0"
+    assert __version__ == "0.7.0"
     with TestClient(module.app) as http:
         account = _buy_client(http)
         sg = SatsgateClient(base_url="http://testserver", api_key=account)

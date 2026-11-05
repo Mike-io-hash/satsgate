@@ -13,6 +13,19 @@ os.environ.setdefault("SATSGATE_X402_CDP_KEY_SECRET", "")
 
 
 @pytest.fixture(autouse=True)
+def _reset_pr11_env(monkeypatch):
+    """Drop host-gate env a previous test may have written onto the process."""
+    for name in (
+        "SATSGATE_TERMS_VERSION",
+        "SATSGATE_TERMS_URL",
+        "SATSGATE_GEOBLOCK_COUNTRIES",
+        "SATSGATE_ABUSE_CONTACT",
+        "SATSGATE_SITES_AUTO_APPROVE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _x402_cdp_off():
     """A reloaded app copies os.environ. Reset the CDP switch around every test."""
     os.environ["SATSGATE_X402_CDP"] = "0"

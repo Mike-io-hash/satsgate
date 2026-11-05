@@ -43,6 +43,16 @@ services:
       # required before the first site is created (openssl rand -hex 32).
       SATSGATE_SITE_SECRET_KEY: ${SATSGATE_SITE_SECRET_KEY:-}
       SATSGATE_SITES_AUTO_APPROVE: ${SATSGATE_SITES_AUTO_APPROVE:-0}
+      # Empty terms version. Auto-approve stays off. Turning it on with an empty
+      # version refuses to boot.
+      SATSGATE_TERMS_VERSION: ${SATSGATE_TERMS_VERSION:-}
+      SATSGATE_TERMS_URL: ${SATSGATE_TERMS_URL:-}
+      SATSGATE_RECEIPT_SECONDS: ${SATSGATE_RECEIPT_SECONDS:-86400}
+      SATSGATE_ABUSE_CONTACT: ${SATSGATE_ABUSE_CONTACT:-}
+      # Empty country list: no GeoIP lookup. Set codes only after the mmdb is in place.
+      SATSGATE_GEOBLOCK_COUNTRIES: ${SATSGATE_GEOBLOCK_COUNTRIES:-}
+      SATSGATE_GEOIP_DB: ${SATSGATE_GEOIP_DB:-/data/geoip/dbip-country-lite.mmdb}
+      SATSGATE_OFAC_EVM_FILE: ${SATSGATE_OFAC_EVM_FILE:-/data/ofac/ofac_evm.txt}
       SATSGATE_SITES_MAX_PER_ACCOUNT: ${SATSGATE_SITES_MAX_PER_ACCOUNT:-3}
       SATSGATE_SITES_MAX_ROUTES: ${SATSGATE_SITES_MAX_ROUTES:-20}
       SATSGATE_GATE_PUBLIC_BASE: ${SATSGATE_GATE_PUBLIC_BASE:-https://gate.satsgate.org}
@@ -86,6 +96,10 @@ services:
       SATSGATE_DEV_MODE: ${SATSGATE_DEV_MODE:-0}
     volumes:
       - satsgate_data:/data
+      # Read-only. Operators fill these with scripts/geoip_update.sh and
+      # scripts/ofac_evm_update.py. Tests and CI do not download them.
+      - ./data/geoip:/data/geoip:ro
+      - ./data/ofac:/data/ofac:ro
     healthcheck:
       test:
         [
@@ -117,13 +131,14 @@ services:
       SATSGATE_GATE_TRUSTED_PROXIES: ${SATSGATE_GATE_TRUSTED_PROXIES:-172.28.0.2}
       SATSGATE_GATE_CACHE_SECONDS: ${SATSGATE_GATE_CACHE_SECONDS:-5}
       SATSGATE_GATE_CORE_TIMEOUT: ${SATSGATE_GATE_CORE_TIMEOUT:-10}
-      SATSGATE_GATE_UPSTREAM_TIMEOUT: ${SATSGATE_GATE_UPSTREAM_TIMEOUT:-15}
-      SATSGATE_GATE_MAX_REQUEST_BYTES: ${SATSGATE_GATE_MAX_REQUEST_BYTES:-1048576}
-      SATSGATE_GATE_MAX_RESPONSE_BYTES: ${SATSGATE_GATE_MAX_RESPONSE_BYTES:-10485760}
       SATSGATE_GATE_RL_WINDOW_SECONDS: ${SATSGATE_GATE_RL_WINDOW_SECONDS:-60}
       SATSGATE_GATE_RL_PER_SITE: ${SATSGATE_GATE_RL_PER_SITE:-600}
       SATSGATE_GATE_RL_PER_BUYER: ${SATSGATE_GATE_RL_PER_BUYER:-60}
+      SATSGATE_GATE_RL_TEST_PER_SITE: ${SATSGATE_GATE_RL_TEST_PER_SITE:-60}
+      SATSGATE_GATE_RL_TEST_PER_BUYER: ${SATSGATE_GATE_RL_TEST_PER_BUYER:-10}
       SATSGATE_GATE_PENDING_RETRY_AFTER: ${SATSGATE_GATE_PENDING_RETRY_AFTER:-2}
+      SATSGATE_ABUSE_CONTACT: ${SATSGATE_ABUSE_CONTACT:-}
+      SATSGATE_TERMS_URL: ${SATSGATE_TERMS_URL:-}
     healthcheck:
       test:
         [
@@ -140,11 +155,27 @@ services:
       internal:
         ipv4_address: 172.28.0.4
 
+  demo-seller:
+    build:
+      context: ./sdk/python
+      dockerfile: examples/Dockerfile
+    restart: unless-stopped
+    environment:
+      SATSGATE_DEMO_SITES: ${SATSGATE_DEMO_SITES:-/live=x402-test,/test=demo-test}
+      SATSGATE_DEMO_ROUTES: ${SATSGATE_DEMO_ROUTES:-/report}
+      SATSGATE_SITE_SECRET_X402_TEST: ${SATSGATE_SITE_SECRET_X402_TEST:-}
+      SATSGATE_SITE_SECRET_DEMO_TEST: ${SATSGATE_SITE_SECRET_DEMO_TEST:-}
+      SATSGATE_GATE_PUBLIC_BASE: ${SATSGATE_GATE_PUBLIC_BASE:-https://gate.satsgate.org}
+    networks:
+      internal:
+
   caddy:
     image: caddy:2
     restart: unless-stopped
     depends_on:
       - satsgate
+      - gate
+      - demo-seller
     ports:
       - "80:80"
       - "443:443"

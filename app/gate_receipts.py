@@ -7,7 +7,6 @@ cost 0. The receipt row is inserted in that same transaction.
 
 from __future__ import annotations
 
-import time
 from urllib.parse import urlsplit
 
 from . import config, db, db_receipts, db_sites, receipts, x402, x402_service

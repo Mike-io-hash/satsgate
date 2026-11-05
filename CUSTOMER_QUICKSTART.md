@@ -77,7 +77,7 @@ curl -s -X POST https://api.satsgate.org/v1/api-keys \
 
 That key can call the paywall challenge, status, and verify routes for resources starting with `demo/`. It cannot top up, change the payee, manage keys, or read the ledger. Drop the prefix field to allow every resource. Revoke it with `POST /v1/api-keys/{id}/revoke` using the account key. Python: `SatsgateClient.create_api_key`, `list_api_keys`, `revoke_api_key` (satsgate-sdk 0.4.0).
 
-To put that key in front of an API you already have, without writing paywall code, run [`satsgate-proxy`](./proxy/README.md). It is a separate process (version 0.13.0) and uses resource ids `route:<name>` or `site`, so set `resource_prefix` to match those (or omit it). The core in this quickstart stays the hosted API. `x402: true` without `x402_mode` is Base Sepolia. `x402_mode: live` is Base, after the operator has enabled it.
+To put that key in front of an API you already have, without writing paywall code, run [`satsgate-proxy`](./proxy/README.md). It is a separate process (version 0.14.0) and uses resource ids `route:<name>` or `site`, so set `resource_prefix` to match those (or omit it). The core in this quickstart stays the hosted API. `x402: true` without `x402_mode` is Base Sepolia. `x402_mode: live` is Base, after the operator has enabled it.
 
 A buyer-side agent uses [`satsgate-mcp`](./mcp/README.md) (version 0.11.0). That process does not create challenges. It pays a Lightning URL the proxy already protects, reads an x402 offer without signing it, and `list_sites` reads the public directory of approved sites, including a USD-priced route. The optional `sgr_` key on the MCP server is only for read-only status and is a different key from the one in the proxy.
 
@@ -133,7 +133,7 @@ FastAPI examples:
 
 ## Hosted gate
 
-Core can store a site, and `satsgate-gate` can serve `https://gate.satsgate.org/<slug>/...` after an operator approves it. That hostname is not public until DNS and the Caddy site block are turned on. Registering a site does not change challenge, verify, or status on `api.satsgate.org`. Details are in the README section "Hosted sites (closed beta)" and in `gate/README.md`.
+Core stores a site, and `satsgate-gate` charges at `https://gate.satsgate.org/<slug>/...` after an operator approves it. The gate returns a signed receipt. It does not call your origin. The buyer repeats the request at your origin with `Satsgate-Receipt`. The Caddy site block for that hostname is in the repo. Registering a site does not change challenge, verify, or status on `api.satsgate.org`. Details are in the README section "Hosted sites (closed beta)" and in `gate/README.md`.
 
 ## Usage & automation
 

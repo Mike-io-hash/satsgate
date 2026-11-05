@@ -375,7 +375,7 @@ def test_sender_retries_and_clears_secrets(tmp_path):
     assert timeout == 5.0
     assert headers["Authorization"] == f"Bearer {_KEY}"
     assert headers["Idempotency-Key"] == f"satsgate-alert_email_confirm-{row_id}"
-    assert headers["User-Agent"] == "satsgate/0.17.0"
+    assert headers["User-Agent"] == "satsgate/0.18.0"
     assert body["from"] == "Satsgate <alerts@satsgate.org>"
     assert body["to"] == ["seller@proton.me"]
     assert body["reply_to"] == "satsgateapp@proton.me"
@@ -471,7 +471,7 @@ def test_sender_thread_starts_only_when_email_is_enabled(tmp_path):
     module.email_send.poster = lambda *args: (200, {})
     with TestClient(module.app) as http:
         assert any(thread.name == "satsgate-email" for thread in threading.enumerate())
-        assert http.get("/health").json()["version"] == "0.17.0"
+        assert http.get("/health").json()["version"] == "0.18.0"
 
 
 def test_confirmation_rate_limits(tmp_path):

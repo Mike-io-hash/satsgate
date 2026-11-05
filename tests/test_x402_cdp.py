@@ -119,11 +119,11 @@ def test_unusable_secret_keeps_mainnet_off_and_does_not_log_the_value(tmp_path, 
         SATSGATE_X402_CDP_KEY_SECRET=secret,
     )
     assert module.config.X402_MAINNET_ENABLED is False
-    assert module.config.APP_VERSION == "0.17.0"
+    assert module.config.APP_VERSION == "0.18.0"
     assert secret not in caplog.text
     assert "USDC mainnet disabled" in caplog.text
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.17.0"
+        assert http.get("/health").json()["version"] == "0.18.0"
         status = http.get("/v1/admin/x402", headers={"X-Admin-Token": "test-admin-token"}).json()
         assert status["mainnet_enabled"] is False
         assert status["cdp"]["reason"] == "credentials"
@@ -220,7 +220,7 @@ def test_live_offer_uses_cdp_and_test_mode_stays_on_x402_org(tmp_path, monkeypat
             "version": "2",
             "assetTransferMethod": "eip3009",
         }
-        assert document["resource"]["description"] == ""
+        assert document["resource"]["description"] == "Satsgate receipt for origin.example/paid"
         assert issued.json()["testing"] is False
         assert issued.json()["x402_mode"] == "live"
         from test_x402 import _payload
@@ -229,7 +229,7 @@ def test_live_offer_uses_cdp_and_test_mode_stays_on_x402_org(tmp_path, monkeypat
         verified = _gate(
             http,
             "POST",
-            "/internal/gate/x402/verify",
+            "/internal/gate/x402/receipt",
             json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
         )
         assert verified.status_code == 200, verified.text
@@ -247,13 +247,15 @@ def test_live_offer_uses_cdp_and_test_mode_stays_on_x402_org(tmp_path, monkeypat
         assert test_doc["accepts"][0]["network"] == "eip155:84532"
         assert test_doc["accepts"][0]["asset"] == _SEPOLIA_USDC
         assert test_doc["accepts"][0]["extra"]["name"] == "USDC"
-        assert test_doc["resource"]["description"] == "Test payment on Base Sepolia. Not Base mainnet."
+        assert test_doc["resource"]["description"] == (
+            "Test payment on Base Sepolia. Not Base mainnet. Satsgate receipt for origin.example/paid"
+        )
         assert again.json()["testing"] is True
         encoded = _payload(again.headers["payment-required"], buyer, again.json()["expires_at"])
         tested = _gate(
             http,
             "POST",
-            "/internal/gate/x402/verify",
+            "/internal/gate/x402/receipt",
             json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
         )
         assert tested.status_code == 200, tested.text
@@ -298,7 +300,7 @@ def test_mainnet_offer_rejects_the_sepolia_eip712_name(tmp_path, monkeypatch) ->
         rejected = _gate(
             http,
             "POST",
-            "/internal/gate/x402/verify",
+            "/internal/gate/x402/receipt",
             json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
         )
         assert rejected.status_code == 402, rejected.text

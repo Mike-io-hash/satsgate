@@ -115,7 +115,16 @@ def v1_admin_x402(x_admin_token: str | None = Header(default=None, alias="X-Admi
         return err
     from . import x402_cdp_status
 
-    body = dict(x402_cdp_status.snapshot())
+    return x402_cdp_status.snapshot()
+
+
+@router.get("/v1/admin/compliance")
+def v1_admin_compliance(x_admin_token: str | None = Header(default=None, alias="X-Admin-Token")):
+    """OFAC list and geoblock database status. No addresses and no secrets."""
+    err = _require_admin(x_admin_token)
+    if err:
+        return err
+    body = {"ok": True, "version": config.APP_VERSION}
     body.update(ofac_status())
     body.update(geoblock_status())
     return body

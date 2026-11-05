@@ -276,7 +276,48 @@ Set the payee with the account key before the proxy creates challenges. There is
 
 ## Hosted sites (closed beta)
 
-Core stores the site. `satsgate-gate` (version 0.14.0, in [`gate/`](./gate/README.md)) serves `https://gate.satsgate.org/<slug>/<path>` after an operator approves the site. The public hostname stays commented out in the Caddyfile until DNS exists. Lightning goes to the merchant's Lightning Address. USDC goes to the merchant's verified address on the one network that site is in: Base Sepolia in test mode, Base when the site is live and the operator has enabled CDP. One credit is one successful delivery. The gate takes the credit and the use only after the origin returns 2xx, and for USDC only after settle. A failed origin takes neither. The buyer retries the same macaroon or signature. Lightning sats still reach the merchant when the invoice is paid, before the origin runs. Satsgate does not refund buyers. The gate does not hold the sats or the USDC.
+Core stores the site. `satsgate-gate` (version 0.15.0, in [`gate/`](./gate/README.md)) charges at `https://gate.satsgate.org/<slug>/<path>` and returns a signed receipt. It does not call, relay, or serve the origin. The buyer repeats the request at `redeem_url` with the header `Satsgate-Receipt`. Core is 0.18.0. The self-hosted proxy is 0.14.0. satsgate-mcp is 0.12.0 and follows that receipt when the host is allowed. The connect page stays 0.17.0. Lightning goes to the merchant's Lightning Address. USDC goes to the merchant's verified address on the one network that site is in: Base Sepolia in test mode, Base when the site is live and the operator has enabled CDP. On this gate, one credit is taken when the receipt is issued. Test mode stores the receipt and does not take a credit. Self-hosted `/v1/paywall/*` still debits on settle and still forwards from the proxy. Satsgate does not hold the sats or the USDC and does not refund buyers.
+
+```bash
+curl -sI https://gate.satsgate.org/my-shop/blog/post
+# 402, Link: <https://origin.example/blog/post>; rel="satsgate-redeem"
+# JSON includes delivery=receipt, redeem_url, receipt_header, seller_host
+
+curl -sD - -o /dev/null -X POST https://gate.satsgate.org/my-shop/blog/post \
+  -H 'Authorization: L402 <macaroon>:<preimage>'
+# 200, Satsgate-Receipt: <compact JWT>, body.receipt is the same token
+```
+
+The receipt payload (the middle segment) looks like this. `kid` in the header is the first 16 hex characters of SHA-256 of the site secret. `amt` is `{"sats": 21}` or `{"usd_atomic": 10000, "network": "eip155:8453"}`.
+
+```json
+{
+  "iss": "https://gate.satsgate.org",
+  "aud": "my-shop",
+  "sub": "/blog/post",
+  "jti": "rcp_abcdefghijklmnopqrstuv",
+  "iat": 1700000000,
+  "exp": 1700086400,
+  "res": "gate:my-shop:/blog/post",
+  "rail": "lightning",
+  "amt": {"sats": 21},
+  "uses": 1,
+  "ph": "<payment hash, or the x402 nonce without 0x>"
+}
+```
+
+A seller checks it with the SDK. The secret stays on the seller.
+
+```python
+from satsgate_sdk.receipts import SatsgateReceiptMiddleware, SqliteReceiptStore
+
+app = SatsgateReceiptMiddleware(
+    app,
+    site="my-shop",
+    secret=os.environ["SATSGATE_SITE_SECRET"],
+    store=SqliteReceiptStore("/data/receipts.sqlite3"),
+)
+```
 
 ```bash
 curl -s -X POST https://api.satsgate.org/v1/sites \
@@ -285,29 +326,38 @@ curl -s -X POST https://api.satsgate.org/v1/sites \
   -d '{"slug":"my-shop","display_name":"My Shop","origin_url":"https://origin.example","listed":false}'
 ```
 
-The response includes `origin_secret` once. It is the HMAC key the origin uses to check `X-Satsgate-Signature`. Store it on the origin. Core keeps ciphertext in sqlite, encrypted with `SATSGATE_SITE_SECRET_KEY` (`openssl rand -hex 32`). A hash would not be enough, because the gate has to sign. The public API does not return the secret again. `POST /v1/sites/{slug}/rotate-secret` replaces it. The gate receives the current secret from an internal core route that requires `SATSGATE_GATE_TOKEN`.
+The response includes `origin_secret` once. It is the HMAC key the seller uses to verify `Satsgate-Receipt`. Store it on the origin. Core keeps ciphertext in sqlite, encrypted with `SATSGATE_SITE_SECRET_KEY` (`openssl rand -hex 32`). The public API does not return the secret again. `POST /v1/sites/{slug}/rotate-secret` replaces it and clears `origin_verified_at`. The gate does not receive the secret. A receipt the buyer already paid for is rebuilt with the current secret when they present the same payment.
 
-`origin_url` must be https, with no userinfo, query, or fragment. Hostnames are resolved at registration. Private, loopback, link-local, CGNAT (`100.64.0.0/10`), and metadata addresses are rejected, including when any DNS answer is in those ranges. The gate repeats that check on every forward and connects to the public address from that lookup, so a name that later points at a private address (DNS rebinding) is not followed. Redirects are not followed.
+`origin_url` must be https, with no userinfo, query, or fragment. Hostnames are resolved at registration and again on `POST /v1/sites/{slug}/verify-origin`. Private, loopback, link-local, CGNAT (`100.64.0.0/10`), and metadata addresses are rejected, including when any DNS answer is in those ranges. The hosted gate does not connect to the origin.
 
-Routes use the same usage policy as 0.6.0: `price_sats`, optional `max_uses`, optional `access_seconds`. Omit both policy fields and the grant stays open, as a challenge does today. Slugs are lowercase `[a-z0-9-]`, 3 to 40 characters, and a reserved-word list blocks names such as `admin` and `api`.
+Routes take `price_sats` or a USD price, optional `max_uses`, and optional `access_seconds`. On the hosted gate a missing `max_uses` is one use and a missing `access_seconds` is `SATSGATE_RECEIPT_SECONDS`. A self-hosted paywall challenge still stays open when both policy fields are omitted. Slugs are lowercase `[a-z0-9-]`, 3 to 40 characters, and a reserved-word list blocks names such as `admin` and `api`.
 
 New sites start `pending`. `GET /v1/sites` lists only `approved` sites with `listed: true`. It returns `name`, `slug`, `url` (the gate URL), `description`, and `routes` (`price_currency`, `price_sats` or `price_usd_atomic`, `max_uses`, `access_seconds`). It does not return the owner, the origin, the secret, or an EVM `payTo`. `list_sites` in satsgate-mcp reads that directory by default. `SATSGATE_MCP_REGISTRY` can still point at a local file or another URL instead. Approve and disable with `X-Admin-Token` when `SATSGATE_ADMIN_TOKEN` is set. Without that env var those admin routes answer 404.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SATSGATE_SITE_SECRET_KEY` | unset | 64 hex characters. Required to create or rotate a site secret. Unset does not stop the process. |
-| `SATSGATE_SITES_AUTO_APPROVE` | off | `1` marks new sites approved. Leave it off for the closed beta. |
+| `SATSGATE_SITES_AUTO_APPROVE` | off | `1` approves a new site only after a successful origin check, acceptance of the current `SATSGATE_TERMS_VERSION`, and an account that is not suspended. Empty terms with this switch on refuses to boot. Leave it off. |
+| `SATSGATE_RECEIPT_SECONDS` | 86400 | Receipt lifetime when the route sets no `access_seconds`. Clamped to 60–86400 and to the paywall access cap. |
+| `SATSGATE_TERMS_VERSION` | empty | Token the account must have accepted. Empty until the terms are published. |
+| `SATSGATE_TERMS_URL` | empty | https page linked from the 402 when set. |
+| `SATSGATE_ABUSE_CONTACT` | empty | Bare email. Shown on `GET /` of the gate when set. |
+| `SATSGATE_GEOBLOCK_COUNTRIES` | empty | ISO codes refused on credit-pack quotes. Empty skips the lookup. |
+| `SATSGATE_GEOIP_DB` | `/data/geoip/dbip-country-lite.mmdb` | DB-IP Country Lite. Required only when the country list is set. |
+| `SATSGATE_OFAC_EVM_FILE` | `/data/ofac/ofac_evm.txt` | Local EVM addresses from the OFAC SDN list. Missing file fails open. |
 | `SATSGATE_SITES_MAX_PER_ACCOUNT` | 3 | Sites per account, including disabled ones. |
 | `SATSGATE_SITES_MAX_ROUTES` | 20 | Routes per site. |
 | `SATSGATE_GATE_PUBLIC_BASE` | `https://gate.satsgate.org` | https origin used in public `url` values. No path. |
 | `SATSGATE_GATE_TOKEN` | unset | Shared with the gate container. Unset means `/internal/gate/*` is 404. |
 | `SATSGATE_GATE_PEERS` | empty (Compose sets `172.28.0.4`) | When set, only that TCP peer may present the gate token. |
 
-Restart to serve 0.13.0. Copy `satsgate.sqlite3` before you restart. The 0.12.0 startup adds columns and rebuilds `site_routes` (see below). 0.13.0 does not add another table. Current API keys, credits, and Lightning challenges keep working if you do not set the new variables. Set `SATSGATE_SITE_SECRET_KEY` before the first site is created, and keep that value. Losing it makes stored secrets unreadable. Rotation still works and issues a new secret. Leave `SATSGATE_GATE_TOKEN` unset until the gate container is deployed. The public API host rejects `/internal/*` in Caddy either way.
+Current deploy notes are at the top of `CHANGELOG.md` (core 0.18.0 and gate 0.15.0 together). The 0.13.0 notes follow. Copy `satsgate.sqlite3` before you restart. Restart to serve 0.13.0. The 0.12.0 startup adds columns and rebuilds `site_routes` (see below). 0.13.0 does not add another table. Current API keys, credits, and Lightning challenges keep working if you do not set the new variables. Set `SATSGATE_SITE_SECRET_KEY` before the first site is created, and keep that value. Losing it makes stored secrets unreadable. Rotation still works and issues a new secret. Leave `SATSGATE_GATE_TOKEN` unset until the gate container is deployed. The public API host rejects `/internal/*` in Caddy either way.
 
 ### x402 on Base Sepolia (0.12.0)
 
-A site can take USDC on Base Sepolia as well as Lightning. x402 is off until the merchant turns it on. The hosted gate 0.12.0 puts both enabled rails on one 402. The self-hosted proxy is still Lightning only. Core builds the `PAYMENT-REQUIRED` document, checks a `PAYMENT-SIGNATURE`, and asks the public facilitator to verify and settle. The gate does not call the facilitator and does not hold a key. Satsgate never signs or broadcasts a transaction. On x402, one merchant credit is charged only after the origin returns 2xx and the facilitator settles. On the hosted gate, Lightning does the same: the credit is taken only after the origin returns 2xx. Proxy 0.12.0 and later take the Lightning credit only after the origin returns 2xx, the same as the gate. The merchant pays a Satsgate credit only for a successful delivery. Buyer sats go to the merchant's own node when the invoice is paid, before the origin runs. Any remedy for a failed origin is between the buyer and the merchant. Satsgate does not custody those sats and does not refund buyers.
+The rest of this subsection describes gate 0.12.0. Current hosted-gate behaviour is the receipt model above. The self-hosted proxy is no longer Lightning only.
+
+A site can take USDC on Base Sepolia as well as Lightning. x402 is off until the merchant turns it on. The hosted gate 0.12.0 puts both enabled rails on one 402. At that version the self-hosted proxy was still Lightning only. Core builds the `PAYMENT-REQUIRED` document, checks a `PAYMENT-SIGNATURE`, and asks the public facilitator to verify and settle. The gate does not call the facilitator and does not hold a key. Satsgate never signs or broadcasts a transaction. On x402, one merchant credit is charged only after the origin returns 2xx and the facilitator settles. On the hosted gate, Lightning does the same: the credit is taken only after the origin returns 2xx. Proxy 0.12.0 and later take the Lightning credit only after the origin returns 2xx, the same as the gate. The merchant pays a Satsgate credit only for a successful delivery. Buyer sats go to the merchant's own node when the invoice is paid, before the origin runs. Any remedy for a failed origin is between the buyer and the merchant. Satsgate does not custody those sats and does not refund buyers.
 
 The account key sets the receiving address. `POST /v1/client/payee/evm/challenge` with `{"address":"0x..."}` returns a message. The merchant signs that exact text (EIP-191, `personal_sign`) and posts `{"address","signature"}` to `POST /v1/client/payee/evm`. A wrong signature does not replace a stored address. `PATCH /v1/sites/{slug}` with `{"rail_x402": true}` is account-key only and requires that verified address. `{"rail_lightning": false, "rail_x402": false}` is rejected.
 
@@ -430,11 +480,11 @@ Startup adds columns. It does not add a table. Copy `satsgate.sqlite3` before re
 
 ## No-code proxy
 
-`satsgate-proxy` (version 0.13.0, in [`proxy/`](./proxy/README.md)) sits in front of an HTTP API you already run. Buyers talk to the proxy. The proxy calls this core with a restricted `sgr_` key. The origin does not implement L402. It checks an HMAC instead.
+`satsgate-proxy` (version 0.14.0, in [`proxy/`](./proxy/README.md)) sits in front of an HTTP API you already run. The default `mode: paywall` is unchanged: buyers talk to the proxy, the proxy calls this core with a restricted `sgr_` key, and the origin checks an HMAC. `mode: receipt` does not call core and does not need an `sgr_` key. The buyer pays the hosted gate, then calls the proxy with `Satsgate-Receipt`. The proxy checks the receipt and forwards a 2xx to the origin with the same HMAC.
 
 An unpaid request is **402** with `WWW-Authenticate: L402 macaroon="...", invoice="..."` (macaroon before invoice, standard base64), which lnget and Alby `fetch402` already parse. The JSON body carries `amount_sats`, `payment_hash`, `invoice_expires_at`, and a hint for wallets that do not return a preimage. A route with `x402: true` adds `PAYMENT-REQUIRED` on that same 402. `Authorization: L402 <macaroon>:<preimage>` confirms the payment. `Authorization: L402 <macaroon>` polls status. The credit is taken after the origin returns 2xx. Pending stays on that invoice (`402 payment_pending`, `Retry-After`). A used, expired, or wrong-route token is a fresh 402, not 401.
 
-The self-hosted proxy is 0.13.0. `GET /healthz` on the proxy reports `0.13.0`. Core health is `0.17.0`. The proxy confirms payment, calls the origin, and debits only after a 2xx, on Lightning and on x402. A failed origin reports no debit. The same `PAYMENT-SIGNATURE` can be retried after that failure. Set `x402: true` on a route, and `server.public_base` to the URL buyers pay, to offer USDC as well. `x402: true` without `x402_mode` is test (Base Sepolia). `x402_mode: live` is Base, and only while the operator switch is on. Try on Base Sepolia with your agent first, then switch the site to live. Startup logs `key fp` and a SHA-256 fingerprint of the restricted key, not any part of the key. An x402 settle through this proxy records that key's id on the ledger debit. The proxy does not sell credit packs. Top up on the core, with Lightning or with the USDC pack route.
+The self-hosted proxy is 0.14.0. `GET /healthz` on the proxy reports `0.14.0`. Core health is `0.18.0`. In `mode: paywall` the proxy confirms payment, calls the origin, and debits only after a 2xx, on Lightning and on x402. A failed origin reports no debit. The same `PAYMENT-SIGNATURE` can be retried after that failure. Set `x402: true` on a route, and `server.public_base` to the URL buyers pay, to offer USDC as well. `x402: true` without `x402_mode` is test (Base Sepolia). `x402_mode: live` is Base, and only while the operator switch is on. Try on Base Sepolia with your agent first, then switch the site to live. Startup logs `key fp` and a SHA-256 fingerprint of the restricted key, not any part of the key. An x402 settle through this proxy records that key's id on the ledger debit. The proxy does not sell credit packs. Top up on the core, with Lightning or with the USDC pack route.
 
 Config is YAML: upstream base URL, routes (`per_request`, `uses:N`, `pass:<seconds>`, scope `route` or `site`), free paths, body limits, and an origin secret from the environment. A `per_request` price below about 10 times the plan's sats-per-credit logs a warning at startup. The trial plan is about 5 sats per credit, so that line is 50 sats. Cheap calls should be bundles or passes.
 

@@ -6,6 +6,7 @@
   - https://github.com/Mike-io-hash/satsgate/issues
 
 - For security issues: see `SECURITY.md`
+- For abuse on the hosted gate: the address in `SATSGATE_ABUSE_CONTACT` when the operator has set one. Do not send API keys, receipts, macaroons, preimages, or payment signatures.
 
 ## What to include
 

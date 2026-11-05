@@ -167,7 +167,7 @@ def test_derived_rail_locks_and_a_stale_rate_keeps_the_main_price(tmp_path, monk
         verified = _gate(
             http,
             "POST",
-            "/internal/gate/x402/verify",
+            "/internal/gate/x402/receipt",
             json={"slug": "my-shop", "path": "/blog/post", "payment_signature": encoded},
         )
         assert verified.status_code == 200, verified.text

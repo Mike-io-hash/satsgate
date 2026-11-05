@@ -10,7 +10,6 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import httpx
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -22,6 +21,7 @@ from satsgate_gate.client_ip import buyer_ip_for_core
 from satsgate_gate.config import Settings, load_settings
 from satsgate_gate.core_client import (
     CoreResult,
+    core_http_client,
     create_challenge,
     fetch_site,
     fetch_status,
@@ -205,7 +205,7 @@ def _rate_limited(request: Request, slug: str, buyer_ip: str | None, *, test_mod
 
 async def _load_site(request: Request, slug: str) -> CachedSite | JSONResponse:
     settings: Settings = request.app.state.settings
-    client: httpx.AsyncClient = request.app.state.core_client
+    client = request.app.state.core_client
     cache: SiteCache = request.app.state.cache
     state = await fetch_status(client, settings, slug)
     if state == "missing":
@@ -306,7 +306,7 @@ async def handle(request: Request) -> Response:
     payment_signature = _payment_signature(request)
     if authorization is not None and payment_signature is not None:
         return _json(400, "one_rail_only")
-    client: httpx.AsyncClient = request.app.state.core_client
+    client = request.app.state.core_client
     paid: CoreResult | None = None
     if payment_signature is not None:
         if (
@@ -350,12 +350,7 @@ async def _lifespan(app: Starlette) -> AsyncIterator[None]:
         log.warning("SATSGATE_GATE_TOKEN is unset; site requests cannot be charged")
     owns_core = not hasattr(app.state, "core_client")
     if owns_core:
-        app.state.core_client = httpx.AsyncClient(
-            base_url=settings.core_base_url,
-            timeout=httpx.Timeout(settings.core_timeout),
-            follow_redirects=False,
-            trust_env=False,
-        )
+        app.state.core_client = core_http_client(settings)
     try:
         yield
     finally:

@@ -121,7 +121,7 @@ def test_internal_routes_are_hidden_without_a_token(tmp_path, monkeypatch):
     module = _load_app(tmp_path, SATSGATE_GATE_TOKEN="")
     _patch_dns(monkeypatch, module)
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.17.0"
+        assert http.get("/health").json()["version"] == "0.18.0"
         hidden = http.get("/internal/gate/sites/my-shop/status", headers={"X-Satsgate-Gate-Token": _GATE_TOKEN})
         assert hidden.status_code == 404
         assert hidden.json()["error"] == "not_found"
@@ -169,7 +169,7 @@ def test_config_returns_one_secret_and_challenge_uses_the_owner(tmp_path, monkey
         config = _gate(http, "GET", "/internal/gate/sites/my-shop")
         assert config.status_code == 200, config.text
         body = config.json()
-        assert body["origin_secret"] == secret
+        assert "origin_secret" not in body
         assert body["origin_url"] == "https://origin.example"
         assert body["payee_lightning_address"] == "merchant@pay.example"
         assert body["rail_lightning"] is True
