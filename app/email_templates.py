@@ -74,6 +74,17 @@ def render(kind: str, *, client_id: int, params: dict) -> tuple[str, str, str]:
             subject="Satsgate: your Lightning payout address changed",
             rail="Lightning",
         )
+    if kind == "payee_ofac_flagged":
+        shown = params.get("address") or "an address"
+        text = "\n\n".join(
+            [
+                f"Account #{int(client_id)}",
+                f"USDC payouts to {shown} were turned off because that address is on a sanctions list.",
+                "USDC was turned off on your sites.",
+                "If you think this is a mistake, write to the support address. Do not send a private key.",
+            ]
+        )
+        return "Satsgate: a payout address was blocked", text, _html_of(text)
     builders = {
         "alert_email_confirm": _confirm,
         "alert_email_change_requested": _change_requested,

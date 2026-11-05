@@ -3,9 +3,8 @@
 The gate and the core share a docker network. They do not share the sqlite
 file. Sharing the file would give the gate every client row, API-key hash,
 and ledger entry, plus ``SATSGATE_SITE_SECRET_KEY``, which decrypts every
-origin secret. These routes return one approved site (including that site's
-secret) and call the same challenge and unlock functions the public paywall
-uses, on behalf of the site owner.
+origin secret. These routes return one approved site and do not include that
+secret. Core mints the receipt. The gate never sees the origin secret.
 
 ``SATSGATE_GATE_TOKEN`` is a different secret from the admin token. The admin
 token can approve a site. This token cannot. When the gate token is unset the
@@ -140,23 +139,13 @@ def internal_site_status(slug: str, request: Request):
 
 @router.get("/internal/gate/sites/{slug}")
 def internal_site_config(slug: str, request: Request):
-    """Approved site, routes, and that site's decrypted origin secret."""
+    """Approved site and routes. The origin secret stays in core."""
     denied = _authorized(request)
     if denied is not None:
         return denied
     cleaned = _clean_slug(slug)
     site = _approved(cleaned) if cleaned is not None else None
     if site is None:
-        return _not_found()
-    try:
-        secret = db_sites.load_origin_secret(config.DB_PATH, site_id=int(site["id"]))
-    except ValueError as exc:
-        if str(exc) == "site_secret_key_unconfigured":
-            return JSONResponse(
-                status_code=503,
-                content={"ok": False, "error": "site_secret_key_unconfigured"},
-                headers=_NO_STORE,
-            )
         return _not_found()
     client = _owner(site)
     payee = None
@@ -176,10 +165,10 @@ def internal_site_config(slug: str, request: Request):
             "slug": site["slug"],
             "client_id": int(site["client_id"]),
             "origin_url": site["origin_url"],
-            "origin_secret": secret,
             "payee_lightning_address": payee,
             "rail_lightning": bool(int(site.get("rail_lightning", 1))),
             "rail_x402": bool(int(site.get("rail_x402", 0))),
+            "x402_mode": site.get("x402_mode") or "",
             "routes": routes,
         },
         headers=_NO_STORE,
@@ -307,6 +296,7 @@ def internal_challenge(
             buyer_ip_hash=buyer_hash,
             max_uses=route["max_uses"],
             access_seconds=route["access_seconds"],
+            description=_receipt_description(site, path, plan),
         )
         response = JSONResponse(content=merged, headers=_NO_STORE)
         if merged.get("payment_required"):
@@ -324,6 +314,7 @@ def internal_challenge(
             max_uses=route["max_uses"],
             access_seconds=route["access_seconds"],
             buyer_ip_hash=buyer_hash,
+            description=_receipt_description(site, path, plan),
         )
     except core.db.ChallengeLimit as exc:
         response = core._challenge_limited(exc)
@@ -332,6 +323,12 @@ def internal_challenge(
     response = JSONResponse(content=body_out, headers=_NO_STORE)
     response.headers["PAYMENT-REQUIRED"] = body_out["payment_required"]
     return response
+
+
+def _receipt_description(site: dict, path: str, plan: dict) -> str:
+    from .gate_receipts import resource_description
+
+    return resource_description(site["origin_url"], path, network=plan.get("x402_network"))
 
 
 def _lock_lightning_offer(
@@ -345,6 +342,7 @@ def _lock_lightning_offer(
     buyer_ip_hash: str | None,
     max_uses: int | None,
     access_seconds: int | None,
+    description: str | None = None,
 ) -> dict:
     """Keep the Lightning body. Attach the locked x402 quote when that rail was offered."""
     from . import db_x402
@@ -368,7 +366,9 @@ def _lock_lightning_offer(
         and offer.get("requirements")
     )
     if body.get("reused") and quote_live:
-        view = x402_service.x402_view(offer, resource_url=resource_url, reused=True, resource=resource)
+        view = x402_service.x402_view(
+            offer, resource_url=resource_url, reused=True, resource=resource, description=description
+        )
         merged = dict(body)
         merged.update(view)
         merged["rail"] = "lightning"
@@ -432,6 +432,7 @@ def _lock_lightning_offer(
             resource_url=resource_url,
             reused=bool(body.get("reused")),
             resource=resource,
+            description=description,
         )
         merged.update(view)
         merged["rail"] = "lightning"
@@ -555,47 +556,41 @@ def internal_status(
     )
 
 
-class GateChargeIn(BaseModel):
+class GateReceiptIn(BaseModel):
     slug: str = Field(min_length=1, max_length=80)
     path: str = Field(min_length=1, max_length=200)
-    payment_hash: str = Field(min_length=64, max_length=64)
+    method: str = Field(default="GET", min_length=1, max_length=16)
+    authorization: str = Field(min_length=1, max_length=8000)
 
 
-@router.post("/internal/gate/charge")
-def internal_charge(
-    body: GateChargeIn,
-    request: Request,
-    authorization: str | None = Header(default=None),
-):
-    """Debit after the origin returned 2xx. Confirm does not call this."""
-    from . import main as core
-
-    normalized = core._payment_hash_or_none(body.payment_hash)
-    if normalized is None:
-        return JSONResponse(
-            status_code=400,
-            content={"ok": False, "error": "invalid_payment_hash"},
-            headers=_NO_STORE,
-        )
-    return _unlock(
-        request=request,
-        slug=body.slug,
-        path=body.path,
-        authorization=authorization,
-        payment_hash=normalized,
-        poll=False,
-        consume=False,
-        mode="deliver",
-    )
-
-
-class X402PaymentIn(BaseModel):
+class X402ReceiptIn(BaseModel):
     slug: str = Field(min_length=1, max_length=80)
     path: str = Field(min_length=1, max_length=200)
+    method: str = Field(default="GET", min_length=1, max_length=16)
     payment_signature: str = Field(min_length=1, max_length=12000)
 
 
-def _x402_call(request: Request, body: X402PaymentIn, *, settle: bool):
+def _balance_error(exc: ValueError) -> JSONResponse:
+    if str(exc) == "site_secret_key_unconfigured":
+        return JSONResponse(
+            status_code=503,
+            content={"ok": False, "error": "site_secret_key_unconfigured"},
+            headers=_NO_STORE,
+        )
+    return JSONResponse(
+        status_code=402,
+        content={
+            "ok": False,
+            "error": str(exc),
+            "hint": "Top up payment verifications (credits): GET /v1/plans then /v1/topup/{plan_id}",
+        },
+        headers=_NO_STORE,
+    )
+
+
+@router.post("/internal/gate/receipt")
+def internal_receipt(body: GateReceiptIn, request: Request):
+    """Confirm Lightning, debit one credit, and mint a receipt. Pending stays pending."""
     denied = _authorized(request)
     if denied is not None:
         return denied
@@ -608,56 +603,152 @@ def _x402_call(request: Request, body: X402PaymentIn, *, settle: bool):
     client = _owner(site) if site is not None and route is not None else None
     if site is None or route is None or client is None:
         return _not_found()
-    from . import x402
+    from . import db as core_db
+    from . import main as core
     from . import x402_service
 
-    if not bool(int(site.get("rail_x402", 0))):
+    if core_db.client_is_suspended(config.DB_PATH, client_id=client.id):
+        return JSONResponse(status_code=403, content={"ok": False, "error": "account_suspended"}, headers=_NO_STORE)
+    if not bool(int(site.get("rail_lightning", 1))):
         return JSONResponse(status_code=400, content={"ok": False, "error": "rail_unavailable"}, headers=_NO_STORE)
     try:
-        if settle:
-            result = x402_service.settle_payment(
+        issued = core._unlock_paywall(
+            authorization=body.authorization,
+            expected_resource=gate_resource(slug, path),
+            cost_credits=x402_service._COST,
+            client=client,
+            poll=False,
+            api_key_id=None,
+            consume=False,
+            mode="receipt",
+            receipt_site=site,
+            receipt_route=route,
+        )
+    except core.L402Error as exc:
+        response = core._paywall_auth_error(exc, expected_resource=gate_resource(slug, path))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    except ValueError as exc:
+        return _balance_error(exc)
+    return _json(issued)
+
+
+@router.post("/internal/gate/x402/receipt")
+def internal_x402_receipt(body: X402ReceiptIn, request: Request):
+    """Verify, settle, and mint a receipt. Test mode does not debit a credit."""
+    denied = _authorized(request)
+    if denied is not None:
+        return denied
+    slug = _clean_slug(body.slug)
+    path = _clean_path(body.path)
+    if slug is None or path is None:
+        return _not_found()
+    site = _approved(slug)
+    route = _route(site, path) if site is not None else None
+    client = _owner(site) if site is not None and route is not None else None
+    if site is None or route is None or client is None:
+        return _not_found()
+    from . import db as core_db
+    from . import db_receipts
+    from . import db_x402
+    from . import x402
+    from . import x402_service
+    from .gate_receipts import ReceiptIssueError, public_body
+    from . import receipts as receipt_mod
+
+    if core_db.client_is_suspended(config.DB_PATH, client_id=client.id):
+        return JSONResponse(status_code=403, content={"ok": False, "error": "account_suspended"}, headers=_NO_STORE)
+    if db_x402.payee_is_flagged(config.DB_PATH, client_id=client.id):
+        return JSONResponse(status_code=403, content={"ok": False, "error": "payee_not_allowed"}, headers=_NO_STORE)
+    if not bool(int(site.get("rail_x402", 0))):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "rail_unavailable"}, headers=_NO_STORE)
+    resource = gate_resource(slug, path)
+    test_mode = str(site.get("x402_mode") or "") == "test"
+    try:
+        _payload, offer, fields = x402_service.peek_authorization(
+            client_id=client.id,
+            slug=slug,
+            path=path,
+            resource=resource,
+            encoded=body.payment_signature,
+        )
+        payment_key = db_receipts.x402_key(fields["nonce"])
+        now = int(time.time())
+        try:
+            secret = db_sites.load_origin_secret(config.DB_PATH, site_id=int(site["id"]))
+        except ValueError as exc:
+            return _balance_error(exc)
+        iat, exp = now, now + receipt_mod.receipt_lifetime(
+            route.get("access_seconds"),
+            default_seconds=config.RECEIPT_SECONDS,
+            cap_seconds=config.PAYWALL_ACCESS_CAP_SECONDS,
+        )
+        pending = {
+            "rid": receipt_mod.new_receipt_id(),
+            "payment_hash": payment_key,
+            "site_id": int(site["id"]),
+            "client_id": client.id,
+            "path": route["path"],
+            "rail": "x402",
+            "amount_sats": None,
+            "amount_usd_atomic": int(offer["amount_usd_atomic"]),
+            "network": fields["network"],
+            "uses": 1 if route.get("max_uses") is None else int(route["max_uses"]),
+            "iat": iat,
+            "exp": exp,
+            "kid": receipt_mod.kid_for(secret),
+            "charged": 0 if test_mode else 1,
+        }
+
+        def _insert(conn) -> None:
+            db_receipts.insert_receipt(conn, pending)
+
+        try:
+            x402_service.verify_payment(
                 client_id=client.id,
                 slug=slug,
                 path=path,
-                resource=gate_resource(slug, path),
+                resource=resource,
                 encoded=body.payment_signature,
+                require_credit=not test_mode,
             )
-        else:
-            result = x402_service.verify_payment(
-                client_id=client.id,
-                slug=slug,
-                path=path,
-                resource=gate_resource(slug, path),
-                encoded=body.payment_signature,
-            )
+        except x402.X402Error as exc:
+            if exc.code != "x402_replay":
+                raise
+        settled = x402_service.settle_payment(
+            client_id=client.id,
+            slug=slug,
+            path=path,
+            resource=resource,
+            encoded=body.payment_signature,
+            require_credit=not test_mode,
+            cost=0 if test_mode else None,
+            before_commit=_insert,
+        )
+        stored = db_receipts.get_receipt(config.DB_PATH, payment_key)
+        if stored is None:
+            raise ReceiptIssueError("paywall_unavailable", 502)
+        if now >= int(stored["exp"]):
+            raise ReceiptIssueError("token_expired", 401, payment_hash=db_receipts.public_ph(payment_key))
+        secret = db_sites.load_origin_secret(config.DB_PATH, site_id=int(site["id"]))
+        issued = public_body(stored, secret=secret, aud=slug)
+        response_header = settled.get("payment_response") if isinstance(settled, dict) else None
+        if isinstance(response_header, str) and response_header:
+            issued["payment_response"] = response_header
     except x402.X402Error as exc:
         content = {"ok": False, "error": exc.code}
         if exc.reason:
             content["reason"] = exc.reason
         return JSONResponse(status_code=exc.status, content=content, headers=_NO_STORE)
-    except ValueError as exc:
+    except ReceiptIssueError as exc:
         return JSONResponse(
-            status_code=402,
-            content={
-                "ok": False,
-                "error": str(exc),
-                "hint": "Top up payment verifications (credits): GET /v1/plans then /v1/topup/{plan_id}",
-            },
+            status_code=exc.status,
+            content={"ok": False, "error": exc.code, **exc.extra},
             headers=_NO_STORE,
         )
-    response = JSONResponse(content=result, headers=_NO_STORE)
-    if result.get("payment_response"):
-        response.headers["PAYMENT-RESPONSE"] = result["payment_response"]
+    except ValueError as exc:
+        return _balance_error(exc)
+    response = JSONResponse(content=issued, headers=_NO_STORE)
+    if issued.get("payment_response"):
+        response.headers["PAYMENT-RESPONSE"] = issued["payment_response"]
     return response
-
-
-@router.post("/internal/gate/x402/verify")
-def internal_x402_verify(body: X402PaymentIn, request: Request):
-    """Facilitator /verify. serve=true means the caller may call the origin. No credit is taken."""
-    return _x402_call(request, body, settle=False)
-
-
-@router.post("/internal/gate/x402/settle")
-def internal_x402_settle(body: X402PaymentIn, request: Request):
-    """Call only after the origin returned 2xx. Facilitator /settle, then one credit."""
-    return _x402_call(request, body, settle=True)

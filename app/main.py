@@ -2602,6 +2602,8 @@ def _unlock_paywall(
     api_key_id: int | None = None,
     consume: bool = False,
     mode: str = "settle",
+    receipt_site: dict | None = None,
+    receipt_route: dict | None = None,
 ) -> JSONResponse | dict:
     macaroon_b64, preimage_hex = parse_authorization_header(authorization)
     peeked = peek_bindings(macaroon_b64)
@@ -2640,6 +2642,18 @@ def _unlock_paywall(
         raise L402Error("invoice mismatch")
     if payee_binding(row["payee"]) != payload["payee_h"]:
         raise L402Error("payee mismatch")
+
+    if mode == "receipt" and receipt_site is not None:
+        from . import db_sites
+        from .gate_receipts import ReceiptIssueError, existing_body
+
+        try:
+            secret = db_sites.load_origin_secret(config.DB_PATH, site_id=int(receipt_site["id"]))
+            early = existing_body(token_hash, secret=secret, aud=receipt_site["slug"], now=int(time.time()))
+        except ReceiptIssueError as exc:
+            return JSONResponse(status_code=exc.status, content={"ok": False, "error": exc.code, **exc.extra})
+        if early is not None:
+            return early
 
     stored_expiry = int(row["expires_at"]) if row["expires_at"] is not None else None
     now = int(time.time())
@@ -2686,6 +2700,22 @@ def _unlock_paywall(
                 return _paywall_pending(payment_hash=token_hash, poll=poll)
 
     try:
+        if mode == "receipt":
+            from .gate_receipts import ReceiptIssueError, mint_lightning
+
+            if receipt_site is None or receipt_route is None:
+                raise ReceiptIssueError("paywall_unavailable", 502)
+            try:
+                return mint_lightning(
+                    client_id=client.id,
+                    site=receipt_site,
+                    route=receipt_route,
+                    payment_hash=token_hash,
+                    amount_sats=int(row["amount_sats"]),
+                    now=now,
+                )
+            except ReceiptIssueError as exc:
+                return JSONResponse(status_code=exc.status, content={"ok": False, "error": exc.code, **exc.extra})
         if mode == "confirm":
             spend = db_verify.confirm_payment(
                 config.DB_PATH,

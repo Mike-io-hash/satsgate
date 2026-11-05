@@ -1,4 +1,9 @@
-"""Verify, then the caller serves, then settle. Credits move only after settle."""
+"""Verify, then the caller serves, then settle.
+
+A self-hosted proxy settles only after the origin returned 2xx. The hosted
+gate settles when it issues the receipt. An x402 test-mode gate receipt
+records the settlement and does not debit a credit.
+"""
 
 from __future__ import annotations
 
@@ -58,12 +63,23 @@ def _rate_view(offer: dict) -> dict | None:
     }
 
 
-def x402_view(offer: dict, *, resource_url: str, reused: bool, resource: str) -> dict:
+def x402_view(
+    offer: dict,
+    *,
+    resource_url: str,
+    reused: bool,
+    resource: str,
+    description: str | None = None,
+) -> dict:
     offer["resource_url"] = resource_url
     amount = str(int(offer["amount_usd_atomic"]))
     network = offer.get("network") or config.X402_NETWORK
     labels = x402.mode_labels(network)
-    document = x402.payment_required_document(resource_url=resource_url, accept=offer["requirements"])
+    document = x402.payment_required_document(
+        resource_url=resource_url,
+        accept=offer["requirements"],
+        description=description,
+    )
     body = {
         "ok": True,
         "rail": "x402",
@@ -133,6 +149,7 @@ def issue_offer(
     access_seconds: int | None,
     buyer_ip_hash: str | None,
     resource_url: str | None = None,
+    description: str | None = None,
 ) -> dict:
     now = int(time.time())
     url = _bound_url(slug, path, resource_url)
@@ -183,7 +200,7 @@ def issue_offer(
         reused = False
     else:
         reused = True
-    return x402_view(existing, resource_url=url, reused=reused, resource=resource)
+    return x402_view(existing, resource_url=url, reused=reused, resource=resource, description=description)
 
 
 def _bind(encoded: str, *, client_id: int, resource: str, resource_url: str) -> tuple[dict, dict, dict]:
@@ -208,6 +225,25 @@ def _bind(encoded: str, *, client_id: int, resource: str, resource_url: str) -> 
     raise x402.X402Error("not_found", status=404)
 
 
+def peek_authorization(
+    *,
+    client_id: int,
+    slug: str,
+    path: str,
+    resource: str,
+    encoded: str,
+    resource_url: str | None = None,
+) -> tuple[dict, dict, dict]:
+    """Bind a signature to its offer. Does not call the facilitator or take a credit."""
+    url = _bound_url(slug, path, resource_url)
+    return _bind(encoded, client_id=client_id, resource=resource, resource_url=url)
+
+
+def _refuse_flagged(client_id: int) -> None:
+    if db_x402.payee_is_flagged(config.DB_PATH, client_id=client_id):
+        raise x402.X402Error("payee_not_allowed", status=403)
+
+
 def _require_credit(client_id: int) -> int:
     credits = db_x402.client_credits(config.DB_PATH, client_id)
     if credits < _COST:
@@ -223,11 +259,14 @@ def verify_payment(
     resource: str,
     encoded: str,
     resource_url: str | None = None,
+    require_credit: bool = True,
 ) -> dict:
     now = int(time.time())
     url = _bound_url(slug, path, resource_url)
+    _refuse_flagged(client_id)
     payload, offer, fields = _bind(encoded, client_id=client_id, resource=resource, resource_url=url)
-    _require_credit(client_id)
+    if require_credit:
+        _require_credit(client_id)
     state = db_x402.insert_pending(
         config.DB_PATH,
         network=fields["network"],
@@ -324,11 +363,22 @@ def settle_payment(
     encoded: str,
     resource_url: str | None = None,
     api_key_id: int | None = None,
+    require_credit: bool = True,
+    cost: int | None = None,
+    before_commit=None,
 ) -> dict:
-    """Called only after the origin returned 2xx. A failed settle does not debit."""
+    """Settle, then debit.
+
+    A self-hosted proxy calls this only after the origin returned 2xx.
+    The hosted gate calls it when the receipt is issued. A failed settle
+    does not debit. ``cost`` 0 records the authorization and does not move
+    a credit. That path is only for an x402 test-mode gate receipt.
+    """
     now = int(time.time())
     url = _bound_url(slug, path, resource_url)
+    _refuse_flagged(client_id)
     payload, offer, fields = _bind(encoded, client_id=client_id, resource=resource, resource_url=url)
+    debit = _COST if cost is None else int(cost)
     row = db_x402.authorization_row(
         config.DB_PATH,
         network=fields["network"],
@@ -351,7 +401,8 @@ def settle_payment(
         raise x402.X402Error("x402_rejected")
     if row["state"] not in {"verified", "settling", "settled"}:
         raise x402.X402Error("x402_in_progress", status=409)
-    _require_credit(client_id)
+    if require_credit:
+        _require_credit(client_id)
     if row["state"] == "settled" and row["tx_hash"]:
         charged = db_x402.mark_settled_and_charge(
             config.DB_PATH,
@@ -364,7 +415,8 @@ def settle_payment(
             resource=resource,
             access_seconds=offer["access_seconds"],
             max_uses=offer["max_uses"],
-            cost=_COST,
+            cost=debit,
+            before_commit=before_commit,
             now=now,
             amount_usd_atomic=int(offer["amount_usd_atomic"]),
             api_key_id=api_key_id,
@@ -462,18 +514,21 @@ def settle_payment(
         resource=resource,
         access_seconds=offer["access_seconds"],
         max_uses=offer["max_uses"],
-        cost=_COST,
+        cost=debit,
         now=now,
         amount_usd_atomic=int(offer["amount_usd_atomic"]),
         api_key_id=api_key_id,
+        before_commit=before_commit,
     )
     return _settled_body(charged, fields["payer"], network=fields["network"])
 
 
 def _replay(row, offer: dict, payer: str, client_id: int) -> dict:
+    from . import db_receipts
+
     tx = row["tx_hash"] or ""
     credits = db_x402.client_credits(config.DB_PATH, client_id)
-    return {
+    body = {
         "ok": True,
         "serve": False,
         "charged": 0,
@@ -487,6 +542,12 @@ def _replay(row, offer: dict, payer: str, client_id: int) -> dict:
         ),
         "offer_id": offer["id"],
     }
+    stored = db_receipts.get_receipt(config.DB_PATH, db_receipts.x402_key(str(row["nonce"])))
+    if stored is not None:
+        body["receipt_stored"] = True
+        body["expires_at"] = int(stored["exp"])
+        body["uses"] = int(stored["uses"])
+    return body
 
 
 def _settled_body(charged: dict, payer: str, *, network: str) -> dict:

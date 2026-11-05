@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 
 from .db import _connect
 
@@ -152,6 +153,7 @@ def settle_and_consume(
     consume: bool,
     access_cap_seconds: int,
     now: int | None = None,
+    before_commit: Callable | None = None,
 ) -> dict:
     """Charge credits once for this payment, then optionally take one use.
 
@@ -308,6 +310,8 @@ def settle_and_consume(
             consumed = True
 
         usage = usage_view(challenge, consumed=consumed and denied is None)
+        if before_commit is not None and denied is None:
+            before_commit(conn)
         conn.execute("COMMIT")
 
     if denied is not None:

@@ -333,8 +333,9 @@ def accept_for(
     }
 
 
-def payment_required_document(*, resource_url: str, accept: dict) -> dict:
-    description = TEST_DESCRIPTION if accept.get("network") == NETWORK_SEPOLIA else ""
+def payment_required_document(*, resource_url: str, accept: dict, description: str | None = None) -> dict:
+    if description is None:
+        description = TEST_DESCRIPTION if accept.get("network") == NETWORK_SEPOLIA else ""
     return {
         "x402Version": 2,
         "resource": {"url": resource_url, "description": description, "mimeType": "application/json"},

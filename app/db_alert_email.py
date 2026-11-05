@@ -273,6 +273,19 @@ def confirm(db_path: str, token: str, *, now: int | None = None) -> dict:
     }
 
 
+def queue_ofac(conn, *, client_id: int, to_email: str, address: str, now: int) -> None:
+    from .email_templates import shorten_evm
+
+    _enqueue(
+        conn,
+        client_id=int(client_id),
+        kind="payee_ofac_flagged",
+        to_email=to_email,
+        params={"address": shorten_evm(address), "at": int(now)},
+        now=int(now),
+    )
+
+
 def queue_payout(
     conn,
     *,
