@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from satsgate_mcp.bolt11 import amount_sats, expires_at
 from satsgate_mcp.x402 import ParsedX402, parse_offered
@@ -46,6 +46,9 @@ class Challenge:
     access_until: int | None = None
     offers_lightning: bool = True
     x402: ParsedX402 | None = None
+    delivery: str = ""
+    redeem_url: str = ""
+    seller_host: str = ""
 
     def summary(self) -> str:
         if not self.offers_lightning:
@@ -55,6 +58,8 @@ class Challenge:
         bits.extend(self._policy_bits())
         if self.x402 is not None:
             bits.append(self.x402.price_sentence())
+        if self.seller_host:
+            bits.append(f"The seller host is {self.seller_host}. Content comes from the seller, not from Satsgate.")
         return " ".join(bits)
 
     def _policy_bits(self) -> list[str]:
@@ -109,6 +114,12 @@ class Challenge:
             "rails": rails,
             "summary": self.summary(),
         }
+        if self.delivery:
+            payload["delivery"] = self.delivery
+        if self.redeem_url:
+            payload["redeem_url"] = self.redeem_url
+        if self.seller_host:
+            payload["seller_host"] = self.seller_host
         if self.offers_lightning:
             payload["amount_sats"] = self.amount_sats
             payload["payment_hash"] = self.payment_hash
