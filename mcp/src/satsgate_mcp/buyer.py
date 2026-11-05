@@ -237,9 +237,19 @@ class Buyer:
             if not resource and row["resource"]:
                 resource = str(row["resource"])
         if token is not None:
-            macaroon = str(token["macaroon"])
+            macaroon = str(token["macaroon"] or "")
             if not resource and token["resource"]:
                 resource = str(token["resource"])
+            if token["receipt"]:
+                return {
+                    "ok": True,
+                    "status": "settled",
+                    "settled": True,
+                    "payment_hash": normalized,
+                    "receipt": token["receipt"],
+                    "redeem_url": token["redeem_url"],
+                    "consume": False,
+                }
         if not macaroon or not resource:
             raise BuyerError(
                 "macaroon_not_stored",
