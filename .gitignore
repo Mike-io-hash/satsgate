@@ -6,3 +6,4 @@ web/connect/dist/
 web/connect/public/config.json
 *.sqlite3
 __pycache__/
+*.egg-info/

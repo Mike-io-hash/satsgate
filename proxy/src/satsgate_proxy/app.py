@@ -303,6 +303,11 @@ async def handle(request: Request) -> Response:
         return body
     request.state.body = body
 
+    if settings.mode == "receipt":
+        from satsgate_proxy.receipt_mode import handle_receipt
+
+        return await handle_receipt(request, settings, method, path)
+
     found = match_request(settings.routes, settings.free_patterns, method, path)
     if found.kind == "not_found":
         return _json(404, "not_found")
@@ -388,4 +393,8 @@ def build_app(settings: Settings, *, transport: httpx.AsyncBaseTransport | None 
         lifespan=lifespan,
     )
     app.state.settings = settings
+    if settings.mode == "receipt":
+        from satsgate_proxy.receipt_mode import open_store
+
+        app.state.receipt_store = open_store(settings.receipt_store)
     return app

@@ -26,7 +26,10 @@ _ROUTE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _HEADER_NAME = re.compile(r"^[!#$%&'*+\-.0-9A-Z^_`a-z|~]+$")
 _METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
 _FORBIDDEN_PROXIES = frozenset({"*", "0.0.0.0/0", "::/0"})
-_TOP_LEVEL = frozenset({"core", "upstream", "origin", "pricing", "server", "limits", "free_paths", "routes"})
+_TOP_LEVEL = frozenset(
+    {"core", "upstream", "origin", "pricing", "server", "limits", "free_paths", "routes", "mode", "receipt"}
+)
+_RECEIPT_KEYS = frozenset({"site", "gate_base", "store", "previous_secrets_env"})
 _CORE_KEYS = frozenset({"base_url", "api_key_env", "timeout_seconds"})
 _UPSTREAM_KEYS = frozenset({"base_url", "timeout_seconds", "inject_headers"})
 _ORIGIN_KEYS = frozenset({"secret_env", "max_skew_seconds"})
@@ -137,6 +140,11 @@ class Settings:
     routes: tuple[Route, ...]
     warnings: tuple[str, ...]
     public_base: str = ""
+    mode: str = "paywall"
+    receipt_site: str = ""
+    receipt_gate_base: str = "https://gate.satsgate.org"
+    receipt_store: str = ""
+    previous_secrets: tuple[str, ...] = ()
 
     def __repr__(self) -> str:
         return (
@@ -481,7 +489,26 @@ def load_settings(path: str | Path) -> Settings:
     limits = _mapping(data.get("limits") or {}, "limits")
     _reject_unknown(limits, _LIMIT_KEYS, "limits")
 
-    api_key = _api_key(_env_name(core.get("api_key_env", "SATSGATE_API_KEY"), "api_key_env"))
+    mode = str(data.get("mode") or "paywall").strip()
+    if mode not in {"paywall", "receipt"}:
+        raise ConfigError("mode must be paywall or receipt")
+    receipt_site = ""
+    receipt_gate_base = "https://gate.satsgate.org"
+    receipt_store = ""
+    previous_secrets: tuple[str, ...] = ()
+    if mode == "receipt":
+        receipt = _mapping(data.get("receipt") or {}, "receipt")
+        _reject_unknown(receipt, _RECEIPT_KEYS, "receipt")
+        receipt_site = _as_str(_require(receipt, "site", "receipt.site"), "receipt.site")
+        if receipt.get("gate_base"):
+            receipt_gate_base = _http_base(receipt["gate_base"], "receipt.gate_base")
+        receipt_store = str(receipt.get("store") or "").strip()
+        if receipt.get("previous_secrets_env"):
+            raw_previous = _env_value(_env_name(receipt["previous_secrets_env"], "previous_secrets_env"))
+            previous_secrets = tuple(part for part in raw_previous.split(",") if part)
+        api_key = ""
+    else:
+        api_key = _api_key(_env_name(core.get("api_key_env", "SATSGATE_API_KEY"), "api_key_env"))
     secret, secret_warning = _origin_secret(_env_name(origin.get("secret_env", "SATSGATE_ORIGIN_SECRET"), "secret_env"))
     inject = _inject_headers(upstream.get("inject_headers"))
     routes = _routes(_require(data, "routes", "routes"))
@@ -507,7 +534,7 @@ def load_settings(path: str | Path) -> Settings:
     for warning in warnings:
         log.warning("%s", warning)
 
-    _redact([api_key, secret, *[value for _name, value in inject]])
+    _redact([api_key, secret, *previous_secrets, *[value for _name, value in inject]])
     return Settings(
         core_base_url=_http_base(_require(core, "base_url", "core.base_url"), "core.base_url"),
         api_key=api_key,
@@ -543,4 +570,9 @@ def load_settings(path: str | Path) -> Settings:
         routes=routes,
         warnings=tuple(warnings),
         public_base=public_base,
+        mode=mode,
+        receipt_site=receipt_site,
+        receipt_gate_base=receipt_gate_base,
+        receipt_store=receipt_store,
+        previous_secrets=previous_secrets,
     )
