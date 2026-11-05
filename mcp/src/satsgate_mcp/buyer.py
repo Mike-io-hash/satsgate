@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import re
@@ -143,6 +144,7 @@ class Buyer:
             if challenge is None:
                 return Presentation(free)
 
+        self._require_redeem_allowed(challenge)
         if not challenge.offers_lightning:
             return self._x402_offer(self._annotate(challenge), mode=way)
         if way == "human":
@@ -260,6 +262,10 @@ class Buyer:
         public["http_status"] = response.status
         public["payment_hash"] = normalized
         public["consume"] = False
+        stored = self.store.token_by_hash(normalized)
+        if stored is not None and "receipt" in stored.keys() and stored["receipt"]:
+            public["receipt"] = stored["receipt"]
+            public["redeem_url"] = stored["redeem_url"]
         if response.status == 401 and body.get("error") == "preimage_required":
             public["detail"] = (
                 "The payee wallet did not advertise LUD-21 verify. "
@@ -475,15 +481,16 @@ class Buyer:
                 x402.get("cap_detail") or x402.get("detail") or "The USDC requirement was not paid."
             )
             return Presentation(annotated)
+        self._require_redeem_allowed(challenge)
         fetched = await self._send(
             challenge.method,
             challenge.url,
             {"PAYMENT-SIGNATURE": signature},
             challenge.request_body if payload is None else payload,
         )
-        return Presentation(self._interpret_signed(fetched, challenge, annotated, signature))
+        return Presentation(await self._interpret_signed(fetched, challenge, annotated, signature))
 
-    def _interpret_signed(
+    async def _interpret_signed(
         self,
         response: "_Raw",
         challenge: Challenge,
@@ -493,6 +500,9 @@ class Buyer:
         x402 = annotated.get("x402") if isinstance(annotated.get("x402"), dict) else {}
         charge = x402.get("charge_atomic") if isinstance(x402, dict) else None
         parsed = _json(response.body)
+        if 200 <= response.status < 300 and self._gate_receipt(challenge.url, parsed):
+            followed = await self._redeem_receipt(parsed, challenge, paid_with="x402")
+            return followed.payload
         if 200 <= response.status < 300:
             if isinstance(charge, int) and not isinstance(charge, bool) and charge > 0:
                 host = urlsplit(challenge.url).hostname or ""
@@ -599,6 +609,10 @@ class Buyer:
         return presented
 
     async def _fetch_with_cached(self, row, body: bytes | None, *, allow_autopay: bool) -> Presentation:
+        receipt = row["receipt"] if "receipt" in row.keys() else None
+        redeem = row["redeem_url"] if "redeem_url" in row.keys() else None
+        if isinstance(receipt, str) and receipt and isinstance(redeem, str) and redeem:
+            return await self._redeem_saved(row, body)
         macaroon = str(row["macaroon"])
         preimage = row["preimage"]
         header = f"L402 {macaroon}"
@@ -641,6 +655,9 @@ class Buyer:
         if response.status == 402 and parsed.get("error") == "payment_pending":
             retry = _retry_after(response, parsed)
             return Presentation(_pending(challenge, retry))
+        if 200 <= response.status < 300 and self._gate_receipt(challenge.url, parsed):
+            self.store.delete_quote(challenge.payment_hash)
+            return await self._redeem_receipt(parsed, challenge, paid_with="lightning")
         if 200 <= response.status < 300:
             remaining = self._remember_token(challenge, preimage)
             self.store.delete_quote(challenge.payment_hash)
@@ -781,11 +798,165 @@ class Buyer:
             view["detail"] = "The response is binary and larger than the inline cap."
         return view
 
+    def _gate_receipt(self, url: str, parsed: dict) -> bool:
+        host = (urlsplit(url).hostname or "").lower()
+        return (
+            host in self.settings.gate_hosts
+            and isinstance(parsed.get("receipt"), str)
+            and bool(parsed.get("receipt"))
+            and isinstance(parsed.get("redeem_url"), str)
+            and bool(parsed.get("redeem_url"))
+        )
+
+    def _require_redeem_allowed(self, challenge: Challenge) -> None:
+        if challenge.delivery != "receipt":
+            return
+        if not challenge.redeem_url:
+            raise BuyerError(
+                "redeem_host_not_allowed",
+                "The 402 named receipt delivery but not a seller URL. Nothing was paid.",
+            )
+        try:
+            validate_url(challenge.redeem_url, self.settings.allowlist)
+        except UrlError as exc:
+            host = challenge.seller_host or (urlsplit(challenge.redeem_url).hostname or "")
+            raise BuyerError(
+                "redeem_host_not_allowed",
+                f"Seller host {host} is not on the allowlist. Nothing was paid.",
+            ) from exc
+
+    async def _redeem_receipt(self, parsed: dict, challenge: Challenge, *, paid_with: str) -> Presentation:
+        token = str(parsed["receipt"])
+        redeem = str(parsed["redeem_url"])
+        try:
+            validate_url(redeem, self.settings.allowlist)
+        except UrlError as exc:
+            raise BuyerError("redeem_host_not_allowed", "The receipt names a seller host that is not allowed.") from exc
+        headers = {"Satsgate-Receipt": token, "Accept": "application/json, */*"}
+        response = None
+        last_error = "network error"
+        for attempt in range(3):
+            try:
+                response = await self._send(challenge.method, redeem, headers, challenge.request_body)
+            except BuyerError as exc:
+                last_error = exc.message
+                response = None
+            if response is not None and response.status < 500:
+                break
+            if response is not None:
+                last_error = f"HTTP {response.status}"
+            if attempt < 2:
+                await asyncio.sleep(0.01)
+        uses = parsed.get("uses")
+        expires = parsed.get("expires_at") if isinstance(parsed.get("expires_at"), int) else None
+        if response is not None and 200 <= response.status < 300:
+            remaining = max(0, int(uses) - 1) if isinstance(uses, int) else 0
+            self._remember_receipt(challenge, token, redeem, remaining=remaining, expires_at=expires)
+            content = self._content(
+                response,
+                parsed.get("payment_hash") if isinstance(parsed.get("payment_hash"), str) else challenge.payment_hash,
+                remaining,
+            )
+            content["paid_with"] = paid_with
+            content["receipt"] = token
+            content["redeem_url"] = redeem
+            content["detail"] = "The seller returned this content. Satsgate does not serve it."
+            return Presentation(content)
+        left = int(uses) if isinstance(uses, int) else 1
+        self._remember_receipt(challenge, token, redeem, remaining=left, expires_at=expires)
+        return Presentation(
+            {
+                "ok": False,
+                "error": "seller_unavailable",
+                "receipt": token,
+                "redeem_url": redeem,
+                "detail": (
+                    f"The seller did not return the content ({last_error}). "
+                    "The receipt is still valid until it expires. Retry with the same receipt."
+                ),
+            }
+        )
+
+    async def _redeem_saved(self, row, body: bytes | None) -> Presentation:
+        token = str(row["receipt"])
+        redeem = str(row["redeem_url"])
+        response = await self._send(
+            str(row["method"]),
+            redeem,
+            {"Satsgate-Receipt": token, "Accept": "application/json, */*"},
+            body,
+        )
+        if 200 <= response.status < 300:
+            remaining = row["uses_remaining"]
+            left = None if remaining is None else max(0, int(remaining) - 1)
+            self.store.save_token(self._token_row(row, uses_remaining=left, receipt=token, redeem_url=redeem))
+            return Presentation(self._content(response, str(row["payment_hash"]), left))
+        return Presentation(
+            {
+                "ok": False,
+                "error": "seller_unavailable",
+                "receipt": token,
+                "redeem_url": redeem,
+                "detail": f"The seller returned HTTP {response.status}. The receipt was not spent on a non-2xx.",
+            }
+        )
+
+    def _remember_receipt(self, challenge: Challenge, token: str, redeem: str, *, remaining: int, expires_at: int | None) -> None:
+        self.store.save_token(
+            {
+                "cache_key": _cache_key(challenge.method, challenge.url),
+                "method": challenge.method,
+                "url": challenge.url,
+                "macaroon": challenge.macaroon or "",
+                "preimage": None,
+                "payment_hash": challenge.payment_hash or "receipt",
+                "resource": challenge.resource,
+                "amount_sats": challenge.amount_sats,
+                "max_uses": challenge.max_uses,
+                "access_seconds": challenge.access_seconds,
+                "uses_remaining": remaining,
+                "access_until": expires_at,
+                "invoice_expires_at": challenge.invoice_expires_at,
+                "updated_at": self._now(),
+                "receipt": token,
+                "redeem_url": redeem,
+            }
+        )
+
+    def _token_row(self, row, *, uses_remaining, receipt: str, redeem_url: str) -> dict:
+        return {
+            "cache_key": row["cache_key"],
+            "method": str(row["method"]),
+            "url": str(row["url"]),
+            "macaroon": str(row["macaroon"] or ""),
+            "preimage": row["preimage"],
+            "payment_hash": str(row["payment_hash"]),
+            "resource": row["resource"],
+            "amount_sats": int(row["amount_sats"]),
+            "max_uses": row["max_uses"],
+            "access_seconds": row["access_seconds"],
+            "uses_remaining": uses_remaining,
+            "access_until": row["access_until"],
+            "invoice_expires_at": row["invoice_expires_at"],
+            "updated_at": self._now(),
+            "receipt": receipt,
+            "redeem_url": redeem_url,
+        }
+
     async def _send(self, method: str, url: str, headers: dict[str, str], body: bytes | None) -> "_Raw":
         target = validate_url(url) if _is_core(url, self.settings.core_url) else validate_url(url, self.settings.allowlist)
+        if (urlsplit(target).hostname or "").lower() in self.settings.gate_hosts:
+            body = None
         outbound = {"Accept": headers.get("Accept", "*/*"), "Accept-Encoding": "identity"}
         for name, value in headers.items():
-            if name.lower() in {"authorization", "x-api-key", "content-type", "accept", "payment-signature"}:
+            if name.lower() in {
+                "authorization",
+                "x-api-key",
+                "content-type",
+                "accept",
+                "payment-signature",
+                "satsgate-receipt",
+            }:
                 outbound[name] = value
         if body:
             outbound.setdefault("Content-Type", "application/json")

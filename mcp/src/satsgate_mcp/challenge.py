@@ -238,20 +238,20 @@ def parse_challenge(
         )
     except ChallengeError as exc:
         if offered is not None and not offered.malformed:
-            return _x402_only(
+            return _attach_delivery(_x402_only(
                 method=method,
                 url=url,
                 payload=payload,
                 request_body=request_body,
                 parsed=offered,
-            )
+            ), payload)
         if offered is not None and offered.malformed:
             raise ChallengeError("malformed_x402", offered.detail or "The x402 offer could not be parsed.") from None
         raise exc
     if offered is None:
-        return challenge
+        return _attach_delivery(challenge, payload)
     if offered.malformed:
-        return Challenge(
+        return _attach_delivery(Challenge(
             method=challenge.method,
             url=challenge.url,
             macaroon=challenge.macaroon,
@@ -266,8 +266,8 @@ def parse_challenge(
             request_body=challenge.request_body,
             offers_lightning=True,
             x402=offered,
-        )
-    return Challenge(
+        ), payload)
+    return _attach_delivery(Challenge(
         method=challenge.method,
         url=challenge.url,
         macaroon=challenge.macaroon,
@@ -282,7 +282,16 @@ def parse_challenge(
         request_body=challenge.request_body,
         offers_lightning=True,
         x402=offered,
-    )
+    ), payload)
+
+
+def _attach_delivery(challenge: Challenge, payload: dict) -> Challenge:
+    delivery = payload.get("delivery") if isinstance(payload.get("delivery"), str) else ""
+    redeem = payload.get("redeem_url") if isinstance(payload.get("redeem_url"), str) else ""
+    host = payload.get("seller_host") if isinstance(payload.get("seller_host"), str) else ""
+    if not delivery and not redeem and not host:
+        return challenge
+    return replace(challenge, delivery=delivery, redeem_url=redeem, seller_host=host)
 
 
 def _x402_only(
