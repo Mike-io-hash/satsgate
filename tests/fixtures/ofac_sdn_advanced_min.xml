@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Sanctions xmlns="https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/ADVANCED_XML">
+  <ReferenceValueSets>
+    <FeatureTypeValues>
+      <FeatureType ID="345">Digital Currency Address - ETH</FeatureType>
+      <FeatureType ID="344">Digital Currency Address - XBT</FeatureType>
+      <FeatureType ID="1">Other Feature</FeatureType>
+    </FeatureTypeValues>
+  </ReferenceValueSets>
+  <DistinctParties>
+    <DistinctParty>
+      <Profile>
+        <Feature ID="10" FeatureTypeID="345">
+          <FeatureVersion>
+            <VersionDetail DetailTypeID="1432">0xAbCdEf0123456789AbCdEf0123456789AbCdEf01</VersionDetail>
+          </FeatureVersion>
+        </Feature>
+        <Feature ID="11" FeatureTypeID="344">
+          <FeatureVersion>
+            <VersionDetail DetailTypeID="1432">bc1qexamplebtcaddressnotevm</VersionDetail>
+          </FeatureVersion>
+        </Feature>
+        <Feature ID="12" FeatureTypeID="345">
+          <FeatureVersion>
+            <VersionDetail DetailTypeID="1432">0xabcdef0123456789abcdef0123456789abcdef01</VersionDetail>
+          </FeatureVersion>
+        </Feature>
+        <Feature ID="13" FeatureTypeID="1">
+          <FeatureVersion>
+            <VersionDetail DetailTypeID="1432">0x3333333333333333333333333333333333333333</VersionDetail>
+          </FeatureVersion>
+        </Feature>
+        <Feature ID="14">
+          <FeatureType>Digital Currency Address - ETH</FeatureType>
+          <FeatureVersion>
+            <VersionDetail DetailTypeID="1432">0x2222222222222222222222222222222222222222</VersionDetail>
+          </FeatureVersion>
+        </Feature>
+      </Profile>
+    </DistinctParty>
+  </DistinctParties>
+</Sanctions>
