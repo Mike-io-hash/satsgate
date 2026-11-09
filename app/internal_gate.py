@@ -647,8 +647,13 @@ def _x402_receipt_after_expired_offer(
     """Return the stored receipt after the offer window has closed.
 
     Called only when binding failed with ``expired``. Read-only: no insert,
-    verify, settle, ledger row, or credit movement. A mismatch on client,
-    site, or path returns None so the caller sends the original 402.
+    verify, settle, ledger row, or credit movement. The presented
+    PAYMENT-SIGNATURE must be byte-identical to the one that settled: SHA-256
+    of its exact UTF-8 string, compared in constant time. A row with no stored
+    hash (issued before that column) is not recoverable. Recovery also stops
+    ``X402_RECEIPT_RECOVERY_SECONDS`` after settle. A mismatch on client, site,
+    path, hash, or that clock returns None so the caller sends the original
+    402. A receipt whose own ``exp`` has passed still raises ``token_expired``.
     """
     from . import db_receipts
     from . import x402
@@ -676,6 +681,27 @@ def _x402_receipt_after_expired_offer(
             row["client_id"],
             row["site_id"],
             row["path"],
+        )
+        return None
+    stored_hash = row.get("signature_sha256")
+    presented = db_receipts.signature_sha256(encoded)
+    if not isinstance(stored_hash, str) or len(stored_hash) != len(presented) or not hmac.compare_digest(stored_hash, presented):
+        log.warning(
+            "x402 expired offer signature mismatch client_id=%s site_id=%s path=%s",
+            client_id,
+            site_id,
+            path,
+        )
+        return None
+    settled_at = row.get("settled_at")
+    window = int(config.X402_RECEIPT_RECOVERY_SECONDS)
+    in_window = settled_at is not None and now <= int(settled_at) + window
+    if not in_window and now < int(row["exp"]):
+        log.warning(
+            "x402 expired offer recovery window closed client_id=%s site_id=%s path=%s",
+            client_id,
+            site_id,
+            path,
         )
         return None
     secret = db_sites.load_origin_secret(config.DB_PATH, site_id=int(site_id))
@@ -762,9 +788,11 @@ def internal_x402_receipt(body: X402ReceiptIn, request: Request):
             "exp": exp,
             "kid": receipt_mod.kid_for(secret),
             "charged": 0 if test_mode else 1,
+            "signature_sha256": db_receipts.signature_sha256(body.payment_signature),
         }
 
         def _insert(conn) -> None:
+            pending["settled_at"] = int(time.time())
             db_receipts.insert_receipt(conn, pending)
 
         try:

@@ -308,6 +308,15 @@ PAYEE_CONNECT_SECONDS = _clamped_int(
 X402_SIGNATURE_MAX_BYTES = 8192
 X402_FACILITATOR_TIMEOUT_SECONDS = 10.0
 X402_OFFER_SECONDS = _optional_int("SATSGATE_X402_OFFER_SECONDS", 60, minimum=15, maximum=300)
+# After the offer expires, the same PAYMENT-SIGNATURE can still collect the
+# stored receipt for this long after settle. 0 disables that recovery.
+# The receipt's own exp still ends it sooner.
+X402_RECEIPT_RECOVERY_SECONDS = _optional_int(
+    "SATSGATE_X402_RECEIPT_RECOVERY_SECONDS",
+    600,
+    minimum=0,
+    maximum=24 * 60 * 60,
+)
 
 
 def _x402_network() -> str:

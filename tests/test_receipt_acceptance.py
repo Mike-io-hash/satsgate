@@ -518,6 +518,202 @@ def test_x402_receipt_survives_an_expired_offer(tmp_path, monkeypatch):
         assert _rows(module.config.DB_PATH) == receipts
 
 
+def _rewrite_signature(encoded: str, mutate) -> str:
+    payload = json.loads(base64.standard_b64decode(encoded))
+    mutate(payload)
+    return base64.standard_b64encode(json.dumps(payload).encode()).decode()
+
+
+def _assert_expired(response) -> None:
+    assert response.status_code == 402, response.text
+    assert response.json()["error"] == "expired"
+    assert "receipt" not in response.json()
+
+
+def test_expired_offer_recovery_rejects_a_forged_nonce(tmp_path, monkeypatch):
+    """A public nonce is not a PAYMENT-SIGNATURE. Only the settled header bytes recover."""
+    key_id, secret_key, _key = _material()
+    module = _load_app(tmp_path, **_cdp_env(key_id, secret_key))
+    _patch_dns(monkeypatch, module)
+    owner = Account.create()
+    buyer = Account.create()
+    stranger = Account.create()
+    calls: list[str] = []
+
+    def _post(url, body, headers):
+        del body, headers
+        calls.append(url)
+        if url.endswith("/verify"):
+            return {"isValid": True, "payer": buyer.address}
+        return {"success": True, "transaction": "0x" + "ab" * 32, "payer": buyer.address}
+
+    with TestClient(module.app) as http:
+        key = _buy(http)
+        _verify_payee(http, key, owner)
+        created = http.post(
+            "/v1/sites",
+            headers={"X-Api-Key": key},
+            json={
+                "slug": "my-shop",
+                "display_name": "My Shop",
+                "origin_url": "https://origin.example",
+                "listed": True,
+            },
+        )
+        assert created.status_code == 200, created.text
+        route = http.post(
+            "/v1/sites/my-shop/routes",
+            headers={"X-Api-Key": key},
+            json={"path": "/paid", "price_currency": "usd", "price_usd_atomic": 10_000},
+        )
+        assert route.status_code == 200, route.text
+        approved = http.post("/v1/admin/sites/my-shop/approve", headers={"X-Admin-Token": "test-admin-token"})
+        assert approved.status_code == 200, approved.text
+        live = http.patch(
+            "/v1/sites/my-shop",
+            headers={"X-Api-Key": key},
+            json={"rail_x402": True, "rail_lightning": False, "x402_mode": "live"},
+        )
+        assert live.status_code == 200, live.text
+        importlib.import_module("app.x402_facilitator").poster = _post
+        client_id = _client_id(http, key)
+        issued = _gate(http, "POST", "/internal/gate/challenge", json={"slug": "my-shop", "path": "/paid"})
+        assert issued.status_code == 200, issued.text
+        encoded = _payload(issued.headers["payment-required"], buyer, issued.json()["expires_at"])
+        paid = _gate(
+            http,
+            "POST",
+            "/internal/gate/x402/receipt",
+            json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
+        )
+        assert paid.status_code == 200, paid.text
+        paid_body = paid.json()
+        with sqlite3.connect(module.config.DB_PATH) as conn:
+            conn.execute("UPDATE payment_offers SET expires_at = 1")
+            stored = conn.execute("SELECT signature_sha256, settled_at FROM gate_receipts").fetchone()
+        assert stored[0] == _mod("app.db_receipts").signature_sha256(encoded)
+        assert stored[1] is not None
+        credits = _credits(http, key)
+        settles = _settle_count(calls)
+        verifies = _verify_count(calls)
+        ledger = _ledger_count(module.config.DB_PATH, client_id)
+
+        def recover(signature: str, *, slug: str = "my-shop", path: str = "/paid"):
+            return _gate(
+                http,
+                "POST",
+                "/internal/gate/x402/receipt",
+                json={"slug": slug, "path": path, "payment_signature": signature},
+            )
+
+        exact = recover(encoded)
+        assert exact.status_code == 200, exact.text
+        assert exact.json()["receipt"] == paid_body["receipt"]
+        assert exact.json()["payment_hash"] == paid_body["payment_hash"]
+
+        barrier = threading.Barrier(2)
+        raced: list[object] = []
+
+        def once() -> None:
+            barrier.wait(timeout=5)
+            raced.append(recover(encoded))
+
+        threads = [threading.Thread(target=once) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+        assert len(raced) == 2
+        assert [item.status_code for item in raced] == [200, 200]
+        assert all(item.json()["receipt"] == paid_body["receipt"] for item in raced)
+
+        nonce = json.loads(base64.b64decode(encoded))["payload"]["authorization"]["nonce"]
+        forged = base64.b64encode(json.dumps({"payload": {"authorization": {"nonce": nonce}}}).encode()).decode()
+        _assert_expired(recover(forged))
+
+        def signature(payload):
+            payload["payload"]["signature"] = "0x" + "22" * 65
+
+        def amount(payload):
+            payload["accepted"]["amount"] = "10001"
+            payload["payload"]["authorization"]["value"] = "10001"
+
+        def payer(payload):
+            payload["payload"]["authorization"]["from"] = stranger.address
+
+        def resource(payload):
+            payload["resource"] = {"url": "https://gate.satsgate.org/my-shop/other"}
+
+        def network(payload):
+            payload["accepted"]["network"] = "eip155:1"
+
+        def valid_before(payload):
+            payload["payload"]["authorization"]["validBefore"] = "1"
+
+        for mutate in (signature, amount, payer, resource, network, valid_before):
+            _assert_expired(recover(_rewrite_signature(encoded, mutate)))
+
+        other_route = http.post(
+            "/v1/sites/my-shop/routes",
+            headers={"X-Api-Key": key},
+            json={"path": "/other", "price_currency": "usd", "price_usd_atomic": 10_000},
+        )
+        assert other_route.status_code == 200, other_route.text
+        other_offer = _gate(http, "POST", "/internal/gate/challenge", json={"slug": "my-shop", "path": "/other"})
+        assert other_offer.status_code == 200, other_offer.text
+        other_key = _buy(http)
+        _verify_payee(http, other_key, Account.create())
+        other_site = http.post(
+            "/v1/sites",
+            headers={"X-Api-Key": other_key},
+            json={
+                "slug": "other-shop",
+                "display_name": "Other Shop",
+                "origin_url": "https://other.example",
+                "listed": False,
+            },
+        )
+        assert other_site.status_code == 200, other_site.text
+        other_path = http.post(
+            "/v1/sites/other-shop/routes",
+            headers={"X-Api-Key": other_key},
+            json={"path": "/paid", "price_currency": "usd", "price_usd_atomic": 10_000},
+        )
+        assert other_path.status_code == 200, other_path.text
+        other_ok = http.post("/v1/admin/sites/other-shop/approve", headers={"X-Admin-Token": "test-admin-token"})
+        assert other_ok.status_code == 200, other_ok.text
+        other_live = http.patch(
+            "/v1/sites/other-shop",
+            headers={"X-Api-Key": other_key},
+            json={"rail_x402": True, "rail_lightning": False, "x402_mode": "live"},
+        )
+        assert other_live.status_code == 200, other_live.text
+        other_issued = _gate(http, "POST", "/internal/gate/challenge", json={"slug": "other-shop", "path": "/paid"})
+        assert other_issued.status_code == 200, other_issued.text
+        with sqlite3.connect(module.config.DB_PATH) as conn:
+            conn.execute("UPDATE payment_offers SET expires_at = 1")
+        _assert_expired(recover(encoded, path="/other"))
+        _assert_expired(recover(encoded, slug="other-shop"))
+
+        stale = int(time.time()) - int(module.config.X402_RECEIPT_RECOVERY_SECONDS) - 5
+        with sqlite3.connect(module.config.DB_PATH) as conn:
+            conn.execute(
+                "UPDATE gate_receipts SET settled_at = ? WHERE payment_hash = ?",
+                (stale, f"x402:{paid_body['payment_hash']}"),
+            )
+        _assert_expired(recover(encoded))
+        with sqlite3.connect(module.config.DB_PATH) as conn:
+            conn.execute(
+                "UPDATE gate_receipts SET signature_sha256 = NULL, settled_at = ? WHERE payment_hash = ?",
+                (int(time.time()), f"x402:{paid_body['payment_hash']}"),
+            )
+        _assert_expired(recover(encoded))
+        assert _settle_count(calls) == settles
+        assert _verify_count(calls) == verifies
+        assert _credits(http, key) == credits
+        assert _ledger_count(module.config.DB_PATH, client_id) == ledger
+
+
 class _Sites(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         parts = request.url.path.strip("/").split("/")
