@@ -30,6 +30,7 @@ from satsgate_sdk.receipts import (
     ReceiptError,
     SatsgateReceiptMiddleware,
     SqliteReceiptStore,
+    origin_check_response,
     verify_receipt,
 )
 from test_satsgate_gate import _settings
@@ -435,6 +436,40 @@ def test_auto_approve_matrix(tmp_path, monkeypatch):
         )
         assert renamed.status_code == 200, renamed.text
         assert renamed.json()["site"]["status"] == "approved"
+
+
+def _jwt_claims(token: str) -> dict:
+    payload = token.split(".")[1]
+    pad = "=" * (-len(payload) % 4)
+    return json.loads(base64.urlsafe_b64decode(payload + pad))
+
+
+def test_origin_check_token_carries_uses(tmp_path, monkeypatch):
+    module = _load_app(tmp_path)
+    _patch_dns(monkeypatch, module)
+    with TestClient(module.app) as http:
+        key, secret, _offered, _preimage = _issue_lightning(http)
+        captured: dict[str, str] = {}
+
+        def respond(url, headers=None, resolver=None, timeout=5.0, max_bytes=4096):
+            del url, resolver, timeout, max_bytes
+            token = (headers or {})["Satsgate-Check"]
+            captured["token"] = token
+            payload = _jwt_claims(token)
+            proof = _mod("app.receipts").check_proof(secret, payload["jti"])
+            return 200, json.dumps({"ok": True, "proof": proof}).encode()
+
+        monkeypatch.setattr(_mod("app.origin_check"), "safe_get_response", respond)
+        checked = http.post("/v1/sites/my-shop/verify-origin", headers={"X-Api-Key": key})
+        assert checked.status_code == 200, checked.text
+        token = captured["token"]
+        claims = _jwt_claims(token)
+        assert claims["uses"] == 1
+        assert claims["sub"] == "/.well-known/satsgate-check"
+        status, body = origin_check_response(token, secret=secret, site="my-shop")
+        assert status == 200
+        assert body["ok"] is True
+        assert body["proof"]
 
 
 def test_verify_origin_success_disabled_and_failures(tmp_path, monkeypatch):
