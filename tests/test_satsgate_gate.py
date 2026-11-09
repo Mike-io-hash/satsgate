@@ -204,7 +204,7 @@ def test_root_names_receipt_delivery(tmp_path, monkeypatch):
             root = http.get("/")
             assert root.status_code == 200, root.text
             body = root.json()
-            assert body["version"] == "0.15.0"
+            assert body["version"] == "0.15.1"
             assert body["delivery"] == "receipt"
             assert body["abuse_contact"] == "abuse@example.com"
             assert body["terms_url"] == "https://satsgate.org/terms"
