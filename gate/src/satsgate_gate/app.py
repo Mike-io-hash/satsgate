@@ -108,6 +108,8 @@ def _delivery(site: CachedSite, route_path: str, settings: Settings) -> dict[str
     }
     if settings.terms_url:
         body["terms_url"] = settings.terms_url
+    if settings.abuse_contact:
+        body["abuse_contact"] = settings.abuse_contact
     return body
 
 

@@ -420,7 +420,7 @@ def test_connect_verify_does_not_block_the_event_loop(tmp_path):
             assert await asyncio.to_thread(entered.wait, 3)
             health = await asyncio.wait_for(client.get("/health"), timeout=1)
             assert health.status_code == 200
-            assert health.json()["version"] == "0.18.0"
+            assert health.json()["version"] == "0.18.1"
             release.set()
             saved = await task
             assert saved.status_code == 200, saved.text

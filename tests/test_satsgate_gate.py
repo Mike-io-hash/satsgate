@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import os
 import socket
 import sys
@@ -203,13 +204,80 @@ def test_root_names_receipt_delivery(tmp_path, monkeypatch):
             root = http.get("/")
             assert root.status_code == 200, root.text
             body = root.json()
-            assert body["version"] == "0.15.0"
+            assert body["version"] == "0.15.1"
             assert body["delivery"] == "receipt"
             assert body["abuse_contact"] == "abuse@example.com"
             assert body["terms_url"] == "https://satsgate.org/terms"
             assert root.headers["cache-control"] == "no-store"
     finally:
         _close(core_client)
+
+
+def test_abuse_contact_is_on_every_402_and_absent_when_empty():
+    from satsgate_gate.app import _challenge_response
+    from satsgate_gate.cache import CachedSite, GateRoute
+    from satsgate_gate.core_client import Challenge, CoreResult
+
+    site = CachedSite(
+        slug="my-shop",
+        client_id=1,
+        origin_url="https://origin.example/api",
+        payee="merchant@pay.example",
+        routes=(GateRoute(path="/blog/post", price_sats=21, max_uses=1, access_seconds=None),),
+    )
+    lightning = Challenge(
+        resource="gate:my-shop:/blog/post",
+        max_uses=1,
+        access_seconds=None,
+        macaroon="mac",
+        invoice="lnbc1ptest",
+        payment_hash="ab" * 32,
+        invoice_expires_at=1,
+        amount_sats=21,
+        www_authenticate='L402 macaroon="mac", invoice="lnbc1ptest"',
+    )
+    x402_only = Challenge(
+        resource="gate:my-shop:/blog/post",
+        max_uses=1,
+        access_seconds=None,
+        payment_required="e30",
+        x402={"testing": True, "x402_mode": "test"},
+    )
+    dual = Challenge(
+        resource="gate:my-shop:/blog/post",
+        max_uses=1,
+        access_seconds=None,
+        macaroon="mac",
+        invoice="lnbc1ptest",
+        payment_hash="ab" * 32,
+        invoice_expires_at=1,
+        amount_sats=21,
+        www_authenticate='L402 macaroon="mac", invoice="lnbc1ptest"',
+        payment_required="e30",
+        x402={"testing": True, "x402_mode": "test"},
+    )
+    set_contact = _settings()
+    empty = _settings(abuse_contact="")
+    for challenge in (lightning, x402_only, dual):
+        present = _challenge_response(
+            CoreResult(action="challenge", challenge=challenge),
+            None,
+            site,
+            "/blog/post",
+            set_contact,
+        )
+        assert present.status_code == 402
+        body = json.loads(present.body)
+        assert body["abuse_contact"] == "abuse@example.com"
+        assert body["error"] == "payment_required"
+        missing = _challenge_response(
+            CoreResult(action="challenge", challenge=challenge),
+            None,
+            site,
+            "/blog/post",
+            empty,
+        )
+        assert "abuse_contact" not in json.loads(missing.body)
 
 
 def test_unpaid_402_names_the_seller_and_does_not_read_the_body(tmp_path, monkeypatch):
@@ -231,6 +299,7 @@ def test_unpaid_402_names_the_seller_and_does_not_read_the_body(tmp_path, monkey
                 assert body["delivery"] == "receipt"
                 assert body["redeem_url"] == "https://origin.example/api/blog/post"
                 assert body["seller_host"] == "origin.example"
+                assert body["abuse_contact"] == "abuse@example.com"
                 assert body["receipt_header"] == "Satsgate-Receipt"
                 assert 'rel="satsgate-redeem"' in response.headers["link"]
         finally:

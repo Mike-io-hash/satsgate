@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from satsgate_mcp.buyer import BuyerError
+from satsgate_mcp.config import _gate_hosts
 from test_satsgate_mcp import INVOICE, MAC, NWC, NOW, PAYMENT, PREIMAGE, _buyer
 
 GATE = "https://gate.satsgate.org/my-shop/blog/post"
@@ -96,9 +97,22 @@ def _seller_ok(request: httpx.Request) -> None:
 
 
 class _World:
-    def __init__(self, *, x402: bool = False, redeem: str = SELLER) -> None:
+    def __init__(
+        self,
+        *,
+        x402: bool = False,
+        redeem: str = SELLER,
+        gate_host: str = "gate.satsgate.org",
+        require_empty_gate_body: bool = True,
+        seller_redirect: str | None = None,
+        seller_exc: Exception | None = None,
+    ) -> None:
         self.x402 = x402
         self.redeem = redeem
+        self.gate_host = gate_host
+        self.require_empty_gate_body = require_empty_gate_body
+        self.seller_redirect = seller_redirect
+        self.seller_exc = seller_exc
         self.seller_status = 200
         self.seller_fails_left = 0
         self.calls: list[httpx.Request] = []
@@ -106,13 +120,18 @@ class _World:
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.calls.append(request)
         if request.url.host == "origin.example":
+            if self.seller_exc is not None:
+                raise self.seller_exc
             _seller_ok(request)
+            if self.seller_redirect is not None:
+                return httpx.Response(302, headers={"location": self.seller_redirect})
             if self.seller_fails_left > 0:
                 self.seller_fails_left -= 1
                 return httpx.Response(503, json={"ok": False, "error": "down"})
             return httpx.Response(self.seller_status, content=b"article", headers={"content-type": "text/plain"})
-        assert request.url.host == "gate.satsgate.org"
-        assert request.content == b""
+        assert request.url.host == self.gate_host
+        if self.require_empty_gate_body:
+            assert request.content == b""
         presented = request.headers.get("authorization", "") or request.headers.get("payment-signature", "")
         paid = bool(presented)
         if not paid and not self.x402:
@@ -268,3 +287,96 @@ def test_human_qr_flow_follows_the_receipt_on_check_payment(tmp_path) -> None:
     ]
     assert len(gate_polls) == 1
     assert ":" not in gate_polls[0].headers["authorization"].split(" ", 1)[1]
+
+
+def test_gate_hosts_honors_only_the_configured_hosts(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("SATSGATE_MCP_GATE_HOSTS", raising=False)
+    assert _gate_hosts() == ("gate.satsgate.org",)
+    monkeypatch.setenv("SATSGATE_MCP_GATE_HOSTS", "pay.example, Gate.Example")
+    assert _gate_hosts() == ("pay.example", "gate.example")
+    monkeypatch.setenv("SATSGATE_MCP_GATE_HOSTS", " , ")
+    assert _gate_hosts() == ("gate.satsgate.org",)
+
+    default = _World(x402=True)
+    buyer, _http, _wallet = _buyer(
+        tmp_path / "default",
+        default,
+        allowlist=ALLOW,
+        max_payment_usd_atomic=1_000_000,
+        daily_max_usd_atomic=1_000_000,
+    )
+    paid = asyncio.run(buyer.pay_and_fetch(GATE, "nwc", method="POST", body=BODY.decode(), payment_signature=SIGNATURE))
+    assert paid.payload["body"] == "article"
+    assert paid.payload["paid_with"] == "x402"
+    assert any(call.url.host == "origin.example" for call in default.calls)
+    assert len(_paid_gate_calls(default)) == 1
+
+    foreign = _World(x402=True, require_empty_gate_body=False)
+    buyer, _http, _wallet = _buyer(
+        tmp_path / "foreign",
+        foreign,
+        allowlist=ALLOW,
+        gate_hosts=("pay.example",),
+        max_payment_usd_atomic=1_000_000,
+        daily_max_usd_atomic=1_000_000,
+    )
+    ignored = asyncio.run(
+        buyer.pay_and_fetch(GATE, "nwc", method="POST", body=BODY.decode(), payment_signature=SIGNATURE)
+    )
+    assert ignored.payload.get("paid_with") == "x402"
+    assert ignored.payload.get("receipt") != RECEIPT
+    assert not any(call.url.host == "origin.example" for call in foreign.calls)
+    assert len(_paid_gate_calls(foreign)) == 1
+
+    custom_url = "https://pay.example/my-shop/blog/post"
+    custom = _World(x402=True, gate_host="pay.example")
+    buyer, _http, _wallet = _buyer(
+        tmp_path / "custom",
+        custom,
+        allowlist=("pay.example", "origin.example"),
+        gate_hosts=("pay.example",),
+        max_payment_usd_atomic=1_000_000,
+        daily_max_usd_atomic=1_000_000,
+    )
+    honored = asyncio.run(
+        buyer.pay_and_fetch(custom_url, "nwc", method="POST", body=BODY.decode(), payment_signature=SIGNATURE)
+    )
+    assert honored.payload["body"] == "article"
+    assert honored.payload["receipt"] == RECEIPT
+    assert honored.payload["redeem_url"] == SELLER
+    sellers = [call for call in custom.calls if call.url.host == "origin.example"]
+    assert len(sellers) == 1
+    assert len([call for call in custom.calls if call.url.host == "pay.example" and "payment-signature" in call.headers]) == 1
+
+
+def test_seller_redirect_on_redeem_is_not_followed(tmp_path) -> None:
+    world = _World(seller_redirect="https://evil.example/taken")
+    buyer, _http, wallet = _buyer(tmp_path, world, nwc_uri=NWC, allowlist=ALLOW)
+    failed = asyncio.run(buyer.pay_and_fetch(GATE, "nwc", method="POST", body=BODY.decode()))
+    assert failed.payload["error"] == "redirect_not_followed"
+    assert failed.payload["receipt"] == RECEIPT
+    assert failed.payload["redeem_url"] == SELLER
+    assert wallet.invoices == [INVOICE]
+    assert len(_paid_gate_calls(world)) == 1
+    sellers = [call for call in world.calls if call.url.host == "origin.example"]
+    assert len(sellers) == 1
+    assert not any(call.url.host == "evil.example" for call in world.calls)
+    again = asyncio.run(buyer.pay_and_fetch(GATE, "nwc", method="POST", body=BODY.decode()))
+    assert again.payload["error"] == "redirect_not_followed"
+    assert again.payload["receipt"] == RECEIPT
+    assert wallet.invoices == [INVOICE]
+    assert len(_paid_gate_calls(world)) == 1
+    assert not any(call.url.host == "evil.example" for call in world.calls)
+
+
+def test_seller_connect_error_keeps_the_receipt(tmp_path) -> None:
+    world = _World(seller_exc=httpx.ConnectError("connection refused"))
+    buyer, _http, wallet = _buyer(tmp_path, world, nwc_uri=NWC, allowlist=ALLOW)
+    failed = asyncio.run(buyer.pay_and_fetch(GATE, "nwc", method="POST", body=BODY.decode()))
+    assert failed.payload["error"] == "seller_unavailable"
+    assert "connection_failed" in failed.payload["detail"]
+    assert failed.payload["receipt"] == RECEIPT
+    assert failed.payload["redeem_url"] == SELLER
+    assert wallet.invoices == [INVOICE]
+    assert len(_paid_gate_calls(world)) == 1
+    assert sum(1 for call in world.calls if call.url.host == "origin.example") == 3

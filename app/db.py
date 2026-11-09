@@ -464,11 +464,18 @@ def _migrate_receipts(conn: sqlite3.Connection) -> None:
           exp INTEGER NOT NULL,
           kid TEXT NOT NULL,
           charged INTEGER NOT NULL,
+          signature_sha256 TEXT,
+          settled_at INTEGER,
           FOREIGN KEY(site_id) REFERENCES sites(id),
           FOREIGN KEY(client_id) REFERENCES clients(id)
         )
         """
     )
+    receipt_cols = {row["name"] for row in conn.execute("PRAGMA table_info(gate_receipts)").fetchall()}
+    if "signature_sha256" not in receipt_cols:
+        conn.execute("ALTER TABLE gate_receipts ADD COLUMN signature_sha256 TEXT")
+    if "settled_at" not in receipt_cols:
+        conn.execute("ALTER TABLE gate_receipts ADD COLUMN settled_at INTEGER")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_gate_receipts_site ON gate_receipts(site_id, exp)")
     conn.execute(
         """

@@ -47,6 +47,8 @@ def verify_origin(db_path: str, *, site: dict, resolver=None) -> dict:
             "iss": config.GATE_PUBLIC_BASE,
             "jti": jti,
             "sub": "/.well-known/satsgate-check",
+            # The SDK verifier requires uses even for its origin-check JWT.
+            "uses": 1,
         },
         secret=secret,
         typ=receipts.TYP_CHECK,
