@@ -268,6 +268,256 @@ def test_live_x402_receipt_debits_once_and_settles_once(tmp_path, monkeypatch):
         assert _credits(http, key) == before - 1
 
 
+def _ledger_count(db_path: str, client_id: int) -> int:
+    with sqlite3.connect(db_path) as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM ledger WHERE client_id = ?", (client_id,)).fetchone()[0])
+
+
+def _settle_count(calls: list[str]) -> int:
+    return sum(1 for url in calls if url.endswith("/settle"))
+
+
+def _verify_count(calls: list[str]) -> int:
+    return sum(1 for url in calls if url.endswith("/verify"))
+
+
+def test_x402_receipt_survives_an_expired_offer(tmp_path, monkeypatch):
+    """R-6: the same signature returns the stored receipt after the offer window."""
+    key_id, secret_key, _key = _material()
+    module = _load_app(tmp_path, **_cdp_env(key_id, secret_key))
+    _patch_dns(monkeypatch, module)
+    owner = Account.create()
+    buyer = Account.create()
+    calls: list[str] = []
+
+    def _post(url, body, headers):
+        del body, headers
+        calls.append(url)
+        if url.endswith("/verify"):
+            return {"isValid": True, "payer": buyer.address}
+        return {"success": True, "transaction": "0x" + "ab" * 32, "payer": buyer.address}
+
+    with TestClient(module.app) as http:
+        key = _buy(http)
+        _verify_payee(http, key, owner)
+        created = http.post(
+            "/v1/sites",
+            headers={"X-Api-Key": key},
+            json={
+                "slug": "my-shop",
+                "display_name": "My Shop",
+                "origin_url": "https://origin.example",
+                "listed": True,
+            },
+        )
+        assert created.status_code == 200, created.text
+        origin_secret = created.json()["origin_secret"]
+        route = http.post(
+            "/v1/sites/my-shop/routes",
+            headers={"X-Api-Key": key},
+            json={"path": "/paid", "price_currency": "usd", "price_usd_atomic": 10_000},
+        )
+        assert route.status_code == 200, route.text
+        approved = http.post("/v1/admin/sites/my-shop/approve", headers={"X-Admin-Token": "test-admin-token"})
+        assert approved.status_code == 200, approved.text
+        live = http.patch(
+            "/v1/sites/my-shop",
+            headers={"X-Api-Key": key},
+            json={"rail_x402": True, "rail_lightning": False, "x402_mode": "live"},
+        )
+        assert live.status_code == 200, live.text
+        importlib.import_module("app.x402_facilitator").poster = _post
+        client_id = _client_id(http, key)
+        issued = _gate(http, "POST", "/internal/gate/challenge", json={"slug": "my-shop", "path": "/paid"})
+        assert issued.status_code == 200, issued.text
+        encoded = _payload(issued.headers["payment-required"], buyer, issued.json()["expires_at"])
+        before = _credits(http, key)
+        paid = _gate(
+            http,
+            "POST",
+            "/internal/gate/x402/receipt",
+            json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
+        )
+        assert paid.status_code == 200, paid.text
+        paid_body = paid.json()
+        first = verify_receipt(paid_body["receipt"], secret=origin_secret, site="my-shop", path="/paid")
+        credits_after = _credits(http, key)
+        assert credits_after == before - 1
+        settles = _settle_count(calls)
+        verifies = _verify_count(calls)
+        ledger = _ledger_count(module.config.DB_PATH, client_id)
+        receipts = _rows(module.config.DB_PATH)
+        assert settles == 1
+        assert verifies == 1
+        assert receipts == 1
+
+        with sqlite3.connect(module.config.DB_PATH) as conn:
+            conn.execute("UPDATE payment_offers SET expires_at = 1")
+        replay = _gate(
+            http,
+            "POST",
+            "/internal/gate/x402/receipt",
+            json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
+        )
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["payment_hash"] == paid_body["payment_hash"]
+        assert replay.json()["receipt"] == paid_body["receipt"]
+        again = verify_receipt(replay.json()["receipt"], secret=origin_secret, site="my-shop", path="/paid")
+        assert again.claims == first.claims
+        assert _settle_count(calls) == settles
+        assert _verify_count(calls) == verifies
+        assert _credits(http, key) == credits_after
+        assert _ledger_count(module.config.DB_PATH, client_id) == ledger
+        assert _rows(module.config.DB_PATH) == receipts
+
+        window = http.post(
+            "/v1/sites/my-shop/routes",
+            headers={"X-Api-Key": key},
+            json={"path": "/window", "price_currency": "usd", "price_usd_atomic": 10_000},
+        )
+        assert window.status_code == 200, window.text
+        short = _gate(http, "POST", "/internal/gate/challenge", json={"slug": "my-shop", "path": "/window"})
+        assert short.status_code == 200, short.text
+        offer_exp = int(short.json()["expires_at"])
+        valid_before = offer_exp - 25
+        short_sig = _payload(
+            short.headers["payment-required"],
+            buyer,
+            offer_exp,
+            authorization={"validBefore": str(valid_before), "nonce": "0x" + "cd" * 32},
+        )
+        window_paid = _gate(
+            http,
+            "POST",
+            "/internal/gate/x402/receipt",
+            json={"slug": "my-shop", "path": "/window", "payment_signature": short_sig},
+        )
+        assert window_paid.status_code == 200, window_paid.text
+        credits_window = _credits(http, key)
+        settles = _settle_count(calls)
+        verifies = _verify_count(calls)
+        ledger = _ledger_count(module.config.DB_PATH, client_id)
+        receipts = _rows(module.config.DB_PATH)
+        x402_mod = importlib.import_module("app.x402")
+        monkeypatch.setattr(x402_mod.time, "time", lambda: float(offer_exp - 5))
+        window_replay = _gate(
+            http,
+            "POST",
+            "/internal/gate/x402/receipt",
+            json={"slug": "my-shop", "path": "/window", "payment_signature": short_sig},
+        )
+        monkeypatch.setattr(x402_mod.time, "time", time.time)
+        assert window_replay.status_code == 200, window_replay.text
+        assert window_replay.json()["payment_hash"] == window_paid.json()["payment_hash"]
+        assert window_replay.json()["receipt"] == window_paid.json()["receipt"]
+        left = verify_receipt(window_paid.json()["receipt"], secret=origin_secret, site="my-shop", path="/window")
+        right = verify_receipt(window_replay.json()["receipt"], secret=origin_secret, site="my-shop", path="/window")
+        assert right.claims == left.claims
+        assert _settle_count(calls) == settles
+        assert _verify_count(calls) == verifies
+        assert _credits(http, key) == credits_window
+        assert _ledger_count(module.config.DB_PATH, client_id) == ledger
+        assert _rows(module.config.DB_PATH) == receipts
+
+        with sqlite3.connect(module.config.DB_PATH) as conn:
+            conn.execute(
+                "UPDATE gate_receipts SET exp = 1 WHERE payment_hash = ?",
+                (f"x402:{paid_body['payment_hash']}",),
+            )
+        stale = _gate(
+            http,
+            "POST",
+            "/internal/gate/x402/receipt",
+            json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
+        )
+        assert stale.status_code == 401, stale.text
+        assert stale.json()["error"] == "token_expired"
+        assert _credits(http, key) == credits_window
+        assert _settle_count(calls) == settles
+        assert _ledger_count(module.config.DB_PATH, client_id) == ledger
+
+        fresh_nonce = _payload(
+            issued.headers["payment-required"],
+            buyer,
+            1,
+            authorization={"nonce": "0x" + "ef" * 32, "validBefore": "1"},
+        )
+        unpaid = _gate(
+            http,
+            "POST",
+            "/internal/gate/x402/receipt",
+            json={"slug": "my-shop", "path": "/paid", "payment_signature": fresh_nonce},
+        )
+        assert unpaid.status_code == 402, unpaid.text
+        assert unpaid.json()["error"] == "expired"
+        assert "receipt" not in unpaid.json()
+        assert _rows(module.config.DB_PATH) == receipts
+        assert _settle_count(calls) == settles
+        assert _credits(http, key) == credits_window
+        assert _ledger_count(module.config.DB_PATH, client_id) == ledger
+
+        other_route = http.post(
+            "/v1/sites/my-shop/routes",
+            headers={"X-Api-Key": key},
+            json={"path": "/other", "price_currency": "usd", "price_usd_atomic": 10_000},
+        )
+        assert other_route.status_code == 200, other_route.text
+        other_offer = _gate(http, "POST", "/internal/gate/challenge", json={"slug": "my-shop", "path": "/other"})
+        assert other_offer.status_code == 200, other_offer.text
+        other_site = http.post(
+            "/v1/sites",
+            headers={"X-Api-Key": key},
+            json={
+                "slug": "other-shop",
+                "display_name": "Other Shop",
+                "origin_url": "https://other.example",
+                "listed": False,
+            },
+        )
+        assert other_site.status_code == 200, other_site.text
+        other_path = http.post(
+            "/v1/sites/other-shop/routes",
+            headers={"X-Api-Key": key},
+            json={"path": "/paid", "price_currency": "usd", "price_usd_atomic": 10_000},
+        )
+        assert other_path.status_code == 200, other_path.text
+        other_ok = http.post("/v1/admin/sites/other-shop/approve", headers={"X-Admin-Token": "test-admin-token"})
+        assert other_ok.status_code == 200, other_ok.text
+        other_live = http.patch(
+            "/v1/sites/other-shop",
+            headers={"X-Api-Key": key},
+            json={"rail_x402": True, "rail_lightning": False, "x402_mode": "live"},
+        )
+        assert other_live.status_code == 200, other_live.text
+        other_issued = _gate(http, "POST", "/internal/gate/challenge", json={"slug": "other-shop", "path": "/paid"})
+        assert other_issued.status_code == 200, other_issued.text
+        with sqlite3.connect(module.config.DB_PATH) as conn:
+            conn.execute("UPDATE payment_offers SET expires_at = 1")
+        wrong_path = _gate(
+            http,
+            "POST",
+            "/internal/gate/x402/receipt",
+            json={"slug": "my-shop", "path": "/other", "payment_signature": encoded},
+        )
+        assert wrong_path.status_code == 402, wrong_path.text
+        assert wrong_path.json()["error"] == "expired"
+        assert "receipt" not in wrong_path.json()
+        wrong_site = _gate(
+            http,
+            "POST",
+            "/internal/gate/x402/receipt",
+            json={"slug": "other-shop", "path": "/paid", "payment_signature": encoded},
+        )
+        assert wrong_site.status_code == 402, wrong_site.text
+        assert wrong_site.json()["error"] == "expired"
+        assert "receipt" not in wrong_site.json()
+        assert _settle_count(calls) == settles
+        assert _verify_count(calls) == verifies
+        assert _credits(http, key) == credits_window
+        assert _ledger_count(module.config.DB_PATH, client_id) == ledger
+        assert _rows(module.config.DB_PATH) == receipts
+
+
 class _Sites(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         parts = request.url.path.strip("/").split("/")

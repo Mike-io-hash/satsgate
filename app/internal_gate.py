@@ -19,6 +19,7 @@ The routes are omitted from the public OpenAPI document.
 from __future__ import annotations
 
 import hmac
+import logging
 import time
 
 from fastapi import APIRouter, Header, Query, Request
@@ -29,6 +30,7 @@ from . import config, db, db_keys, db_sites
 from .client_ip import peer_is_trusted
 
 router = APIRouter(include_in_schema=False)
+log = logging.getLogger("satsgate.gate")
 
 _RESOURCE_MAX = 200
 _NO_STORE = {"Cache-Control": "no-store"}
@@ -633,6 +635,53 @@ def internal_receipt(body: GateReceiptIn, request: Request):
     return _json(issued)
 
 
+def _x402_receipt_after_expired_offer(
+    *,
+    encoded: str,
+    client_id: int,
+    site_id: int,
+    path: str,
+    aud: str,
+    now: int,
+) -> dict | None:
+    """Return the stored receipt after the offer window has closed.
+
+    Called only when binding failed with ``expired``. Read-only: no insert,
+    verify, settle, ledger row, or credit movement. A mismatch on client,
+    site, or path returns None so the caller sends the original 402.
+    """
+    from . import db_receipts
+    from . import x402
+    from .gate_receipts import existing_body
+
+    try:
+        payload = x402.decode_payment_signature(encoded)
+    except x402.X402Error:
+        return None
+    inner = payload.get("payload")
+    authorization = inner.get("authorization") if isinstance(inner, dict) else None
+    nonce = authorization.get("nonce") if isinstance(authorization, dict) else None
+    if not isinstance(nonce, str) or not x402._BYTES32.fullmatch(nonce):
+        return None
+    payment_key = db_receipts.x402_key(nonce)
+    row = db_receipts.get_receipt(config.DB_PATH, payment_key)
+    if row is None:
+        return None
+    if int(row["client_id"]) != int(client_id) or int(row["site_id"]) != int(site_id) or row["path"] != path:
+        log.warning(
+            "x402 expired offer ignored stored receipt client_id=%s site_id=%s path=%s row_client_id=%s row_site_id=%s row_path=%s",
+            client_id,
+            site_id,
+            path,
+            row["client_id"],
+            row["site_id"],
+            row["path"],
+        )
+        return None
+    secret = db_sites.load_origin_secret(config.DB_PATH, site_id=int(site_id))
+    return existing_body(payment_key, secret=secret, aud=aud, now=now)
+
+
 @router.post("/internal/gate/x402/receipt")
 def internal_x402_receipt(body: X402ReceiptIn, request: Request):
     """Verify, settle, and mint a receipt. Test mode does not debit a credit."""
@@ -665,13 +714,28 @@ def internal_x402_receipt(body: X402ReceiptIn, request: Request):
     resource = gate_resource(slug, path)
     test_mode = str(site.get("x402_mode") or "") == "test"
     try:
-        _payload, offer, fields = x402_service.peek_authorization(
-            client_id=client.id,
-            slug=slug,
-            path=path,
-            resource=resource,
-            encoded=body.payment_signature,
-        )
+        try:
+            _payload, offer, fields = x402_service.peek_authorization(
+                client_id=client.id,
+                slug=slug,
+                path=path,
+                resource=resource,
+                encoded=body.payment_signature,
+            )
+        except x402.X402Error as exc:
+            if exc.code != "expired":
+                raise
+            issued = _x402_receipt_after_expired_offer(
+                encoded=body.payment_signature,
+                client_id=client.id,
+                site_id=int(site["id"]),
+                path=route["path"],
+                aud=slug,
+                now=int(time.time()),
+            )
+            if issued is None:
+                raise
+            return JSONResponse(content=issued, headers=_NO_STORE)
         payment_key = db_receipts.x402_key(fields["nonce"])
         now = int(time.time())
         try:
