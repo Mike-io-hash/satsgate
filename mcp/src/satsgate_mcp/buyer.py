@@ -849,7 +849,7 @@ class Buyer:
             try:
                 response = await self._send(challenge.method, redeem, headers, challenge.request_body)
             except BuyerError as exc:
-                last_error = exc.message
+                last_error = exc.code
                 response = None
             if response is not None and response.status < 500:
                 break
@@ -859,6 +859,21 @@ class Buyer:
                 await asyncio.sleep(0.01)
         uses = parsed.get("uses")
         expires = parsed.get("expires_at") if isinstance(parsed.get("expires_at"), int) else None
+        left = int(uses) if isinstance(uses, int) else 1
+        if response is not None and 300 <= response.status < 400:
+            self._remember_receipt(challenge, token, redeem, remaining=left, expires_at=expires)
+            return Presentation(
+                {
+                    "ok": False,
+                    "error": "redirect_not_followed",
+                    "receipt": token,
+                    "redeem_url": redeem,
+                    "detail": (
+                        "The seller redirected. This client does not follow redirects. "
+                        "The receipt is still valid until it expires. Retry with the same receipt."
+                    ),
+                }
+            )
         if response is not None and 200 <= response.status < 300:
             remaining = max(0, int(uses) - 1) if isinstance(uses, int) else 0
             self._remember_receipt(challenge, token, redeem, remaining=remaining, expires_at=expires)
@@ -872,7 +887,6 @@ class Buyer:
             content["redeem_url"] = redeem
             content["detail"] = "The seller returned this content. Satsgate does not serve it."
             return Presentation(content)
-        left = int(uses) if isinstance(uses, int) else 1
         self._remember_receipt(challenge, token, redeem, remaining=left, expires_at=expires)
         return Presentation(
             {
@@ -896,6 +910,19 @@ class Buyer:
             {"Satsgate-Receipt": token, "Accept": "application/json, */*"},
             body,
         )
+        if 300 <= response.status < 400:
+            return Presentation(
+                {
+                    "ok": False,
+                    "error": "redirect_not_followed",
+                    "receipt": token,
+                    "redeem_url": redeem,
+                    "detail": (
+                        "The seller redirected. This client does not follow redirects. "
+                        "The receipt was not spent on a redirect."
+                    ),
+                }
+            )
         if 200 <= response.status < 300:
             remaining = row["uses_remaining"]
             left = None if remaining is None else max(0, int(remaining) - 1)
