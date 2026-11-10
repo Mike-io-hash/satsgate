@@ -17,6 +17,12 @@ Core **0.19.0**, hosted gate **0.15.1**, Python SDK **0.7.0**, self-hosted proxy
 ### Changed
 - Security alert emails now say to rotate the account key with `POST /v1/client/api-key/rotate` first, then to write to support so the operator can pause the sites. They still say never to send a key, seed phrase, or private key. The sanctions email is unchanged: rotating a key does not lift an OFAC block.
 - `SECURITY.md` no longer says the account key cannot be rotated.
+- Account-key rotation and webhook create, replace, delete, and test share `SATSGATE_RL_MAX_SECURITY` (default 10) per `SATSGATE_RL_WINDOW_SECONDS`. The bucket is the client id, so a new account key does not reset it.
+
+### Fixed
+- Webhook response reads are raw bytes with `Accept-Encoding: identity`. The 4 KiB cap is applied before decompression, and a read is not started once the cap or the 5 second delivery deadline is met.
+- Each webhook send reserves its attempt before the POST. A crash and reclaim cannot produce a sixth send. The result is applied only for that reserved attempt.
+- Webhook create, URL change, secret rotation, re-enable, delete, and a 404 or 410 disable write a ledger row in the same transaction. The row has no secret, URL, query, or signing header.
 
 Deploy core 0.19.0 only. Do not rebuild the gate, the proxy, the MCP server, or the connect page, and do not publish packages. Back up `satsgate.sqlite3` and record the current core image id. Tag the rollback image `pre-0.19.0`. Startup adds `client_webhooks` and `webhook_outbox`. It also keeps the nullable `gate_receipts.signature_sha256` and `gate_receipts.settled_at` columns from 0.18.1. Existing rows stay. There is no backfill. Confirm `SATSGATE_SITE_SECRET_KEY` is set (64 hex characters) before relying on webhooks. `SATSGATE_WEBHOOKS` defaults to on. On a disposable test account: create a key, `PUT` a webhook pointed at a test receiver, rotate the account key, and check `webhook_test` and `account_key_rotated` with the quickstart verifier. Do not rotate client 1. `GET /health` reports `0.19.0`. Rollback is the `pre-0.19.0` image. The new tables stay, and they are harmless. The gate stays 0.15.1.
 

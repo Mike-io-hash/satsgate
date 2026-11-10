@@ -53,9 +53,19 @@ def validate_webhook_url(url: object, *, resolver=None) -> str:
         raise X402Error("invalid_webhook_url", status=400)
     try:
         guard_url(url, resolver=resolver)
-    except SSRFError as exc:
+    except (SSRFError, ValueError) as exc:
         raise X402Error("invalid_webhook_url", status=400) from exc
     return url
+
+
+def audit_webhook(conn, *, client_id: int, reason: str, now: int, ref: str | None = None) -> None:
+    """One ledger row. The ref is a short code, never a secret, URL, or header."""
+    if ref is not None and (len(ref) > 16 or any(ch in ref for ch in "/?#@&= ")):
+        ref = None
+    conn.execute(
+        "INSERT INTO ledger(client_id, delta_credits, reason, ref, created_at) VALUES(?, 0, ?, ?, ?)",
+        (int(client_id), reason, ref, int(now)),
+    )
 
 
 def new_webhook_secret() -> str:
@@ -142,12 +152,15 @@ def put_webhook(
                 """,
                 (int(client_id), clean, blob, secret[:SECRET_PREFIX_LEN], now, now),
             )
+            audit_webhook(conn, client_id=int(client_id), reason="webhook_created", now=now)
             revealed = secret
         else:
             generation = int(row["generation"])
             secret_enc = row["secret_enc"]
             prefix = row["secret_prefix"]
-            changed = clean != row["url"] or bool(rotate_secret) or not int(row["enabled"])
+            url_changed = clean != row["url"]
+            was_disabled = not int(row["enabled"])
+            changed = url_changed or bool(rotate_secret) or was_disabled
             if rotate_secret:
                 secret = new_webhook_secret()
                 try:
@@ -169,6 +182,12 @@ def put_webhook(
                 """,
                 (clean, secret_enc, prefix, generation, now, int(client_id)),
             )
+            if url_changed:
+                audit_webhook(conn, client_id=int(client_id), reason="webhook_url_changed", now=now)
+            if rotate_secret:
+                audit_webhook(conn, client_id=int(client_id), reason="webhook_secret_rotated", now=now)
+            if was_disabled:
+                audit_webhook(conn, client_id=int(client_id), reason="webhook_enabled", now=now)
         conn.execute("COMMIT")
     body = {"ok": True, "url": clean, "enabled": True}
     if revealed is not None:
@@ -217,11 +236,12 @@ def get_webhook(db_path: str, *, client_id: int) -> dict:
     }
 
 
-def delete_webhook(db_path: str, *, client_id: int) -> dict:
+def delete_webhook(db_path: str, *, client_id: int, now: int | None = None) -> dict:
     """Remove the webhook and drop deliveries that have not been posted yet."""
+    now = int(time.time()) if now is None else int(now)
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        conn.execute("DELETE FROM client_webhooks WHERE client_id = ?", (int(client_id),))
+        removed = conn.execute("DELETE FROM client_webhooks WHERE client_id = ?", (int(client_id),))
         conn.execute(
             """
             DELETE FROM webhook_outbox
@@ -229,6 +249,8 @@ def delete_webhook(db_path: str, *, client_id: int) -> dict:
             """,
             (int(client_id),),
         )
+        if removed.rowcount:
+            audit_webhook(conn, client_id=int(client_id), reason="webhook_deleted", now=now)
         conn.execute("COMMIT")
     return {"ok": True}
 

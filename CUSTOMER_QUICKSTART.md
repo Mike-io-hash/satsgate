@@ -64,6 +64,8 @@ curl -s -X POST https://api.satsgate.org/v1/client/api-key/rotate \
 
 `200` is `{ "ok": true, "api_key": "sg_…", "prefix": "sg_…xxxx" }`. `prefix` is the first 8 characters. A restricted key is `403 insufficient_scope`. After a successful rotate, the previous key is `401 invalid_api_key`. Save the new key, then keep using it as `X-Api-Key`. If you did not mean to rotate, write to support and ask for your sites to be paused. Never send the key, a seed phrase, or a private key.
 
+Rotation shares an account limit with webhook create, replace, delete, and the test call: `SATSGATE_RL_MAX_SECURITY` (default 10) per `SATSGATE_RL_WINDOW_SECONDS` (default 60). The bucket is the account, not the key, so a new key does not reset it. `429 rate_limited` includes `Retry-After`.
+
 A confirmed alert email is told. A security webhook, if you have one, gets the same `account_key_rotated` event. The event data is `at` (UTC text), `prefix`, and `via` (`api`). It does not include the old or new key.
 
 ## Security webhook
@@ -77,7 +79,9 @@ curl -s -X PUT https://api.satsgate.org/v1/client/webhook \
   -d '{"url":"https://example.com/satsgate-webhook"}'
 ```
 
-The first response includes `secret` (`whsec_…`) once. A later `PUT` with a new URL keeps that secret and does not return it. Send `"rotate_secret": true` to replace the secret and read the new one once. `GET /v1/client/webhook` returns `url`, `enabled`, `secret_prefix`, and `last_delivery` (or `null`). It never returns the secret. `DELETE /v1/client/webhook` removes it. `POST /v1/client/webhook/test` queues a test event. All four calls use the account key.
+The first response includes `secret` (`whsec_…`) once. A later `PUT` with a new URL keeps that secret and does not return it. Send `"rotate_secret": true` to replace the secret and read the new one once. `GET /v1/client/webhook` returns `url`, `enabled`, `secret_prefix`, and `last_delivery` (or `null`). It never returns the secret. `DELETE /v1/client/webhook` removes it. `POST /v1/client/webhook/test` queues a test event. All four calls use the account key. The operator must have `SATSGATE_SITE_SECRET_KEY` set; without it the save and the test call are `503 webhooks_unavailable` and the secret is not stored. `SATSGATE_WEBHOOKS=0` stops delivery and does not block these calls.
+
+Changing the URL, rotating the secret, or turning a disabled webhook back on drops queued deliveries for the previous configuration. A POST that has already left Satsgate is not recalled. Those changes, and a 404 or 410 that turns the webhook off, are written to the account ledger without the secret or the URL.
 
 Each delivery is `POST` with `Content-Type: application/json` and these headers:
 
@@ -101,11 +105,18 @@ Python:
 import hmac, hashlib
 
 def verify_satsgate_webhook(secret: str, timestamp: str, raw_body: bytes, signature: str, now: int) -> bool:
-    if abs(int(now) - int(timestamp)) > 300:
+    try:
+        stamp = int(timestamp)
+        current = int(now)
+    except (TypeError, ValueError):
+        return False
+    if abs(current - stamp) > 300:
+        return False
+    if not isinstance(raw_body, (bytes, bytearray)) or not isinstance(signature, str):
         return False
     digest = hmac.new(
         secret.encode("utf-8"),
-        f"{int(timestamp)}.".encode("ascii") + raw_body,
+        f"{stamp}.".encode("ascii") + bytes(raw_body),
         hashlib.sha256,
     ).hexdigest()
     return hmac.compare_digest(f"v1={digest}", signature)
@@ -129,7 +140,7 @@ function verifySatsgateWebhook(secret, timestamp, rawBody, signature, now) {
 
 Events: `payee_lightning_changed`, `payee_evm_changed`, `payee_ofac_flagged`, `alert_email_changed`, `alert_email_removed`, `account_key_rotated`, `webhook_test`. The JSON is `{ "id", "type", "created_at", "data" }`. `data` uses the same masked fields as the email: shortened payout addresses, a masked alert address, and the new key's prefix. It does not include a full key, a full payout address, a signature, or an email confirmation token. `created_at` is unix seconds and stays the same on retry. The body bytes stay the same on retry. Only the timestamp and signature change.
 
-A 2xx means delivered. Anything else is retried up to 5 sends in total (the first try, then after 60 seconds, 5 minutes, 30 minutes, and 2 hours). HTTP 404 or 410 turns the webhook off and stops the retries. If you have a confirmed alert email, Satsgate mails you that the webhook was disabled. It does not include the URL. Register a new URL with `PUT` if you still want events. No webhook configured means nothing here changes: email alerts, when you have them, are the same as before.
+A 2xx means delivered. HTTP 404 or 410 turns the webhook off and is not retried. A redirect is not followed, and that delivery fails without a retry. If DNS at send time is a private address, the event is not sent and is marked failed; the webhook stays on. Other failures retry up to 5 sends in total (the first try, then after 60 seconds, 5 minutes, 30 minutes, and 2 hours). A send that was already handed to the network counts toward those five even if the process restarts before the result is saved. Retries reuse the same `id`; dedupe on it. If you have a confirmed alert email, Satsgate mails you that a 404 or 410 turned the webhook off. It does not include the URL. Register a new URL with `PUT` if you still want events. No webhook configured means nothing here changes: email alerts, when you have them, are the same as before.
 
 ## 2) Register your payee (where your users will pay)
 

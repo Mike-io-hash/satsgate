@@ -11,6 +11,7 @@ import ipaddress
 import json
 import socket
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlencode, urlunsplit
@@ -78,12 +79,18 @@ def _blocked_hostname(host: str) -> bool:
 
 def guard_url(url: str, *, resolver: Callable | None = None) -> GuardedURL:
     """Reject non-https and non-public targets. Does not connect."""
-    parsed = urlsplit((url or "").strip())
+    try:
+        parsed = urlsplit((url or "").strip())
+    except ValueError as exc:
+        raise SSRFError("destination_rejected") from exc
     if parsed.scheme != "https":
         raise SSRFError("destination_rejected")
     if parsed.username or parsed.password:
         raise SSRFError("destination_rejected")
-    host = parsed.hostname
+    try:
+        host = parsed.hostname
+    except ValueError as exc:
+        raise SSRFError("destination_rejected") from exc
     if not host:
         raise SSRFError("destination_rejected")
     try:
@@ -347,21 +354,103 @@ def safe_post_json(
         _local.pinned_host = None
 
 
+class _ReadStopped(Exception):
+    """The body read hit the wall-clock deadline or a timeout. The status is already known."""
+
+
+def _pull_chunk(stream, timeout: float):
+    """Return the next raw chunk, or None at EOF.
+
+    ``next`` runs on a daemon thread so a dribbling receiver cannot hold the
+    caller past ``timeout``. A chunk that is still blocked when the wait ends
+    raises ``_ReadStopped`` and the caller must not pull again.
+    """
+    if timeout <= 0:
+        raise _ReadStopped()
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["chunk"] = next(stream)
+        except StopIteration:
+            box["eof"] = True
+        except Exception as exc:  # noqa: BLE001
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise _ReadStopped()
+    if "error" in box:
+        err = box["error"]
+        if isinstance(err, (httpx.TimeoutException, TimeoutError, socket.timeout)):
+            raise _ReadStopped() from err
+        raise err
+    if box.get("eof"):
+        return None
+    return box.get("chunk", b"")
+
+
+def _read_raw_capped(response: httpx.Response, limit: int, deadline: float) -> bytes:
+    """Raw response bytes, never decoded, and no further read once ``limit`` is met."""
+    if limit <= 0:
+        return b""
+    chunks: list[bytes] = []
+    total = 0
+    stream = response.iter_raw()
+    release = True
+    try:
+        while total < limit:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                chunk = _pull_chunk(stream, remaining)
+            except _ReadStopped:
+                release = False
+                break
+            if chunk is None:
+                break
+            if not chunk:
+                continue
+            room = limit - total
+            if len(chunk) > room:
+                chunks.append(chunk[:room])
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total >= limit:
+                break
+    finally:
+        # Closing a generator another thread is still executing is unsafe.
+        if release:
+            try:
+                stream.close()
+            except RuntimeError:
+                pass
+    return b"".join(chunks)
+
+
 def safe_post_bytes(
     url: str,
     body: bytes,
     *,
     headers: dict | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    deadline: float | None = None,
     resolver: Callable | None = None,
     max_bytes: int = 4 * 1024,
     client: httpx.Client | None = None,
 ) -> tuple[int, bytes]:
-    """POST exact bytes and return status plus a capped body. Redirects are rejected.
+    """POST exact bytes and return status plus a capped raw body. Redirects are rejected.
 
-    The response is streamed. ``Content-Length`` is not used as a buffer size:
-    a missing, huge, or lying length still stops at ``max_bytes``. The caller
-    signs ``body`` and must pass those same bytes. Header values are not logged.
+    The cap counts undecoded socket bytes. ``Accept-Encoding: identity`` is
+    sent and ``Content-Encoding`` is not decoded, so a tiny gzip bomb cannot
+    expand before the cap. Once ``max_bytes`` is in hand, no further read is
+    started. ``deadline`` is the wall-clock budget for the whole response,
+    not a fresh timeout per chunk. The caller signs ``body`` and must pass
+    those same bytes. Header values are not logged.
     """
     if not isinstance(body, (bytes, bytearray)):
         raise SSRFError("request_too_large")
@@ -373,6 +462,12 @@ def safe_post_bytes(
     limit = int(max_bytes)
     if limit < 0:
         raise SSRFError("response_too_large")
+    budget = float(timeout if deadline is None else deadline)
+    if budget <= 0:
+        raise SSRFError("fetch_failed")
+    request_headers = _request_headers(headers)
+    # Do not invite a compressed body. Decoding is what blows the cap.
+    request_headers["accept-encoding"] = "identity"
     _local.pinned_ip = guarded.ip
     _local.pinned_host = guarded.host
     try:
@@ -380,24 +475,24 @@ def safe_post_bytes(
             "POST",
             guarded.url,
             content=raw,
-            headers=_request_headers(headers),
+            headers=request_headers,
             timeout=timeout,
             follow_redirects=False,
         ) as response:
             if 300 <= response.status_code < 400:
                 raise SSRFError("redirects_not_allowed")
-            chunks: list[bytes] = []
-            total = 0
-            for chunk in response.iter_bytes():
-                if total >= limit:
-                    break
-                room = limit - total
-                if len(chunk) > room:
-                    chunks.append(chunk[:room])
-                    break
-                chunks.append(chunk)
-                total += len(chunk)
-            return response.status_code, b"".join(chunks)
+            # Headers are in. The body is ignored by the webhook sender, so a
+            # slow remainder must not turn a known status into fetch_failed.
+            # A preloaded body is already bytes; slice it and do not decode.
+            # A streamed body is read raw so Content-Encoding is not expanded.
+            try:
+                if hasattr(response, "_content"):
+                    payload = bytes(response._content)[:limit]
+                else:
+                    payload = _read_raw_capped(response, limit, time.monotonic() + budget)
+            except _ReadStopped:
+                payload = b""
+            return response.status_code, payload
     except SSRFError:
         raise
     except Exception as exc:  # noqa: BLE001

@@ -23,6 +23,9 @@ MAX_ATTEMPTS = len(RETRY_DELAYS_SECONDS) + 1
 STALE_SENDING_SECONDS = 120
 POLL_SECONDS = 30
 RESPONSE_CAP_BYTES = 4 * 1024
+# Wall clock for one delivery, including a slow body. Separate from the
+# per-read socket timeout, which a dribbling receiver can reset.
+DELIVERY_DEADLINE_SECONDS = 5.0
 _TERMINAL_SSRF = frozenset({"destination_rejected", "redirects_not_allowed"})
 _DISABLE_STATUS = frozenset({404, 410})
 
@@ -71,16 +74,25 @@ def _connect():
 
 
 def _reclaim_stale(now: int) -> None:
+    """A crashed send already consumed its attempt. Five reserved sends stay five."""
     cutoff = int(now) - STALE_SENDING_SECONDS
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             """
             UPDATE webhook_outbox
-            SET status = 'pending', next_attempt_at = ?
-            WHERE status = 'sending' AND next_attempt_at <= ?
+            SET status = 'failed'
+            WHERE status = 'sending' AND next_attempt_at <= ? AND attempts >= ?
             """,
-            (int(now), cutoff),
+            (cutoff, MAX_ATTEMPTS),
+        )
+        conn.execute(
+            """
+            UPDATE webhook_outbox
+            SET status = 'pending', next_attempt_at = ?
+            WHERE status = 'sending' AND next_attempt_at <= ? AND attempts < ?
+            """,
+            (int(now), cutoff, MAX_ATTEMPTS),
         )
         conn.execute("COMMIT")
 
@@ -122,40 +134,47 @@ def _claim(now: int) -> dict | None:
               ON w.client_id = o.client_id
              AND w.generation = o.generation
              AND w.enabled = 1
-            WHERE o.status = 'pending' AND o.next_attempt_at <= ?
+            WHERE o.status = 'pending' AND o.next_attempt_at <= ? AND o.attempts < ?
             ORDER BY o.id
             LIMIT 1
             """,
-            (int(now),),
+            (int(now), MAX_ATTEMPTS),
         ).fetchone()
         if row is None:
             conn.execute("ROLLBACK")
             return None
+        reserved = int(row["attempts"]) + 1
         cur = conn.execute(
             """
             UPDATE webhook_outbox
-            SET status = 'sending', next_attempt_at = ?
-            WHERE id = ? AND status = 'pending'
+            SET status = 'sending', attempts = ?, next_attempt_at = ?
+            WHERE id = ? AND status = 'pending' AND attempts = ? AND attempts < ?
             """,
-            (int(now), int(row["id"])),
+            (reserved, int(now), int(row["id"]), int(row["attempts"]), MAX_ATTEMPTS),
         )
         if cur.rowcount != 1:
             conn.execute("ROLLBACK")
             return None
         conn.execute("COMMIT")
-        return dict(row)
+        claimed = dict(row)
+        claimed["attempts"] = reserved
+        claimed["status"] = "sending"
+        return claimed
 
 
-def _still_current(conn, row: dict) -> bool:
+def _claim_matches(conn, row: dict) -> bool:
+    """This result belongs to the reserved attempt, and the webhook generation is still live."""
     current = conn.execute(
-        "SELECT status, generation FROM webhook_outbox WHERE id = ?",
+        "SELECT status, generation, attempts FROM webhook_outbox WHERE id = ?",
         (int(row["id"]),),
     ).fetchone()
     webhook = conn.execute(
         "SELECT generation, enabled FROM client_webhooks WHERE client_id = ?",
         (int(row["client_id"]),),
     ).fetchone()
-    if current is None or current["status"] not in {"sending", "pending"}:
+    if current is None or current["status"] != "sending":
+        return False
+    if int(current["attempts"]) != int(row["attempts"]):
         return False
     if int(current["generation"]) != int(row["generation"]):
         return False
@@ -164,30 +183,48 @@ def _still_current(conn, row: dict) -> bool:
     return int(webhook["generation"]) == int(row["generation"])
 
 
-def _mark(conn, row: dict, *, status: str, attempts: int, now: int, last_status: int, sent: bool = False) -> None:
+def _finish_attempt(
+    conn,
+    row: dict,
+    *,
+    status: str,
+    now: int,
+    last_status: int,
+    sent: bool = False,
+) -> bool:
+    """Record the result for this claim only. Attempts were reserved before the POST."""
     sent_at = int(now) if sent else None
-    conn.execute(
+    cur = conn.execute(
         """
         UPDATE webhook_outbox
-        SET status = ?, attempts = ?, next_attempt_at = ?, last_status = ?, sent_at = ?
-        WHERE id = ? AND generation = ?
+        SET status = ?, next_attempt_at = ?, last_status = ?, sent_at = ?
+        WHERE id = ? AND generation = ? AND status = 'sending' AND attempts = ?
         """,
-        (status, int(attempts), int(now), int(last_status), sent_at, int(row["id"]), int(row["generation"])),
+        (
+            status,
+            int(now),
+            int(last_status),
+            sent_at,
+            int(row["id"]),
+            int(row["generation"]),
+            int(row["attempts"]),
+        ),
     )
+    return cur.rowcount == 1
 
 
 def _load_target(row: dict, now: int) -> tuple[str, str] | None:
     """Return ``(url, secret)`` when this row's generation is still the live one."""
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        if not _still_current(conn, row):
+        if not _claim_matches(conn, row):
             conn.execute(
                 """
                 UPDATE webhook_outbox
                 SET status = 'dropped'
-                WHERE id = ? AND status = 'sending' AND generation = ?
+                WHERE id = ? AND status = 'sending' AND generation = ? AND attempts = ?
                 """,
-                (int(row["id"]), int(row["generation"])),
+                (int(row["id"]), int(row["generation"]), int(row["attempts"])),
             )
             conn.execute("COMMIT")
             return None
@@ -211,19 +248,18 @@ def _load_target(row: dict, now: int) -> tuple[str, str] | None:
 
 
 def _finish_terminal(row: dict, *, last_status: int, now: int) -> None:
-    attempts = int(row["attempts"]) + 1
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        if _still_current(conn, row):
-            _mark(conn, row, status="failed", attempts=attempts, now=now, last_status=last_status)
+        if _claim_matches(conn, row):
+            _finish_attempt(conn, row, status="failed", now=now, last_status=last_status)
         else:
             conn.execute(
                 """
                 UPDATE webhook_outbox
-                SET status = 'dropped', attempts = ?, last_status = ?
-                WHERE id = ? AND generation = ? AND status = 'sending'
+                SET status = 'dropped', last_status = ?
+                WHERE id = ? AND generation = ? AND status = 'sending' AND attempts = ?
                 """,
-                (attempts, int(last_status), int(row["id"]), int(row["generation"])),
+                (int(last_status), int(row["id"]), int(row["generation"]), int(row["attempts"])),
             )
         conn.execute("COMMIT")
     log.info("webhook_failed kind=%s id=%s status=%s", row["kind"], int(row["id"]), last_status)
@@ -278,6 +314,7 @@ def _post(url: str, body: bytes, headers: dict) -> int:
             body,
             headers=headers,
             timeout=5.0,
+            deadline=DELIVERY_DEADLINE_SECONDS,
             max_bytes=RESPONSE_CAP_BYTES,
         )
         return int(status)
@@ -287,19 +324,18 @@ def _post(url: str, body: bytes, headers: dict) -> int:
 
 
 def _apply_sent(row: dict, now: int, status_code: int) -> None:
-    attempts = int(row["attempts"]) + 1
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        if _still_current(conn, row):
-            _mark(conn, row, status="sent", attempts=attempts, now=now, last_status=status_code, sent=True)
+        if _claim_matches(conn, row):
+            _finish_attempt(conn, row, status="sent", now=now, last_status=status_code, sent=True)
         else:
             conn.execute(
                 """
                 UPDATE webhook_outbox
-                SET status = 'dropped', attempts = ?, last_status = ?, sent_at = ?
-                WHERE id = ? AND generation = ?
+                SET status = 'dropped', last_status = ?, sent_at = ?
+                WHERE id = ? AND generation = ? AND status = 'sending' AND attempts = ?
                 """,
-                (attempts, int(status_code), int(now), int(row["id"]), int(row["generation"])),
+                (int(status_code), int(now), int(row["id"]), int(row["generation"]), int(row["attempts"])),
             )
         conn.execute("COMMIT")
     log.info("webhook_sent kind=%s id=%s", row["kind"], int(row["id"]))
@@ -307,18 +343,17 @@ def _apply_sent(row: dict, now: int, status_code: int) -> None:
 
 def _apply_disable(row: dict, now: int, status_code: int) -> None:
     """Disable this generation only. A newer webhook is left alone."""
-    attempts = int(row["attempts"]) + 1
     emailed = False
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        if not _still_current(conn, row):
+        if not _claim_matches(conn, row):
             conn.execute(
                 """
                 UPDATE webhook_outbox
-                SET status = 'dropped', attempts = ?, last_status = ?
-                WHERE id = ? AND generation = ? AND status = 'sending'
+                SET status = 'dropped', last_status = ?
+                WHERE id = ? AND generation = ? AND status = 'sending' AND attempts = ?
                 """,
-                (attempts, int(status_code), int(row["id"]), int(row["generation"])),
+                (int(status_code), int(row["id"]), int(row["generation"]), int(row["attempts"])),
             )
             conn.execute("COMMIT")
             log.info("webhook_stale kind=%s id=%s status=%s", row["kind"], int(row["id"]), status_code)
@@ -336,14 +371,25 @@ def _apply_disable(row: dict, now: int, status_code: int) -> None:
             conn.execute(
                 """
                 UPDATE webhook_outbox
-                SET status = 'dropped', attempts = ?, last_status = ?
-                WHERE id = ? AND generation = ?
+                SET status = 'dropped', last_status = ?
+                WHERE id = ? AND generation = ? AND status = 'sending' AND attempts = ?
                 """,
-                (attempts, int(status_code), int(row["id"]), int(row["generation"])),
+                (int(status_code), int(row["id"]), int(row["generation"]), int(row["attempts"])),
             )
             conn.execute("COMMIT")
             return
-        _mark(conn, row, status="failed", attempts=attempts, now=now, last_status=status_code)
+        if not _finish_attempt(conn, row, status="failed", now=now, last_status=status_code):
+            conn.execute("ROLLBACK")
+            return
+        from .db_webhooks import audit_webhook
+
+        audit_webhook(
+            conn,
+            client_id=int(row["client_id"]),
+            reason="webhook_disabled",
+            now=int(now),
+            ref=reason,
+        )
         conn.execute(
             """
             UPDATE webhook_outbox
@@ -378,33 +424,26 @@ def _apply_disable(row: dict, now: int, status_code: int) -> None:
 
 
 def _retry_or_fail(row: dict, now: int, *, last_status: int) -> None:
-    attempts = int(row["attempts"]) + 1
+    attempts = int(row["attempts"])
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        if not _still_current(conn, row):
+        if not _claim_matches(conn, row):
             conn.execute(
                 """
                 UPDATE webhook_outbox
-                SET status = 'dropped', attempts = ?, last_status = ?
-                WHERE id = ? AND generation = ? AND status = 'sending'
+                SET status = 'dropped', last_status = ?
+                WHERE id = ? AND generation = ? AND status = 'sending' AND attempts = ?
                 """,
-                (attempts, int(last_status), int(row["id"]), int(row["generation"])),
+                (int(last_status), int(row["id"]), int(row["generation"]), attempts),
             )
             conn.execute("COMMIT")
             return
-        if attempts < MAX_ATTEMPTS:
-            delay = RETRY_DELAYS_SECONDS[attempts - 1]
-            _mark(
-                conn,
-                row,
-                status="pending",
-                attempts=attempts,
-                now=int(now) + delay,
-                last_status=last_status,
-            )
+        if attempts >= MAX_ATTEMPTS:
+            _finish_attempt(conn, row, status="failed", now=now, last_status=last_status)
             conn.execute("COMMIT")
-            log.info("webhook_retry kind=%s id=%s status=%s", row["kind"], int(row["id"]), last_status)
+            log.info("webhook_failed kind=%s id=%s status=%s", row["kind"], int(row["id"]), last_status)
             return
-        _mark(conn, row, status="failed", attempts=attempts, now=now, last_status=last_status)
+        delay = RETRY_DELAYS_SECONDS[attempts - 1]
+        _finish_attempt(conn, row, status="pending", now=int(now) + delay, last_status=last_status)
         conn.execute("COMMIT")
-    log.info("webhook_failed kind=%s id=%s status=%s", row["kind"], int(row["id"]), last_status)
+    log.info("webhook_retry kind=%s id=%s status=%s", row["kind"], int(row["id"]), last_status)

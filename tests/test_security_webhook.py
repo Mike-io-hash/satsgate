@@ -719,3 +719,309 @@ def test_retry_exhaustion_is_five_sends(tmp_path, monkeypatch):
     module.webhook_send.pump_once(now=now + 100_000)
     assert calls["n"] == 5
     assert hmac.compare_digest(_VECTOR["signature"], _VECTOR["signature"])
+
+
+def _public_resolver(host, port, *args, **kwargs):
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", port))]
+
+
+def _ledger_blob() -> str:
+    rows = _rows("SELECT reason, IFNULL(ref, '') FROM ledger")
+    return "\n".join(f"{row[0]} {row[1]}" for row in rows)
+
+
+def test_response_cap_ignores_compression_and_stops_at_the_limit(tmp_path):
+    import gzip
+
+    module = _load_app(tmp_path, **_env())
+    compressed = gzip.compress(b"\x00" * (8 * 1024 * 1024), compresslevel=9)
+    assert 4096 < len(compressed) < 32 * 1024
+    extra: list[str] = []
+
+    class OneChunk(httpx.SyncByteStream):
+        def __iter__(self):
+            self.reads = 0
+            return self
+
+        def __next__(self):
+            self.reads += 1
+            if self.reads == 1:
+                return compressed
+            extra.append("again")
+            raise httpx.ReadTimeout("past the cap")
+
+        def close(self) -> None:
+            return None
+
+    seen = {}
+
+    def compressed_handler(request: httpx.Request) -> httpx.Response:
+        seen["accept"] = request.headers.get("accept-encoding")
+        return httpx.Response(200, stream=OneChunk(), headers={"content-encoding": "gzip"})
+
+    status, payload = module.ssrf.safe_post_bytes(
+        _HOOK,
+        b"{}",
+        resolver=_public_resolver,
+        client=httpx.Client(transport=httpx.MockTransport(compressed_handler)),
+        max_bytes=4096,
+    )
+    assert status == 200
+    assert payload == compressed[:4096]
+    assert payload.startswith(b"\x1f\x8b")
+    assert extra == []
+    assert seen["accept"] == "identity"
+
+    class ExactThenTimeout(httpx.SyncByteStream):
+        def __iter__(self):
+            self.reads = 0
+            return self
+
+        def __next__(self):
+            self.reads += 1
+            if self.reads == 1:
+                return b"Z" * 4096
+            extra.append("exact-extra")
+            raise httpx.ReadTimeout("body already full")
+
+        def close(self) -> None:
+            return None
+
+    status, payload = module.ssrf.safe_post_bytes(
+        _HOOK,
+        b"{}",
+        resolver=_public_resolver,
+        client=httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=ExactThenTimeout()))),
+        max_bytes=4096,
+    )
+    assert status == 200
+    assert payload == b"Z" * 4096
+    assert extra == []
+
+    gate = threading.Event()
+
+    class SlowTail(httpx.SyncByteStream):
+        def __iter__(self):
+            self.reads = 0
+            return self
+
+        def __next__(self):
+            self.reads += 1
+            if self.reads == 1:
+                return b"abc"
+            gate.wait(2)
+            return b"late"
+
+        def close(self) -> None:
+            gate.set()
+
+    started = time.monotonic()
+    status, payload = module.ssrf.safe_post_bytes(
+        _HOOK,
+        b"{}",
+        resolver=_public_resolver,
+        timeout=5.0,
+        deadline=0.25,
+        client=httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=SlowTail()))),
+    )
+    elapsed = time.monotonic() - started
+    gate.set()
+    assert status == 200
+    assert payload == b"abc"
+    assert elapsed < 1.0
+
+
+def test_crash_before_result_never_sends_a_sixth_time(tmp_path, monkeypatch):
+    module = _load_app(tmp_path, **_env())
+    _patch_dns(monkeypatch, module)
+
+    class _Crash(BaseException):
+        pass
+
+    calls: list[int] = []
+
+    def explode(url, body, headers):
+        calls.append(1)
+        raise _Crash()
+
+    module.webhook_send._post = explode
+    with TestClient(module.app) as http:
+        key = _buy(http)
+        assert _put_hook(http, key).status_code == 200
+        assert http.post("/v1/client/webhook/test", headers={"X-Api-Key": key}).status_code == 200
+    now = int(_hooks()[0]["next_attempt_at"])
+    for _ in range(6):
+        try:
+            module.webhook_send.pump_once(now=now)
+        except _Crash:
+            pass
+        now += module.webhook_send.STALE_SENDING_SECONDS + 1
+    assert len(calls) == 5
+    row = _hooks()[0]
+    assert row["status"] == "failed"
+    assert int(row["attempts"]) == 5
+    module.webhook_send._reclaim_stale(now + 10_000)
+    module.webhook_send._reclaim_stale(now + 20_000)
+    module.webhook_send.pump_once(now=now + 30_000)
+    assert len(calls) == 5
+    assert _hooks()[0]["status"] == "failed"
+
+
+def test_webhook_configuration_changes_are_audited(tmp_path, monkeypatch):
+    module = _load_app(tmp_path, **_env())
+    _patch_dns(monkeypatch, module)
+    secret_url = "https://hooks.example/satsgate?token=super-secret-query"
+    with TestClient(module.app) as http:
+        key = _buy(http)
+        created = _put_hook(http, key, secret_url)
+        assert created.status_code == 200, created.text
+        secret = created.json()["secret"]
+        replaced = _put_hook(http, key, "https://hooks.example/other")
+        assert replaced.status_code == 200, replaced.text
+        rotated = _put_hook(http, key, "https://hooks.example/other", rotate=True)
+        assert rotated.status_code == 200, rotated.text
+        with sqlite3.connect(os_db()) as conn:
+            conn.execute("UPDATE client_webhooks SET enabled = 0, disabled_reason = 'http_410'")
+        again = _put_hook(http, key, "https://hooks.example/other")
+        assert again.status_code == 200, again.text
+        assert "secret" not in again.json()
+        removed = http.delete("/v1/client/webhook", headers={"X-Api-Key": key})
+        assert removed.status_code == 200
+    reasons = [row["reason"] for row in _rows("SELECT reason FROM ledger ORDER BY id")]
+    assert "webhook_created" in reasons
+    assert "webhook_url_changed" in reasons
+    assert "webhook_secret_rotated" in reasons
+    assert "webhook_enabled" in reasons
+    assert "webhook_deleted" in reasons
+    blob = _ledger_blob()
+    assert secret not in blob
+    assert rotated.json()["secret"] not in blob
+    assert "super-secret-query" not in blob
+    assert secret_url not in blob
+    assert "whsec_" not in blob
+    assert "Satsgate-Webhook-Signature" not in blob
+
+
+def test_404_disables_and_is_audited(tmp_path, monkeypatch):
+    module = _load_app(tmp_path, **_env(SATSGATE_RESEND_API_KEY="re_test_key_value_not_a_secret"))
+    _patch_dns(monkeypatch, module)
+
+    def missing(url, body, headers, timeout):
+        return 404, b"no"
+
+    module.webhook_send.poster = missing
+    with TestClient(module.app) as http:
+        key = _buy(http)
+        saved = http.put(
+            "/v1/client/alert-email",
+            headers={"X-Api-Key": key},
+            json={"email": "seller@proton.me"},
+        )
+        token = json.loads(_email()[-1]["params_json"])["token"]
+        assert saved.status_code == 200
+        assert http.post("/v1/connect/alert-email/confirm", headers={"X-Email-Token": token}).status_code == 200
+        assert _put_hook(http, key).status_code == 200
+        assert http.post("/v1/client/webhook/test", headers={"X-Api-Key": key}).status_code == 200
+    module.webhook_send.pump_once(now=int(time.time()))
+    row = _rows("SELECT enabled, disabled_reason FROM client_webhooks")[0]
+    assert row["enabled"] == 0
+    assert row["disabled_reason"] == "http_404"
+    audited = [item for item in _rows("SELECT reason, ref FROM ledger") if item["reason"] == "webhook_disabled"]
+    assert audited[-1]["ref"] == "http_404"
+    assert "hooks.example" not in _ledger_blob()
+    disabled = [item for item in _email() if item["kind"] == "webhook_disabled"]
+    assert json.loads(disabled[0]["params_json"])["status"] == 404
+    module.webhook_send.pump_once(now=int(time.time()) + 10_000)
+    assert _hooks()[0]["status"] == "failed"
+
+
+def test_unreadable_ciphertext_fails_once(tmp_path, monkeypatch):
+    module = _load_app(tmp_path, **_env())
+    _patch_dns(monkeypatch, module)
+    calls: list[int] = []
+
+    def poster(url, body, headers, timeout):
+        calls.append(1)
+        return 200, b""
+
+    module.webhook_send.poster = poster
+    with TestClient(module.app) as http:
+        key = _buy(http)
+        assert _put_hook(http, key).status_code == 200
+        assert http.post("/v1/client/webhook/test", headers={"X-Api-Key": key}).status_code == 200
+    with sqlite3.connect(os_db()) as conn:
+        conn.execute("UPDATE client_webhooks SET secret_enc = 'not-ciphertext'")
+    now = int(_hooks()[0]["next_attempt_at"])
+    module.webhook_send.pump_once(now=now)
+    assert calls == []
+    assert _hooks()[0]["status"] == "failed"
+    assert int(_hooks()[0]["attempts"]) == 1
+    assert _rows("SELECT enabled FROM client_webhooks")[0]["enabled"] == 1
+    module.webhook_send.pump_once(now=now + 10_000)
+    assert calls == []
+
+
+def test_webhook_input_is_rejected_without_a_500(tmp_path, monkeypatch):
+    module = _load_app(tmp_path, **_env())
+    _patch_dns(monkeypatch, module)
+    quickstart = (ROOT / "CUSTOMER_QUICKSTART.md").read_text(encoding="utf-8")
+    block = quickstart.split("```python", 1)[1].split("```", 1)[0]
+    namespace: dict = {}
+    exec(block, namespace)
+    verify = namespace["verify_satsgate_webhook"]
+    body = _VECTOR["body"].encode("utf-8")
+    assert verify(_VECTOR["secret"], str(_VECTOR["timestamp"]), body, _VECTOR["signature"], _VECTOR["now"]) is True
+    assert verify(_VECTOR["secret"], "not-a-timestamp", body, _VECTOR["signature"], _VECTOR["now"]) is False
+    assert verify(_VECTOR["secret"], str(_VECTOR["timestamp"]), body, _VECTOR["signature"], "now") is False
+    with TestClient(module.app) as http:
+        key = _buy(http)
+        broken = http.put(
+            "/v1/client/webhook",
+            headers={"X-Api-Key": key},
+            json={"url": "https://[::1"},
+        )
+        assert broken.status_code == 400
+        assert broken.json()["error"] == "invalid_webhook_url"
+        unknown = http.put(
+            "/v1/client/webhook",
+            headers={"X-Api-Key": key},
+            json={"url": _HOOK, "note": "nope"},
+        )
+        assert unknown.status_code == 400
+        assert unknown.json()["error"] == "invalid_webhook_url"
+        oversized = "x" * 3000
+        huge = http.put(
+            "/v1/client/webhook",
+            headers={"X-Api-Key": key, "Content-Type": "application/json"},
+            content=json.dumps({"url": _HOOK, "pad": oversized}),
+        )
+        assert huge.status_code == 400
+        assert huge.json()["error"] == "invalid_webhook_url"
+        assert oversized not in huge.text
+        assert _rows("SELECT client_id FROM client_webhooks") == []
+
+
+def test_security_limit_follows_the_account_not_the_key(tmp_path, monkeypatch):
+    module = _load_app(
+        tmp_path,
+        **_env(
+            SATSGATE_RL_ENABLED="1",
+            SATSGATE_RL_MAX_SECURITY="2",
+            SATSGATE_RL_MAX_AUTH="100",
+            SATSGATE_RL_WINDOW_SECONDS="60",
+        ),
+    )
+    _patch_dns(monkeypatch, module)
+    with TestClient(module.app) as http:
+        key = _buy(http)
+        first = http.post("/v1/client/api-key/rotate", headers={"X-Api-Key": key})
+        assert first.status_code == 200, first.text
+        second = http.post("/v1/client/api-key/rotate", headers={"X-Api-Key": first.json()["api_key"]})
+        assert second.status_code == 200, second.text
+        newest = second.json()["api_key"]
+        blocked = http.post("/v1/client/api-key/rotate", headers={"X-Api-Key": newest})
+        assert blocked.status_code == 429
+        assert blocked.json()["error"] == "rate_limited"
+        assert blocked.headers["retry-after"]
+        assert http.get("/v1/balance", headers={"X-Api-Key": newest}).status_code == 200
+        assert http.get("/v1/balance", headers={"X-Api-Key": key}).status_code == 401

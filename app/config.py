@@ -148,6 +148,9 @@ RL_MAX_AUTH = int(os.environ.get("SATSGATE_RL_MAX_AUTH", "600"))
 RL_MAX_CHALLENGE = int(os.environ.get("SATSGATE_RL_MAX_CHALLENGE", "30"))
 RL_MAX_TOPUP = int(os.environ.get("SATSGATE_RL_MAX_TOPUP", "10"))
 RL_MAX_KEYS = int(os.environ.get("SATSGATE_RL_MAX_KEYS", "10000"))
+# Account-key rotation and webhook writes share this bucket, keyed by client id.
+# Rotating the key does not open a new one. Window is RL_WINDOW_SECONDS.
+RL_MAX_SECURITY = int(os.environ.get("SATSGATE_RL_MAX_SECURITY", "10"))
 
 # Abuse caps for rows created before payment settles.
 MAX_PENDING_TOPUPS_PER_IP = int(os.environ.get("SATSGATE_MAX_PENDING_TOPUPS_PER_IP", "20"))
@@ -470,8 +473,9 @@ GEOIP_DB = os.environ.get("SATSGATE_GEOIP_DB", "/data/geoip/dbip-country-lite.mm
 OFAC_EVM_FILE = os.environ.get("SATSGATE_OFAC_EVM_FILE", "/data/ofac/ofac_evm.txt").strip() or "/data/ofac/ofac_evm.txt"
 RESEND_API_KEY = os.environ.get("SATSGATE_RESEND_API_KEY", "").strip()
 EMAIL_ENABLED = os.environ.get("SATSGATE_EMAIL_ENABLED", "1").strip() != "0"
-# Seller security webhooks. Default on. 0 stops the sender and refuses new URLs.
-# Delivery still no-ops when an account has not registered a webhook.
+# Seller security webhooks. Default on.
+# SATSGATE_WEBHOOKS=0 stops the sender thread only, like SATSGATE_EMAIL_ENABLED.
+# API writes and outbox inserts still succeed. No webhook row means nothing is queued.
 WEBHOOKS_ENABLED = os.environ.get("SATSGATE_WEBHOOKS", "1").strip() != "0"
 BASE_RPC_URL = _base_rpc_url()
 SMART_WALLETS = os.environ.get("SATSGATE_SMART_WALLETS", "1").strip() != "0"

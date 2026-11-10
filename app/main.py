@@ -159,6 +159,21 @@ RL_TOPUP = RateLimiter(
     max_requests=config.RL_MAX_TOPUP,
     max_keys=config.RL_MAX_KEYS,
 )
+# Keyed by client id. A new account key must not reset this bucket.
+RL_SECURITY = RateLimiter(
+    window_seconds=config.RL_WINDOW_SECONDS,
+    max_requests=config.RL_MAX_SECURITY,
+    max_keys=config.RL_MAX_KEYS,
+)
+_SECURITY_LIMIT_PATHS = frozenset(
+    {
+        ("POST", "/v1/client/api-key/rotate"),
+        ("PUT", "/v1/client/webhook"),
+        ("DELETE", "/v1/client/webhook"),
+        ("POST", "/v1/client/webhook/test"),
+    }
+)
+_MAX_WEBHOOK_BODY = 2048
 
 
 def _authenticate(x_api_key: str | None) -> db_keys.Principal | JSONResponse:
@@ -294,6 +309,10 @@ async def rate_limit_mw(request: Request, call_next):
         return blocked
 
     path = request.url.path
+    if client is not None and (request.method, path) in _SECURITY_LIMIT_PATHS:
+        blocked = _reject_if_limited(RL_SECURITY, "s:" + str(client.id))
+        if blocked:
+            return blocked
     if client is not None and path == "/v1/paywall/challenge" and request.method == "POST":
         blocked = _reject_if_limited(RL_CHALLENGE, "c:" + str(client.id))
         if blocked:
@@ -1034,6 +1053,8 @@ def v1_client_api_key_rotate(x_api_key: str | None = Header(default=None, alias=
     The old key stops working as soon as this commits. There is no grace period.
     200 returns ``api_key`` (shown once) and ``prefix`` (the first 8 characters).
     A restricted key is 403 insufficient_scope. A lost race is 401 invalid_api_key.
+    Shares the account security limit (``SATSGATE_RL_MAX_SECURITY`` per
+    ``SATSGATE_RL_WINDOW_SECONDS``, keyed by client id) with webhook writes.
     """
     client = _account_client(x_api_key)
     if isinstance(client, JSONResponse):
@@ -1064,13 +1085,17 @@ async def v1_client_webhook_put(
     payload = await _read_webhook_body(request)
     if isinstance(payload, JSONResponse):
         return payload
-    try:
+
+    def _save() -> dict:
         return db_webhooks.put_webhook(
             config.DB_PATH,
             client_id=client.id,
             url=payload.get("url"),
             rotate_secret=bool(payload.get("rotate_secret", False)),
         )
+
+    try:
+        return await run_in_threadpool(_save)
     except x402_mod.X402Error as exc:
         return _x402_error(exc)
 
@@ -1099,11 +1124,12 @@ def v1_client_webhook_delete(x_api_key: str | None = Header(default=None, alias=
 
 @app.post("/v1/client/webhook/test")
 def v1_client_webhook_test(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
-    """Queue a webhook_test event. Account key only. Uses the same /v1 rate limit as other account writes.
+    """Queue a webhook_test event. Account key only.
 
     404 ``webhook_not_configured`` when none is saved. 409 ``webhook_disabled`` when
     a 404 or 410 turned it off. 503 ``webhooks_unavailable`` when the encryption
-    key is unset. The route is rate-limited with the other ``/v1`` account writes.
+    key is unset. Shares the account security limit with rotation and webhook
+    writes (``SATSGATE_RL_MAX_SECURITY`` calls per window, keyed by client id).
     """
     client = _account_client(x_api_key)
     if isinstance(client, JSONResponse):
@@ -1114,20 +1140,42 @@ def v1_client_webhook_test(x_api_key: str | None = Header(default=None, alias="X
         return _x402_error(exc)
 
 
+def _webhook_body_rejected() -> JSONResponse:
+    return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_webhook_url"})
+
+
 async def _read_webhook_body(request: Request) -> dict | JSONResponse:
-    """Read url and rotate_secret. A bad body is invalid_webhook_url and does not echo the URL."""
-    raw = await request.body()
-    if len(raw) > 2048:
-        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_webhook_url"})
+    """Read url and rotate_secret. A bad body is invalid_webhook_url and does not echo the URL.
+
+    Content-Length is rejected before the body is read. The stream stops at
+    ``_MAX_WEBHOOK_BODY`` and the extra bytes are not kept or parsed.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > _MAX_WEBHOOK_BODY:
+                return _webhook_body_rejected()
+        except ValueError:
+            return _webhook_body_rejected()
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        if total + len(chunk) > _MAX_WEBHOOK_BODY:
+            return _webhook_body_rejected()
+        chunks.append(chunk)
+        total += len(chunk)
+    raw = b"".join(chunks)
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
-        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_webhook_url"})
+        return _webhook_body_rejected()
     if not isinstance(payload, dict) or "url" not in payload:
-        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_webhook_url"})
+        return _webhook_body_rejected()
+    if set(payload) - {"url", "rotate_secret"}:
+        return _webhook_body_rejected()
     flag = payload.get("rotate_secret", False)
     if not isinstance(flag, bool):
-        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_webhook_url"})
+        return _webhook_body_rejected()
     return {"url": payload.get("url"), "rotate_secret": flag}
 
 
