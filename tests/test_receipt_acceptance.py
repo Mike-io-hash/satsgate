@@ -359,9 +359,11 @@ def test_x402_receipt_survives_an_expired_offer(tmp_path, monkeypatch):
             "/internal/gate/x402/receipt",
             json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
         )
-        assert replay.status_code == 200, replay.text
+        assert replay.status_code == 200
         assert replay.json()["payment_hash"] == paid_body["payment_hash"]
-        assert replay.json()["receipt"] == paid_body["receipt"]
+        assert _digest(replay.json()["receipt"]) == _digest(paid_body["receipt"])
+        assert _settlement_view(paid) == _settlement_view(replay)
+        assert _settlement_view(replay)["transaction"] == _settlement_view(replay)["tx"]
         again = verify_receipt(replay.json()["receipt"], secret=origin_secret, site="my-shop", path="/paid")
         assert again.claims == first.claims
         assert _settle_count(calls) == settles
@@ -407,9 +409,10 @@ def test_x402_receipt_survives_an_expired_offer(tmp_path, monkeypatch):
             json={"slug": "my-shop", "path": "/window", "payment_signature": short_sig},
         )
         monkeypatch.setattr(x402_mod.time, "time", time.time)
-        assert window_replay.status_code == 200, window_replay.text
+        assert window_replay.status_code == 200
         assert window_replay.json()["payment_hash"] == window_paid.json()["payment_hash"]
-        assert window_replay.json()["receipt"] == window_paid.json()["receipt"]
+        assert _digest(window_replay.json()["receipt"]) == _digest(window_paid.json()["receipt"])
+        assert _settlement_view(window_paid) == _settlement_view(window_replay)
         left = verify_receipt(window_paid.json()["receipt"], secret=origin_secret, site="my-shop", path="/window")
         right = verify_receipt(window_replay.json()["receipt"], secret=origin_secret, site="my-shop", path="/window")
         assert right.claims == left.claims
@@ -430,8 +433,11 @@ def test_x402_receipt_survives_an_expired_offer(tmp_path, monkeypatch):
             "/internal/gate/x402/receipt",
             json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
         )
-        assert stale.status_code == 401, stale.text
+        assert stale.status_code == 401
         assert stale.json()["error"] == "token_expired"
+        assert "payment-response" not in stale.headers
+        assert "payment_response" not in stale.json()
+        assert "receipt" not in stale.json()
         assert _credits(http, key) == credits_window
         assert _settle_count(calls) == settles
         assert _ledger_count(module.config.DB_PATH, client_id) == ledger
@@ -525,9 +531,35 @@ def _rewrite_signature(encoded: str, mutate) -> str:
 
 
 def _assert_expired(response) -> None:
-    assert response.status_code == 402, response.text
-    assert response.json()["error"] == "expired"
-    assert "receipt" not in response.json()
+    assert response.status_code == 402
+    body = response.json()
+    assert body.get("error") == "expired"
+    assert "receipt" not in body
+    assert "payment_response" not in body
+    assert "payment-response" not in response.headers
+
+
+def _settlement_view(response) -> dict:
+    """Fields of PAYMENT-RESPONSE. The receipt token is not included."""
+    header = response.headers.get("payment-response", "")
+    body = response.json()
+    encoded = header or body.get("payment_response") or ""
+    data = json.loads(base64.standard_b64decode(encoded))
+    return {
+        "success": data.get("success") is True,
+        "transaction": data.get("transaction"),
+        "tx": data.get("tx"),
+        "network": data.get("network"),
+        "payer": data.get("payer"),
+        "header": bool(header),
+        "body_matches_header": body.get("payment_response") == header,
+    }
+
+
+def _digest(value: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def test_expired_offer_recovery_rejects_a_forged_nonce(tmp_path, monkeypatch):
@@ -607,9 +639,11 @@ def test_expired_offer_recovery_rejects_a_forged_nonce(tmp_path, monkeypatch):
             )
 
         exact = recover(encoded)
-        assert exact.status_code == 200, exact.text
-        assert exact.json()["receipt"] == paid_body["receipt"]
+        assert exact.status_code == 200
+        assert _digest(exact.json()["receipt"]) == _digest(paid_body["receipt"])
         assert exact.json()["payment_hash"] == paid_body["payment_hash"]
+        assert _settlement_view(paid) == _settlement_view(exact)
+        assert _settlement_view(exact)["payer"] == buyer.address
 
         barrier = threading.Barrier(2)
         raced: list[object] = []
@@ -625,7 +659,8 @@ def test_expired_offer_recovery_rejects_a_forged_nonce(tmp_path, monkeypatch):
             thread.join(timeout=5)
         assert len(raced) == 2
         assert [item.status_code for item in raced] == [200, 200]
-        assert all(item.json()["receipt"] == paid_body["receipt"] for item in raced)
+        assert all(_digest(item.json()["receipt"]) == _digest(paid_body["receipt"]) for item in raced)
+        assert all(_settlement_view(item) == _settlement_view(paid) for item in raced)
 
         nonce = json.loads(base64.b64decode(encoded))["payload"]["authorization"]["nonce"]
         forged = base64.b64encode(json.dumps({"payload": {"authorization": {"nonce": nonce}}}).encode()).decode()
@@ -712,6 +747,453 @@ def test_expired_offer_recovery_rejects_a_forged_nonce(tmp_path, monkeypatch):
         assert _verify_count(calls) == verifies
         assert _credits(http, key) == credits
         assert _ledger_count(module.config.DB_PATH, client_id) == ledger
+
+
+def _counts(module, http, key, client_id, calls) -> tuple:
+    return (
+        _credits(http, key),
+        _ledger_count(module.config.DB_PATH, client_id),
+        _rows(module.config.DB_PATH),
+        _settle_count(calls),
+        _verify_count(calls),
+    )
+
+
+def test_recovery_window_zero_disables_the_fallback(tmp_path, monkeypatch):
+    key_id, secret_key, _key = _material()
+    module = _load_app(tmp_path, **_cdp_env(key_id, secret_key), SATSGATE_X402_RECEIPT_RECOVERY_SECONDS="0")
+    _patch_dns(monkeypatch, module)
+    assert module.config.X402_RECEIPT_RECOVERY_SECONDS == 0
+    owner = Account.create()
+    buyer = Account.create()
+    calls: list[str] = []
+
+    def _post(url, body, headers):
+        del body, headers
+        calls.append(url)
+        if url.endswith("/verify"):
+            return {"isValid": True, "payer": buyer.address}
+        return {"success": True, "transaction": "0x" + "ab" * 32, "payer": buyer.address}
+
+    try:
+        with TestClient(module.app) as http:
+            key = _buy(http)
+            _verify_payee(http, key, owner)
+            created = http.post(
+                "/v1/sites",
+                headers={"X-Api-Key": key},
+                json={"slug": "my-shop", "display_name": "My Shop", "origin_url": "https://origin.example", "listed": True},
+            )
+            assert created.status_code == 200
+            http.post(
+                "/v1/sites/my-shop/routes",
+                headers={"X-Api-Key": key},
+                json={"path": "/paid", "price_currency": "usd", "price_usd_atomic": 10_000},
+            )
+            http.post("/v1/admin/sites/my-shop/approve", headers={"X-Admin-Token": "test-admin-token"})
+            http.patch(
+                "/v1/sites/my-shop",
+                headers={"X-Api-Key": key},
+                json={"rail_x402": True, "rail_lightning": False, "x402_mode": "live"},
+            )
+            importlib.import_module("app.x402_facilitator").poster = _post
+            client_id = _client_id(http, key)
+            issued = _gate(http, "POST", "/internal/gate/challenge", json={"slug": "my-shop", "path": "/paid"})
+            assert issued.status_code == 200
+            encoded = _payload(issued.headers["payment-required"], buyer, issued.json()["expires_at"])
+            paid = _gate(
+                http,
+                "POST",
+                "/internal/gate/x402/receipt",
+                json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
+            )
+            assert paid.status_code == 200
+            inside = _gate(
+                http,
+                "POST",
+                "/internal/gate/x402/receipt",
+                json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
+            )
+            assert inside.status_code == 200
+            assert _settle_count(calls) == 1
+            with sqlite3.connect(module.config.DB_PATH) as conn:
+                settled_at = int(
+                    conn.execute("SELECT settled_at FROM gate_receipts").fetchone()[0]
+                )
+                conn.execute("UPDATE payment_offers SET expires_at = 1")
+                conn.execute("UPDATE gate_receipts SET exp = ?", (settled_at + 10_000,))
+            baseline = _counts(module, http, key, client_id, calls)
+            gate_mod = importlib.import_module("app.internal_gate")
+            for offset in (0, 1):
+                monkeypatch.setattr(gate_mod.time, "time", lambda settled_at=settled_at, offset=offset: settled_at + offset)
+                denied = _gate(
+                    http,
+                    "POST",
+                    "/internal/gate/x402/receipt",
+                    json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
+                )
+                _assert_expired(denied)
+                assert _counts(module, http, key, client_id, calls) == baseline
+            with sqlite3.connect(module.config.DB_PATH) as conn:
+                conn.execute("UPDATE gate_receipts SET exp = ?", (settled_at,))
+            monkeypatch.setattr(gate_mod.time, "time", lambda settled_at=settled_at: settled_at + 5)
+            expired_receipt = _gate(
+                http,
+                "POST",
+                "/internal/gate/x402/receipt",
+                json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
+            )
+            _assert_expired(expired_receipt)
+            assert expired_receipt.status_code != 401
+    finally:
+        os.environ.pop("SATSGATE_X402_RECEIPT_RECOVERY_SECONDS", None)
+
+
+def test_recovery_window_edges_and_config(tmp_path, monkeypatch):
+    from app.config import _optional_int
+
+    name = "SATSGATE_X402_RECEIPT_RECOVERY_SECONDS"
+    monkeypatch.delenv(name, raising=False)
+    assert _optional_int(name, 600, minimum=0, maximum=86400) == 600
+    monkeypatch.setenv(name, "  ")
+    assert _optional_int(name, 600, minimum=0, maximum=86400) == 600
+    for raw in ("0", "86400"):
+        monkeypatch.setenv(name, raw)
+        assert _optional_int(name, 600, minimum=0, maximum=86400) == int(raw)
+    for raw in ("-1", "86401", "nope"):
+        monkeypatch.setenv(name, raw)
+        with pytest.raises(RuntimeError) as caught:
+            _optional_int(name, 600, minimum=0, maximum=86400)
+        assert raw.strip() not in str(caught.value)
+    monkeypatch.delenv(name, raising=False)
+
+    key_id, secret_key, _key = _material()
+    module = _load_app(tmp_path, **_cdp_env(key_id, secret_key))
+    _patch_dns(monkeypatch, module)
+    assert module.config.X402_RECEIPT_RECOVERY_SECONDS == 600
+    owner = Account.create()
+    buyer = Account.create()
+    calls: list[str] = []
+
+    def _post(url, body, headers):
+        del body, headers
+        calls.append(url)
+        if url.endswith("/verify"):
+            return {"isValid": True, "payer": buyer.address}
+        return {"success": True, "transaction": "0x" + "cd" * 32, "payer": buyer.address}
+
+    with TestClient(module.app) as http:
+        key = _buy(http)
+        _verify_payee(http, key, owner)
+        http.post(
+            "/v1/sites",
+            headers={"X-Api-Key": key},
+            json={"slug": "my-shop", "display_name": "My Shop", "origin_url": "https://origin.example", "listed": True},
+        )
+        http.post(
+            "/v1/sites/my-shop/routes",
+            headers={"X-Api-Key": key},
+            json={"path": "/paid", "price_currency": "usd", "price_usd_atomic": 10_000},
+        )
+        http.post("/v1/admin/sites/my-shop/approve", headers={"X-Admin-Token": "test-admin-token"})
+        http.patch(
+            "/v1/sites/my-shop",
+            headers={"X-Api-Key": key},
+            json={"rail_x402": True, "rail_lightning": False, "x402_mode": "live"},
+        )
+        importlib.import_module("app.x402_facilitator").poster = _post
+        issued = _gate(http, "POST", "/internal/gate/challenge", json={"slug": "my-shop", "path": "/paid"})
+        encoded = _payload(issued.headers["payment-required"], buyer, issued.json()["expires_at"])
+        paid = _gate(
+            http,
+            "POST",
+            "/internal/gate/x402/receipt",
+            json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
+        )
+        assert paid.status_code == 200
+        with sqlite3.connect(module.config.DB_PATH) as conn:
+            settled_at = int(conn.execute("SELECT settled_at FROM gate_receipts").fetchone()[0])
+            conn.execute("UPDATE payment_offers SET expires_at = 1")
+            conn.execute("UPDATE gate_receipts SET exp = ?", (settled_at + 10_000,))
+        gate_mod = importlib.import_module("app.internal_gate")
+        for offset, status in ((599, 200), (600, 200), (601, 402)):
+            monkeypatch.setattr(
+                gate_mod.time,
+                "time",
+                lambda settled_at=settled_at, offset=offset: settled_at + offset,
+            )
+            replay = _gate(
+                http,
+                "POST",
+                "/internal/gate/x402/receipt",
+                json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
+            )
+            assert replay.status_code == status
+            if status == 200:
+                assert _settlement_view(replay) == _settlement_view(paid)
+            else:
+                _assert_expired(replay)
+        monkeypatch.setattr(gate_mod.time, "time", lambda settled_at=settled_at: settled_at + 50)
+        with sqlite3.connect(module.config.DB_PATH) as conn:
+            conn.execute("UPDATE gate_receipts SET exp = ?", (settled_at + 50,))
+        stale = _gate(
+            http,
+            "POST",
+            "/internal/gate/x402/receipt",
+            json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
+        )
+        assert stale.status_code == 401
+        assert stale.json()["error"] == "token_expired"
+        assert "payment-response" not in stale.headers
+        with sqlite3.connect(module.config.DB_PATH) as conn:
+            conn.execute(
+                "UPDATE gate_receipts SET signature_sha256 = NULL, settled_at = NULL, exp = ? ",
+                (settled_at + 10_000,),
+            )
+        missing = _gate(
+            http,
+            "POST",
+            "/internal/gate/x402/receipt",
+            json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
+        )
+        _assert_expired(missing)
+        assert _settle_count(calls) == 1
+        assert _verify_count(calls) == 1
+
+
+def test_incoherent_settlement_is_unavailable_without_another_payment(tmp_path, monkeypatch):
+    key_id, secret_key, _key = _material()
+    module = _load_app(tmp_path, **_cdp_env(key_id, secret_key))
+    _patch_dns(monkeypatch, module)
+    owner = Account.create()
+    buyer = Account.create()
+    stranger = Account.create()
+    calls: list[str] = []
+    other_tx = "0x" + "11" * 32
+
+    def _post(url, body, headers):
+        del body, headers
+        calls.append(url)
+        if url.endswith("/verify"):
+            return {"isValid": True, "payer": buyer.address}
+        return {"success": True, "transaction": "0x" + "ab" * 32, "payer": buyer.address}
+
+    with TestClient(module.app) as http:
+        key = _buy(http)
+        _verify_payee(http, key, owner)
+        http.post(
+            "/v1/sites",
+            headers={"X-Api-Key": key},
+            json={"slug": "my-shop", "display_name": "My Shop", "origin_url": "https://origin.example", "listed": True},
+        )
+        http.post(
+            "/v1/sites/my-shop/routes",
+            headers={"X-Api-Key": key},
+            json={"path": "/paid", "price_currency": "usd", "price_usd_atomic": 10_000},
+        )
+        http.post("/v1/admin/sites/my-shop/approve", headers={"X-Admin-Token": "test-admin-token"})
+        http.patch(
+            "/v1/sites/my-shop",
+            headers={"X-Api-Key": key},
+            json={"rail_x402": True, "rail_lightning": False, "x402_mode": "live"},
+        )
+        importlib.import_module("app.x402_facilitator").poster = _post
+        client_id = _client_id(http, key)
+        issued = _gate(http, "POST", "/internal/gate/challenge", json={"slug": "my-shop", "path": "/paid"})
+        encoded = _payload(issued.headers["payment-required"], buyer, issued.json()["expires_at"])
+        paid = _gate(
+            http,
+            "POST",
+            "/internal/gate/x402/receipt",
+            json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
+        )
+        assert paid.status_code == 200
+        with sqlite3.connect(module.config.DB_PATH) as conn:
+            conn.execute("UPDATE payment_offers SET expires_at = 1")
+            auth = conn.execute(
+                "SELECT network, asset, payer, nonce FROM x402_authorizations"
+            ).fetchone()
+        network, asset, payer, nonce = auth
+        del asset, payer, nonce
+
+        def recover():
+            return _gate(
+                http,
+                "POST",
+                "/internal/gate/x402/receipt",
+                json={"slug": "my-shop", "path": "/paid", "payment_signature": encoded},
+            )
+
+        def snapshot():
+            with sqlite3.connect(module.config.DB_PATH) as conn:
+                auths = conn.execute(
+                    "SELECT state, tx_hash, credit_charged, updated_at FROM x402_authorizations ORDER BY id"
+                ).fetchall()
+                offers = conn.execute(
+                    "SELECT client_id, resource FROM payment_offers ORDER BY created_at"
+                ).fetchall()
+            return (
+                _counts(module, http, key, client_id, calls),
+                tuple(tuple(row) for row in auths),
+                tuple(tuple(row) for row in offers),
+            )
+
+        with sqlite3.connect(module.config.DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            saved = conn.execute("SELECT * FROM x402_authorizations").fetchone()
+            columns = list(saved.keys())
+
+        def restore(conn) -> None:
+            conn.execute("DELETE FROM x402_authorizations")
+            conn.execute(
+                f"INSERT INTO x402_authorizations ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                tuple(saved[name] for name in columns),
+            )
+            conn.execute(
+                "UPDATE x402_authorizations SET state = 'settled', tx_hash = ?, credit_charged = 0",
+                ("0x" + "ab" * 32,),
+            )
+            conn.execute(
+                "UPDATE payment_offers SET client_id = ?, resource = ?",
+                (client_id, "gate:my-shop:/paid"),
+            )
+            conn.execute("UPDATE gate_receipts SET network = ?", (network,))
+
+        def clone_offer(conn, new_id: str, **changes) -> None:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM payment_offers ORDER BY created_at LIMIT 1").fetchone()
+            names = list(row.keys())
+            values = []
+            for column in names:
+                if column == "id":
+                    values.append(new_id)
+                elif column == "payment_hash":
+                    values.append(None)
+                elif column in changes:
+                    values.append(changes[column])
+                else:
+                    values.append(row[column])
+            conn.execute(
+                f"INSERT INTO payment_offers ({', '.join(names)}) VALUES ({', '.join('?' for _ in names)})",
+                values,
+            )
+            conn.execute("UPDATE x402_authorizations SET offer_id = ?", (new_id,))
+
+        steps = (
+            ("sql", "DELETE FROM x402_authorizations"),
+            ("sql", "UPDATE x402_authorizations SET tx_hash = NULL"),
+            ("sql", "UPDATE x402_authorizations SET state = 'verified'"),
+            ("sql", "UPDATE x402_authorizations SET tx_hash = 'not-a-tx'"),
+            ("sql", "UPDATE gate_receipts SET network = 'eip155:1'"),
+            ("clone", ("offer-other-client", {"client_id": client_id + 1})),
+            ("clone", ("offer-other-resource", {"resource": "gate:my-shop:/other"})),
+        )
+        for kind, payload in steps:
+            with sqlite3.connect(module.config.DB_PATH) as conn:
+                restore(conn)
+                if kind == "sql":
+                    conn.execute(payload)
+                else:
+                    new_id, changes = payload
+                    clone_offer(conn, new_id, **changes)
+            before = snapshot()
+            denied = recover()
+            assert denied.status_code == 502
+            body = denied.json()
+            assert body.get("error") == "paywall_unavailable"
+            assert "receipt" not in body
+            assert "payment_response" not in body
+            assert "payment-response" not in denied.headers
+            assert other_tx.encode() not in denied.content
+            assert snapshot() == before
+
+        with sqlite3.connect(module.config.DB_PATH) as conn:
+            restore(conn)
+            conn.execute("UPDATE x402_authorizations SET tx_hash = NULL")
+            conn.execute(
+                """
+                INSERT INTO x402_authorizations(
+                  network, asset, payer, nonce, offer_id, value_atomic, pay_to, state,
+                  tx_hash, credit_charged, uses_consumed, updated_at
+                )
+                SELECT network, asset, ?, nonce, offer_id, value_atomic, pay_to, 'settled',
+                       ?, 0, 0, updated_at
+                FROM x402_authorizations
+                """,
+                (stranger.address, other_tx),
+            )
+        denied = recover()
+        assert denied.status_code == 502
+        assert other_tx.encode() not in denied.content
+        assert _settle_count(calls) == 1
+        assert _verify_count(calls) == 1
+
+
+def test_public_gate_recovered_header_matches_the_settlement(tmp_path, monkeypatch):
+    from test_satsgate_gate import _close, _open_gate
+    from test_x402 import _enable_x402
+
+    module = _load_app(tmp_path)
+    _patch_dns(monkeypatch, module)
+    owner = Account.create()
+    buyer = Account.create()
+    calls: list[str] = []
+
+    def _post(url, body, headers):
+        del body, headers
+        calls.append(url)
+        if url.endswith("/verify"):
+            return {"isValid": True, "payer": buyer.address}
+        return {"success": True, "transaction": "0x" + "ef" * 32, "payer": buyer.address}
+
+    with TestClient(module.app) as core:
+        key = _buy(core)
+        _verify_payee(core, key, owner)
+        core.post(
+            "/v1/sites",
+            headers={"X-Api-Key": key},
+            json={"slug": "my-shop", "display_name": "My Shop", "origin_url": "https://origin.example", "listed": False},
+        )
+        core.post(
+            "/v1/sites/my-shop/routes",
+            headers={"X-Api-Key": key},
+            json={"path": "/paid", "price_currency": "usd", "price_usd_atomic": 10_000},
+        )
+        core.post("/v1/admin/sites/my-shop/approve", headers={"X-Admin-Token": "test-admin-token"})
+        _enable_x402(core, key)
+        importlib.import_module("app.x402_facilitator").poster = _post
+        gate, core_client, _origin = _open_gate(module.app, _settings())
+        try:
+            with gate as http:
+                challenge = http.get("/my-shop/paid")
+                assert challenge.status_code == 402
+                signature = _payload(
+                    challenge.headers["payment-required"],
+                    buyer,
+                    challenge.json()["x402"]["expires_at"],
+                )
+                paid = http.get("/my-shop/paid", headers={"PAYMENT-SIGNATURE": signature})
+                assert paid.status_code == 200
+                first = _settlement_view(paid)
+                assert first["success"] is True
+                assert first["transaction"] == "0x" + "ef" * 32
+                assert first["network"]
+                with sqlite3.connect(module.config.DB_PATH) as conn:
+                    conn.execute("UPDATE payment_offers SET expires_at = 1")
+                    conn.execute("UPDATE gate_receipts SET charged = 0")
+                settles = _settle_count(calls)
+                recovered = http.get("/my-shop/paid", headers={"PAYMENT-SIGNATURE": signature})
+                assert recovered.status_code == 200
+                assert _settlement_view(recovered) == first
+                assert _digest(recovered.json()["receipt"]) == _digest(paid.json()["receipt"])
+                head = http.head("/my-shop/paid", headers={"PAYMENT-SIGNATURE": signature})
+                assert head.status_code == 200
+                assert head.content == b""
+                assert head.headers.get("payment-response") == recovered.headers.get("payment-response")
+                assert _settle_count(calls) == settles
+                assert _verify_count(calls) == settles
+        finally:
+            _close(core_client)
 
 
 class _Sites(httpx.AsyncBaseTransport):
@@ -1156,8 +1638,10 @@ def test_ofac_update_rejects_non_xml_and_tiny_files(tmp_path, monkeypatch):
     script = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(script)
+    bad = tmp_path / "not-xml.xml"
+    bad.write_bytes(b"this is not xml")
     with pytest.raises(RuntimeError, match="did not parse"):
-        script.extract_evm(b"this is not xml")
+        script.extract_evm(bad)
     dest = tmp_path / "ofac_evm.txt"
     dest.write_text("keep\n", encoding="utf-8")
 
@@ -1168,14 +1652,13 @@ def test_ofac_update_rejects_non_xml_and_tiny_files(tmp_path, monkeypatch):
         def geturl(self):
             return script.PRIMARY
 
-        def read(self):
+        def read(self, amt=-1):
+            if amt is None or int(amt) < 0:
+                raise AssertionError("unlimited read")
             return b"<html>no</html>"
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
+        def close(self):
+            return None
 
     class _Opener:
         def open(self, request, timeout=60):
@@ -1186,7 +1669,10 @@ def test_ofac_update_rejects_non_xml_and_tiny_files(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="content type"):
         script._fetch(script.PRIMARY)
 
-    monkeypatch.setattr(script, "_fetch", lambda url: (b"<Sanctions></Sanctions>", url))
+    tiny = tmp_path / "tiny.xml"
+    raw = b"<Sanctions></Sanctions>"
+    tiny.write_bytes(raw)
+    monkeypatch.setattr(script, "_fetch", lambda url: (tiny, len(raw)))
     monkeypatch.setattr(script.sys, "argv", ["ofac_evm_update.py", str(dest)])
     assert script.main() == 1
     assert dest.read_text(encoding="utf-8") == "keep\n"

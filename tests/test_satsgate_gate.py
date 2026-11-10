@@ -204,7 +204,7 @@ def test_root_names_receipt_delivery(tmp_path, monkeypatch):
             root = http.get("/")
             assert root.status_code == 200, root.text
             body = root.json()
-            assert body["version"] == "0.15.1"
+            assert body["version"] == "0.15.2"
             assert body["delivery"] == "receipt"
             assert body["abuse_contact"] == "abuse@example.com"
             assert body["terms_url"] == "https://satsgate.org/terms"
@@ -213,8 +213,19 @@ def test_root_names_receipt_delivery(tmp_path, monkeypatch):
         _close(core_client)
 
 
+def _header_view(headers) -> dict[str, str | None]:
+    keys = ("cache-control", "www-authenticate", "payment-required", "link", "retry-after")
+    return {key: headers.get(key) for key in keys}
+
+
+def _without_contact(body: dict) -> dict:
+    data = dict(body)
+    data.pop("abuse_contact", None)
+    return data
+
+
 def test_abuse_contact_is_on_every_402_and_absent_when_empty():
-    from satsgate_gate.app import _challenge_response
+    from satsgate_gate.app import _challenge_response, _failure
     from satsgate_gate.cache import CachedSite, GateRoute
     from satsgate_gate.core_client import Challenge, CoreResult
 
@@ -256,28 +267,80 @@ def test_abuse_contact_is_on_every_402_and_absent_when_empty():
         payment_required="e30",
         x402={"testing": True, "x402_mode": "test"},
     )
-    set_contact = _settings()
-    empty = _settings(abuse_contact="")
-    for challenge in (lightning, x402_only, dual):
-        present = _challenge_response(
-            CoreResult(action="challenge", challenge=challenge),
-            None,
-            site,
-            "/blog/post",
-            set_contact,
-        )
-        assert present.status_code == 402
-        body = json.loads(present.body)
-        assert body["abuse_contact"] == "abuse@example.com"
-        assert body["error"] == "payment_required"
-        missing = _challenge_response(
-            CoreResult(action="challenge", challenge=challenge),
-            None,
-            site,
-            "/blog/post",
-            empty,
-        )
-        assert "abuse_contact" not in json.loads(missing.body)
+    challenges = {"lightning": lightning, "x402": x402_only, "dual": dual}
+    failures = {
+        "pending": CoreResult(
+            action="pending",
+            error="payment_pending",
+            payment_hash="ab" * 32,
+            retry_after=3,
+        ),
+        "expired": CoreResult(action="rejected", error="expired", http_status=402),
+        "rejected": CoreResult(
+            action="rejected",
+            error="x402_rejected",
+            http_status=402,
+            reason="payer_mismatch",
+        ),
+    }
+    for contact in ("abuse@example.com", ""):
+        settings = _settings(abuse_contact=contact)
+        for label, challenge in challenges.items():
+            response = _challenge_response(
+                CoreResult(action="challenge", challenge=challenge),
+                None,
+                site,
+                "/blog/post",
+                settings,
+            )
+            body = json.loads(response.body)
+            assert response.status_code == 402, label
+            assert body["error"] == "payment_required", label
+            assert "receipt" not in body, label
+            if contact:
+                assert body["abuse_contact"] == contact, label
+            else:
+                assert "abuse_contact" not in body, label
+            empty = _challenge_response(
+                CoreResult(action="challenge", challenge=challenge),
+                None,
+                site,
+                "/blog/post",
+                _settings(abuse_contact=""),
+            )
+            assert _without_contact(body) == json.loads(empty.body), label
+            assert _header_view(response.headers) == _header_view(empty.headers), label
+        for label, result in failures.items():
+            response = _failure(result, settings)
+            body = json.loads(response.body)
+            assert response.status_code == 402, label
+            assert body["error"] == result.error, label
+            assert "invoice" not in body and "receipt" not in body, label
+            if result.reason:
+                assert body["reason"] == result.reason, label
+            if label == "pending":
+                assert response.headers["retry-after"] == "3", label
+                assert body["retry_after_seconds"] == 3, label
+            if contact:
+                assert body["abuse_contact"] == contact, label
+            else:
+                assert "abuse_contact" not in body, label
+            bare = _failure(result, _settings(abuse_contact=""))
+            assert _without_contact(body) == json.loads(bare.body), label
+            assert _header_view(response.headers) == _header_view(bare.headers), label
+    configured = _settings()
+    negatives = (
+        CoreResult(action="rejected", error="bad_signature", http_status=400),
+        CoreResult(action="rejected", error="token_expired", http_status=401, reason="token_expired"),
+        CoreResult(action="rejected", error="account_suspended", http_status=403),
+        CoreResult(action="rejected", error="x402_in_progress", http_status=409),
+        CoreResult(action="limited", error="rate_limited", retry_after=4),
+        CoreResult(action="unavailable", error="paywall_unavailable"),
+    )
+    for result in negatives:
+        response = _failure(result, configured)
+        assert response.status_code != 402
+        assert "abuse_contact" not in json.loads(response.body)
 
 
 def test_unpaid_402_names_the_seller_and_does_not_read_the_body(tmp_path, monkeypatch):
@@ -352,10 +415,150 @@ def test_pending_invoice_sets_retry_after(tmp_path, monkeypatch):
                 challenge = http.get("/my-shop/blog/post")
                 offered = challenge.json()
                 pending = http.get("/my-shop/blog/post", headers=_auth(offered["macaroon"]))
-                assert pending.status_code == 401, pending.text
+                assert pending.status_code == 401, pending.status_code
                 assert pending.json()["error"] == "preimage_required"
+                assert "abuse_contact" not in pending.json()
         finally:
             _close(core_client)
+
+    calls: list[str] = []
+
+    class _PendingCore(_CoreOnly):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            if request.url.host != "core.test":
+                raise AssertionError("gate called a non-core host")
+            calls.append(request.url.path)
+            if request.url.path.endswith("/receipt") and "x402" not in request.url.path:
+                return httpx.Response(
+                    402,
+                    json={
+                        "ok": False,
+                        "error": "payment_pending",
+                        "payment_hash": "ab" * 32,
+                        "retry_after_seconds": 3,
+                    },
+                    headers={"Retry-After": "3"},
+                )
+            return await super().handle_async_request(request)
+
+    gate_app = create_app(_settings())
+    client = httpx.AsyncClient(transport=_PendingCore(module.app), base_url="http://core.test", timeout=5)
+    gate_app.state.core_client = client
+    try:
+        with TestClient(gate_app) as http:
+            challenge = http.get("/my-shop/blog/post")
+            offered = challenge.json()
+            waiting = http.get("/my-shop/blog/post", headers=_auth(offered["macaroon"], "00" * 32))
+            assert waiting.status_code == 402
+            body = waiting.json()
+            assert body["error"] == "payment_pending"
+            assert body["abuse_contact"] == "abuse@example.com"
+            assert body["retry_after_seconds"] == 3
+            assert waiting.headers["retry-after"] == "3"
+            assert "invoice" not in body and "receipt" not in body
+    finally:
+        _close(client)
+
+
+def _challenge_rows(db_path: str) -> tuple[str, ...]:
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        return tuple(
+            row[0]
+            for row in conn.execute("SELECT payment_hash FROM paywall_challenges ORDER BY payment_hash")
+        )
+
+
+def test_gate_402_contact_reaches_buyers_and_head_stays_empty(tmp_path, monkeypatch):
+    module = _load_app(tmp_path, SATSGATE_TRUSTED_PROXIES="testclient,127.0.0.1")
+    _patch_dns(monkeypatch, module)
+    script = {"mode": "expired"}
+
+    class _ScriptCore(_CoreOnly):
+        def __init__(self, app) -> None:
+            super().__init__(app)
+            self.hosts: list[str] = []
+            self.paths: list[str] = []
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            self.hosts.append(request.url.host)
+            self.paths.append(f"{request.method} {request.url.path}")
+            if request.url.host != "core.test":
+                raise AssertionError("gate called a non-core host")
+            path = request.url.path
+            mode = script["mode"]
+            if path.endswith("/x402/receipt") and mode == "expired":
+                return httpx.Response(402, json={"ok": False, "error": "expired"})
+            if path.endswith("/x402/receipt") and mode == "rejected":
+                return httpx.Response(
+                    402,
+                    json={"ok": False, "error": "x402_rejected", "reason": "payer_mismatch"},
+                )
+            if path.endswith("/x402/receipt") and mode == "other":
+                status = int(script["status"])
+                return httpx.Response(status, json={"ok": False, "error": script["error"]})
+            return await super().handle_async_request(request)
+
+    with TestClient(module.app) as core:
+        _prepare(core)
+        transport = _ScriptCore(module.app)
+        client = httpx.AsyncClient(transport=transport, base_url="http://core.test", timeout=5)
+        gate = create_app(_settings())
+        gate.state.core_client = client
+        empty_gate = create_app(_settings(abuse_contact=""))
+        empty_client = httpx.AsyncClient(transport=transport, base_url="http://core.test", timeout=5)
+        empty_gate.state.core_client = empty_client
+        try:
+            with TestClient(gate) as http:
+                buyer = {"X-Forwarded-For": "203.0.113.9"}
+                challenge = http.get("/my-shop/blog/post", headers=buyer)
+                assert challenge.status_code == 402
+                assert challenge.json()["error"] == "payment_required"
+                assert challenge.json()["abuse_contact"] == "abuse@example.com"
+                offers = _challenge_rows(os.environ["SATSGATE_DB_PATH"])
+                head = http.head("/my-shop/blog/post", headers=buyer)
+                assert head.status_code == 402
+                assert head.content == b""
+                same_offer = _challenge_rows(os.environ["SATSGATE_DB_PATH"]) == offers
+                assert same_offer
+                assert head.headers.get("cache-control") == challenge.headers.get("cache-control")
+                assert head.headers.get("link") == challenge.headers.get("link")
+                assert head.headers.get("www-authenticate")
+                assert challenge.headers.get("www-authenticate")
+                expired = http.get("/my-shop/blog/post", headers={"PAYMENT-SIGNATURE": "c2ln"})
+                assert expired.status_code == 402
+                assert expired.json()["error"] == "expired"
+                assert expired.json()["abuse_contact"] == "abuse@example.com"
+                assert "receipt" not in expired.json()
+                script["mode"] = "rejected"
+                rejected = http.post("/my-shop/blog/post", headers={"PAYMENT-SIGNATURE": "c2ln"})
+                assert rejected.status_code == 402
+                assert rejected.json()["error"] == "x402_rejected"
+                assert rejected.json()["reason"] == "payer_mismatch"
+                assert rejected.json()["abuse_contact"] == "abuse@example.com"
+                for status, error in (
+                    (400, "bad_signature"),
+                    (401, "token_expired"),
+                    (403, "account_suspended"),
+                    (409, "x402_in_progress"),
+                    (429, "rate_limited"),
+                    (502, "paywall_unavailable"),
+                ):
+                    script["mode"] = "other"
+                    script["status"] = status
+                    script["error"] = error
+                    response = http.get("/my-shop/blog/post", headers={"PAYMENT-SIGNATURE": "c2ln"})
+                    assert response.status_code == status
+                    assert "abuse_contact" not in response.json()
+            with TestClient(empty_gate) as http:
+                script["mode"] = "expired"
+                quiet = http.get("/my-shop/blog/post", headers={"PAYMENT-SIGNATURE": "c2ln"})
+                assert quiet.status_code == 402
+                assert "abuse_contact" not in quiet.json()
+            assert set(transport.hosts) == {"core.test"}
+        finally:
+            _close(client, empty_client)
 
 
 def test_one_rail_only(tmp_path, monkeypatch):

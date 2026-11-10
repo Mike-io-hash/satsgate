@@ -407,7 +407,10 @@ def _resolve_limited(lookup: Callable, host: str, port: int, args: tuple, kwargs
     """DNS with at most ``_RESOLVER_LIMIT`` outstanding lookups.
 
     A full set of lookups fails the next one immediately. A lookup that is
-    still running at the deadline does not start the HTTP request.
+    still running at the deadline does not start the HTTP request. If the
+    worker cannot be constructed or started, the permit is returned once
+    here. A worker that did start releases it, including after this caller
+    has already timed out.
     """
     remaining = deadline_at - time.monotonic()
     if remaining <= 0:
@@ -415,6 +418,7 @@ def _resolve_limited(lookup: Callable, host: str, port: int, args: tuple, kwargs
     if not _resolver_slots.acquire(blocking=False):
         raise SSRFError("fetch_failed")
     box: dict = {}
+    started = False
 
     def run() -> None:
         try:
@@ -424,14 +428,22 @@ def _resolve_limited(lookup: Callable, host: str, port: int, args: tuple, kwargs
         finally:
             _resolver_slots.release()
 
-    worker = threading.Thread(target=run, name="satsgate-webhook-dns", daemon=True)
-    worker.start()
-    worker.join(remaining)
-    if worker.is_alive():
-        raise SSRFError("fetch_failed")
-    if "error" in box:
-        raise box["error"]
-    return box.get("value")
+    try:
+        try:
+            worker = threading.Thread(target=run, name="satsgate-webhook-dns", daemon=True)
+            worker.start()
+        except Exception as exc:
+            raise SSRFError("fetch_failed") from exc
+        started = True
+        worker.join(remaining)
+        if worker.is_alive():
+            raise SSRFError("fetch_failed")
+        if "error" in box:
+            raise box["error"]
+        return box.get("value")
+    finally:
+        if not started:
+            _resolver_slots.release()
 
 
 def _abort_active_connections(client: httpx.Client | None) -> None:
@@ -569,6 +581,82 @@ def _delivery_client() -> httpx.Client:
     )
 
 
+def _capped_timeout(timeout: float | None, deadline_at: float) -> float:
+    """Time left until ``deadline_at``, and never more than ``timeout``.
+
+    A non-positive result means the caller must not start that socket call.
+    """
+    remaining = deadline_at - time.monotonic()
+    if remaining <= 0:
+        raise SSRFError("fetch_failed")
+    if timeout is None:
+        return remaining
+    return min(float(timeout), remaining)
+
+
+class _DeadlineStream:
+    """Recalculate the socket timeout before every blocking read, write, and handshake."""
+
+    def __init__(self, inner, deadline_at: float) -> None:
+        self._inner = inner
+        self._deadline_at = deadline_at
+
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        return self._inner.read(max_bytes, _capped_timeout(timeout, self._deadline_at))
+
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        self._inner.write(buffer, _capped_timeout(timeout, self._deadline_at))
+
+    def close(self) -> None:
+        self._inner.close()
+
+    def start_tls(self, ssl_context, server_hostname=None, timeout=None):  # noqa: ANN001
+        capped = _capped_timeout(timeout, self._deadline_at)
+        tls = self._inner.start_tls(ssl_context, server_hostname, capped)
+        return _DeadlineStream(tls, self._deadline_at)
+
+    def get_extra_info(self, info: str):
+        return self._inner.get_extra_info(info)
+
+
+class _DeadlineBackend:
+    """Cap connect, then wrap the stream so later I/O sees the same deadline."""
+
+    def __init__(self, inner, deadline_at: float) -> None:
+        self._inner = inner
+        self._deadline_at = deadline_at
+
+    def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):  # noqa: ANN001
+        capped = _capped_timeout(timeout, self._deadline_at)
+        stream = self._inner.connect_tcp(host, port, capped, local_address, socket_options)
+        return _DeadlineStream(stream, self._deadline_at)
+
+    def connect_unix_socket(self, path, timeout=None, socket_options=None):  # noqa: ANN001
+        raise SSRFError("destination_rejected")
+
+    def sleep(self, seconds: float) -> None:
+        self._inner.sleep(seconds)
+
+
+def _install_deadline_backend(client: httpx.Client, deadline_at: float):
+    transport = getattr(client, "_transport", None)
+    pool = getattr(transport, "_pool", None)
+    if pool is None:
+        return None
+    original = pool._network_backend
+    pool._network_backend = _DeadlineBackend(original, deadline_at)
+    return original
+
+
+def _restore_deadline_backend(client: httpx.Client, original) -> None:
+    if original is None:
+        return
+    transport = getattr(client, "_transport", None)
+    pool = getattr(transport, "_pool", None)
+    if pool is not None:
+        pool._network_backend = original
+
+
 def _post_bounded(
     guarded: GuardedURL,
     raw: bytes,
@@ -588,11 +676,13 @@ def _post_bounded(
     remaining = deadline_at - time.monotonic()
     if remaining <= 0:
         raise SSRFError("fetch_failed")
-    # Each socket operation gets only the time still left, not a new full budget.
+    # The request timeout is an upper bound. Each later socket call is capped
+    # again to whatever is still left, on the stream that actually blocks.
     op_timeout = min(float(timeout), remaining)
     # This thread performs the connect, so the pin has to be set here.
     _local.pinned_ip = guarded.ip
     _local.pinned_host = guarded.host
+    original_backend = _install_deadline_backend(client, deadline_at)
     try:
         with client.stream(
             "POST",
@@ -618,6 +708,7 @@ def _post_bounded(
                 raise SSRFError("fetch_failed")
             return response.status_code, payload
     finally:
+        _restore_deadline_backend(client, original_backend)
         _local.pinned_ip = None
         _local.pinned_host = None
 
