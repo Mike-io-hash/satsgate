@@ -375,7 +375,7 @@ def test_sender_retries_and_clears_secrets(tmp_path):
     assert timeout == 5.0
     assert headers["Authorization"] == f"Bearer {_KEY}"
     assert headers["Idempotency-Key"] == f"satsgate-alert_email_confirm-{row_id}"
-    assert headers["User-Agent"] == "satsgate/0.18.1"
+    assert headers["User-Agent"] == "satsgate/0.19.0"
     assert body["from"] == "Satsgate <alerts@satsgate.org>"
     assert body["to"] == ["seller@proton.me"]
     assert body["reply_to"] == "satsgateapp@proton.me"
@@ -471,7 +471,7 @@ def test_sender_thread_starts_only_when_email_is_enabled(tmp_path):
     module.email_send.poster = lambda *args: (200, {})
     with TestClient(module.app) as http:
         assert any(thread.name == "satsgate-email" for thread in threading.enumerate())
-        assert http.get("/health").json()["version"] == "0.18.1"
+        assert http.get("/health").json()["version"] == "0.19.0"
 
 
 def test_confirmation_rate_limits(tmp_path):
@@ -556,7 +556,18 @@ def test_templates_shorten_escape_and_name_support(tmp_path):
     assert "connect page" in text
     assert "USDC was turned off on your sites." in text
     assert "satsgateapp@proton.me" in text
+    assert "POST /v1/client/api-key/rotate" in text
+    assert text.find("POST /v1/client/api-key/rotate") < text.find("satsgateapp@proton.me")
+    assert "Never send a key, seed phrase or private key." in text
     assert "If this was you, you don't need to do anything." in text
+    ofac_subject, ofac_text, _ofac_html = templates.render(
+        "payee_ofac_flagged",
+        client_id=12,
+        params={"address": "0x4A9E…2Ce3", "at": 1_761_773_520},
+    )
+    assert ofac_subject == "Satsgate: a payout address was blocked"
+    assert "sanctions list" in ofac_text
+    assert "api-key/rotate" not in ofac_text
     assert "<img" not in html.lower()
     escaped = templates.render(
         "payee_lightning_changed",

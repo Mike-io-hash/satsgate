@@ -53,6 +53,95 @@ To set the USDC address, create a one-time link with `POST /v1/client/payee/evm/
 
 Add an alert email (recommended) on the connect page or with `PUT /v1/client/alert-email`, and confirm it from your inbox. You'll get an email whenever a payout address changes. Remove it with `DELETE /v1/client/alert-email`. The address is optional. Satsgate does not use it for marketing.
 
+## Rotate the account key
+
+If the `sg_…` account key may have leaked, rotate it yourself. The old key stops working as soon as this returns. There is no grace period. Restricted `sgr_…` keys are not changed and do not have permission to call this. The new key is shown once.
+
+```bash
+curl -s -X POST https://api.satsgate.org/v1/client/api-key/rotate \
+  -H 'X-Api-Key: sg_...YOUR_CURRENT_ACCOUNT_KEY...'
+```
+
+`200` is `{ "ok": true, "api_key": "sg_…", "prefix": "sg_…xxxx" }`. `prefix` is the first 8 characters. A restricted key is `403 insufficient_scope`. After a successful rotate, the previous key is `401 invalid_api_key`. Save the new key, then keep using it as `X-Api-Key`. If you did not mean to rotate, write to support and ask for your sites to be paused. Never send the key, a seed phrase, or a private key.
+
+Rotation shares an account limit with webhook create, replace, delete, and the test call: `SATSGATE_RL_MAX_SECURITY` (default 10) per `SATSGATE_RL_WINDOW_SECONDS` (default 60). Only the current account key spends it. A restricted key is rejected and does not use up the allowance. Replacing the account key does not start a new allowance. `429 rate_limited` includes `Retry-After`.
+
+A confirmed alert email is told. A security webhook, if you have one, gets the same `account_key_rotated` event. The event data is `at` (UTC text), `prefix`, and `via` (`api`). It does not include the old or new key.
+
+## Security webhook
+
+Register an https URL to receive the same security events as the alert email, plus rotation. The URL is checked when you save it and again on every delivery: https only, no username or password, a public address, no redirects, and at most 300 characters. Each delivery has one 5 second limit for the whole attempt, starting before DNS and covering connect, TLS, the request, the response headers, and the body. If those 5 seconds run out at any point, even after a few body bytes have arrived, that attempt fails and will be retried. Satsgate closes the connection when the limit runs out. It reads at most 4 KiB of the raw response and does not decompress it. Finishing inside the limit, or stopping at 4 KiB, is a normal response.
+
+```bash
+curl -s -X PUT https://api.satsgate.org/v1/client/webhook \
+  -H 'Content-Type: application/json' \
+  -H 'X-Api-Key: sg_...YOUR_ACCOUNT_KEY...' \
+  -d '{"url":"https://example.com/satsgate-webhook"}'
+```
+
+The first response includes `secret` (`whsec_…`) once. A later `PUT` with a new URL keeps that secret and does not return it. Send `"rotate_secret": true` to replace the secret and read the new one once. `GET /v1/client/webhook` returns `url`, `enabled`, `secret_prefix`, and `last_delivery` (or `null`). It never returns the secret. `DELETE /v1/client/webhook` removes it. `POST /v1/client/webhook/test` queues a test event. All four calls use the account key. The operator must have `SATSGATE_SITE_SECRET_KEY` set; without it the save and the test call are `503 webhooks_unavailable` and the secret is not stored. `SATSGATE_WEBHOOKS=0` stops delivery and does not block these calls.
+
+Changing the URL, rotating the secret, or turning a disabled webhook back on drops queued deliveries for the previous configuration. A POST that has already left Satsgate is not recalled. Those changes, and a 404 or 410 that turns the webhook off, are written to the account ledger without the secret or the URL.
+
+Each delivery is `POST` with `Content-Type: application/json` and these headers:
+
+- `Satsgate-Webhook-Id` — the same value as the JSON `id` (`evt_…`). Retries reuse it. Dedupe on it.
+- `Satsgate-Webhook-Timestamp` — unix seconds. A new value on every attempt, including retries.
+- `Satsgate-Webhook-Signature` — `v1=` plus hex HMAC-SHA256.
+
+The HMAC key is the UTF-8 bytes of the entire `whsec_…` string. The message is the timestamp, a dot, and the raw body bytes. Verify those bytes before you parse JSON, with a constant-time compare. Reject a timestamp more than 300 seconds from your clock.
+
+Worked example. Secret `whsec_test_vector_secret`, timestamp `1700000000`, body:
+
+```text
+{"created_at":1700000000,"data":{"at":"2023-11-14 22:13 UTC"},"id":"evt_test","type":"webhook_test"}
+```
+
+Signature: `v1=cc9626aae0328af78a2024d37a78706c0f330fe98457609c5e91517dc0ee28f9`
+
+Python:
+
+```python
+import hmac, hashlib
+
+def verify_satsgate_webhook(secret: str, timestamp: str, raw_body: bytes, signature: str, now: int) -> bool:
+    try:
+        stamp = int(timestamp)
+        current = int(now)
+    except (TypeError, ValueError):
+        return False
+    if abs(current - stamp) > 300:
+        return False
+    if not isinstance(raw_body, (bytes, bytearray)) or not isinstance(signature, str):
+        return False
+    digest = hmac.new(
+        secret.encode("utf-8"),
+        f"{stamp}.".encode("ascii") + bytes(raw_body),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(f"v1={digest}", signature)
+```
+
+Node:
+
+```javascript
+const crypto = require("crypto");
+
+function verifySatsgateWebhook(secret, timestamp, rawBody, signature, now) {
+  const skew = Math.abs(Number(now) - Number(timestamp));
+  if (!Number.isFinite(skew) || skew > 300) return false;
+  const expected = "v1=" + crypto.createHmac("sha256", secret).update(`${timestamp}.`).update(rawBody).digest("hex");
+  const left = Buffer.from(expected);
+  const right = Buffer.from(String(signature));
+  if (left.length !== right.length) return false;
+  return crypto.timingSafeEqual(left, right);
+}
+```
+
+Events: `payee_lightning_changed`, `payee_evm_changed`, `payee_ofac_flagged`, `alert_email_changed`, `alert_email_removed`, `account_key_rotated`, `webhook_test`. The JSON is `{ "id", "type", "created_at", "data" }`. `data` uses the same masked fields as the email: shortened payout addresses, a masked alert address, and the new key's prefix. It does not include a full key, a full payout address, a signature, or an email confirmation token. `created_at` is unix seconds and stays the same on retry. The body bytes stay the same on retry. Only the timestamp and signature change.
+
+A 2xx means delivered. HTTP 404 or 410 turns the webhook off and is not retried. A redirect is not followed, and that delivery fails without a retry. If DNS at send time is a private address, the event is not sent and is marked failed; the webhook stays on. Other failures retry up to 5 sends in total (the first try, then after 60 seconds, 5 minutes, 30 minutes, and 2 hours). A send that was already handed to the network counts toward those five even if the process restarts before the result is saved. Retries reuse the same `id`; dedupe on it. If you have a confirmed alert email, Satsgate mails you that a 404 or 410 turned the webhook off. It does not include the URL. Register a new URL with `PUT` if you still want events. No webhook configured means nothing here changes: email alerts, when you have them, are the same as before.
+
 ## 2) Register your payee (where your users will pay)
 
 ```bash

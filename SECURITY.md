@@ -29,7 +29,7 @@ These checks do not make a malicious Lightning Address provider honest. The prov
 
 A payee signature proves that the connected wallet controls the address. It does not prove that the person holding the Satsgate account key is the same person who set it up. Someone who copies the account key (`sg_`) can sign with a wallet of their own, or can change the Lightning address with no signature at all. The defence is an optional alert email. Satsgate mails that address when a USDC or Lightning payout address changes, and when the alert address itself is changed or removed. A new address does not start receiving those alerts until the person confirms a one-time link. Until then the previous address still gets them, including a notice that a change was requested.
 
-If you get an alert you did not expect, your account key may have been copied. Write to the support address in the email (or to GitHub Security Advisories, linked below) and the operator will pause your sites. Do not send the API key, a seed phrase, or a private key. Satsgate does not ask for them. There is no way to rotate the account key in this version.
+If you get an alert you did not expect, your account key may have been copied. Rotate it yourself with `POST /v1/client/api-key/rotate` (the steps are in `CUSTOMER_QUICKSTART.md`). The old key stops working immediately. Then write to the support address in the email (or to GitHub Security Advisories, linked below) and the operator will pause your sites. Do not send the API key, a seed phrase, or a private key. Satsgate does not ask for them. A security webhook can receive the same alerts, signed, if you would rather not rely on email alone. Rotating the key does not clear a sanctions block.
 
 ## Reporting a Vulnerability
 

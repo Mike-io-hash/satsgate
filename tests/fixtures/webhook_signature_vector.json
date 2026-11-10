@@ -1,0 +1,7 @@
+{
+  "secret": "whsec_test_vector_secret",
+  "timestamp": 1700000000,
+  "now": 1700000100,
+  "body": "{\"created_at\":1700000000,\"data\":{\"at\":\"2023-11-14 22:13 UTC\"},\"id\":\"evt_test\",\"type\":\"webhook_test\"}",
+  "signature": "v1=cc9626aae0328af78a2024d37a78706c0f330fe98457609c5e91517dc0ee28f9"
+}

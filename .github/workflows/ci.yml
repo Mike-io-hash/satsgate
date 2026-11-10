@@ -29,6 +29,9 @@ jobs:
       - name: Express receipt vectors
         run: node proxy/snippets/express_receipt.test.js
 
+      - name: Webhook signature vector
+        run: node tests/webhook_signature.test.js
+
       - name: Ruff
         run: ruff check app tests proxy/src proxy/snippets/fastapi_verify.py proxy/snippets/fastapi_receipt.py mcp/src mcp/scripts gate/src
 

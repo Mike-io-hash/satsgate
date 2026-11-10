@@ -13,6 +13,9 @@ from datetime import datetime, timezone
 from . import config
 
 SECURITY_ADVISORY_URL = "https://github.com/Mike-io-hash/satsgate/security/advisories"
+ROTATE_QUICKSTART_URL = (
+    "https://github.com/Mike-io-hash/satsgate/blob/main/CUSTOMER_QUICKSTART.md#rotate-the-account-key"
+)
 _ELLIPSIS = "…"
 
 
@@ -91,6 +94,8 @@ def render(kind: str, *, client_id: int, params: dict) -> tuple[str, str, str]:
         "alert_email_changed": _changed,
         "alert_email_removed": _removed,
         "alert_email_confirmed": _confirmed,
+        "account_key_rotated": _account_key_rotated,
+        "webhook_disabled": _webhook_disabled,
     }
     builder = builders.get(kind)
     if builder is None:
@@ -109,14 +114,17 @@ def _html_of(text: str) -> str:
 
 
 def _if_it_wasnt_you() -> str:
+    """Stolen-key copy. Rotation first, then a support pause. Not used for sanctions mail."""
     support = (config.SUPPORT_EMAIL or "").strip()
     if support:
-        contact = f"Write to {support} right away and we will pause your sites."
+        contact = f"Then write to {support} and we will pause your sites."
     else:
-        contact = f"Write to {SECURITY_ADVISORY_URL} right away and we will pause your sites."
+        contact = f"Then write to {SECURITY_ADVISORY_URL} and we will pause your sites."
     return (
         "If you did not make this change, your Satsgate account key may have been copied. "
-        f"{contact} Do not reply with your API key, seed phrase or private key; we never ask for them."
+        "Rotate your account key with POST /v1/client/api-key/rotate. "
+        f"The steps are at {ROTATE_QUICKSTART_URL}. "
+        f"{contact} Never send a key, seed phrase or private key. Satsgate does not ask for them."
     )
 
 
@@ -193,6 +201,37 @@ def _removed(*, client_id: int, params: dict) -> tuple[str, str, str]:
         ]
     )
     return "Satsgate: security alerts were turned off", text, _html_of(text)
+
+
+def _account_key_rotated(*, client_id: int, params: dict) -> tuple[str, str, str]:
+    prefix = params.get("prefix") or ""
+    text = "\n\n".join(
+        [
+            f"Account #{int(client_id)}",
+            f"Your account key was rotated. The new key starts with {prefix}.",
+            f"When: {params.get('at') or ''}.",
+            f"How: {params.get('via') or 'api'}.",
+            "The previous key stopped working immediately. The new key was shown once, in the API response.",
+            _if_it_wasnt_you(),
+            "If this was you, you don't need to do anything else.",
+        ]
+    )
+    return "Satsgate: your account key was rotated", text, _html_of(text)
+
+
+def _webhook_disabled(*, client_id: int, params: dict) -> tuple[str, str, str]:
+    """The URL went away. This is not a stolen-key alert and it does not mention sanctions."""
+    status = params.get("status") or ""
+    text = "\n\n".join(
+        [
+            f"Account #{int(client_id)}",
+            f"Your security webhook was turned off because the URL returned HTTP {status}.",
+            "Satsgate stopped sending events to it. The URL is not included in this email.",
+            "Register a new one with PUT /v1/client/webhook if you still want webhook alerts.",
+            f"When: {params.get('at') or ''}.",
+        ]
+    )
+    return "Satsgate: your security webhook was turned off", text, _html_of(text)
 
 
 def _confirmed(*, client_id: int, params: dict) -> tuple[str, str, str]:

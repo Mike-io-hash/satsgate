@@ -17,10 +17,13 @@ from starlette.concurrency import run_in_threadpool
 
 from . import config
 from . import db
+from . import db_account_key
 from . import db_alert_email
 from . import db_clients
 from . import db_keys
+from . import db_webhooks
 from . import email_send
+from . import webhook_send
 from . import db_reports
 from . import db_sites
 from . import db_verify
@@ -81,16 +84,27 @@ async def _lifespan(_app: FastAPI):
             target=email_send.loop, args=(email_stop,), name="satsgate-email", daemon=True
         )
         email_thread.start()
+    webhook_stop = threading.Event()
+    webhook_thread = None
+    if webhook_send.sender_should_run():
+        webhook_thread = threading.Thread(
+            target=webhook_send.loop, args=(webhook_stop,), name="satsgate-webhook", daemon=True
+        )
+        webhook_thread.start()
     try:
         yield
     finally:
         stop.set()
         email_stop.set()
+        webhook_stop.set()
         email_send.wake.set()
+        webhook_send.wake.set()
         if thread is not None:
             thread.join(timeout=1)
         if email_thread is not None:
             email_thread.join(timeout=1)
+        if webhook_thread is not None:
+            webhook_thread.join(timeout=1)
         ssrf.close()
 
 
@@ -145,6 +159,21 @@ RL_TOPUP = RateLimiter(
     max_requests=config.RL_MAX_TOPUP,
     max_keys=config.RL_MAX_KEYS,
 )
+# Keyed by client id. A new account key must not reset this bucket.
+RL_SECURITY = RateLimiter(
+    window_seconds=config.RL_WINDOW_SECONDS,
+    max_requests=config.RL_MAX_SECURITY,
+    max_keys=config.RL_MAX_KEYS,
+)
+_SECURITY_LIMIT_PATHS = frozenset(
+    {
+        ("POST", "/v1/client/api-key/rotate"),
+        ("PUT", "/v1/client/webhook"),
+        ("DELETE", "/v1/client/webhook"),
+        ("POST", "/v1/client/webhook/test"),
+    }
+)
+_MAX_WEBHOOK_BODY = 2048
 
 
 def _authenticate(x_api_key: str | None) -> db_keys.Principal | JSONResponse:
@@ -280,6 +309,19 @@ async def rate_limit_mw(request: Request, call_next):
         return blocked
 
     path = request.url.path
+    # Only a live account key spends this bucket. A restricted key, a connect
+    # token, or an unknown key is rejected by the route and must not lock the
+    # owner out of rotation or webhook changes. The client id is stable across
+    # account-key rotation, so a new sg_ key does not reset the bucket.
+    if (
+        client is not None
+        and raw_key is not None
+        and db_keys.key_kind(raw_key) == db_keys.SCOPE_ACCOUNT
+        and (request.method, path) in _SECURITY_LIMIT_PATHS
+    ):
+        blocked = _reject_if_limited(RL_SECURITY, "s:" + str(client.id))
+        if blocked:
+            return blocked
     if client is not None and path == "/v1/paywall/challenge" and request.method == "POST":
         blocked = _reject_if_limited(RL_CHALLENGE, "c:" + str(client.id))
         if blocked:
@@ -385,6 +427,11 @@ def well_known_satsgate(request: Request) -> dict:
                 "evm_payee_connect": {"method": "POST", "path": "/v1/client/payee/evm/connect"},
                 "alert_email": {"method": "PUT", "path": "/v1/client/alert-email"},
                 "alert_email_delete": {"method": "DELETE", "path": "/v1/client/alert-email"},
+                "api_key_rotate": {"method": "POST", "path": "/v1/client/api-key/rotate"},
+                "webhook": {"method": "PUT", "path": "/v1/client/webhook"},
+                "webhook_get": {"method": "GET", "path": "/v1/client/webhook"},
+                "webhook_delete": {"method": "DELETE", "path": "/v1/client/webhook"},
+                "webhook_test": {"method": "POST", "path": "/v1/client/webhook/test"},
                 "connect_evm": {"method": "GET", "path": "/v1/connect/evm"},
                 "connect_evm_challenge": {"method": "POST", "path": "/v1/connect/evm/challenge"},
                 "connect_evm_verify": {"method": "POST", "path": "/v1/connect/evm/verify"},
@@ -978,6 +1025,167 @@ def v1_client_alert_email_delete(x_api_key: str | None = Header(default=None, al
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
     return _alert_body(saved)
+
+
+_WEBHOOK_PUT_BODY = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "required": ["url"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "maxLength": 300,
+                            "description": "https URL with no username or password. Public addresses only.",
+                        },
+                        "rotate_secret": {
+                            "type": "boolean",
+                            "description": "When true, replace the whsec_ signing secret and return it once.",
+                        },
+                    },
+                }
+            }
+        },
+    }
+}
+
+
+@app.post("/v1/client/api-key/rotate")
+def v1_client_api_key_rotate(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
+    """Replace the account key now. Empty body. Only the current account key in X-Api-Key.
+
+    X-Connect-Token, an sgc_ session, a restricted sgr_ key, and X-Admin-Token are not accepted.
+    The old key stops working as soon as this commits. There is no grace period.
+    200 returns ``api_key`` (shown once) and ``prefix`` (the first 8 characters).
+    A restricted key is 403 insufficient_scope. A lost race is 401 invalid_api_key.
+    Shares the account security limit (``SATSGATE_RL_MAX_SECURITY`` per
+    ``SATSGATE_RL_WINDOW_SECONDS``, keyed by client id) with webhook writes.
+    """
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    try:
+        rotated = db_account_key.rotate_account_key(config.DB_PATH, x_api_key or "")
+    except db_keys.AuthError as exc:
+        return JSONResponse(status_code=401, content={"ok": False, "error": exc.code})
+    return {"ok": True, "api_key": rotated["api_key"], "prefix": rotated["prefix"]}
+
+
+@app.put("/v1/client/webhook", openapi_extra=_WEBHOOK_PUT_BODY)
+async def v1_client_webhook_put(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+):
+    """Create or replace the security webhook. Account key only.
+
+    200 is ``ok``, ``url``, and ``enabled``. ``secret`` (``whsec_…``) is present
+    only on the first create or when ``rotate_secret`` is true. Replacing only
+    the URL keeps the secret and omits it. 503 ``webhooks_unavailable`` when
+    ``SATSGATE_SITE_SECRET_KEY`` is unset. ``SATSGATE_WEBHOOKS=0`` stops the
+    sender thread and does not block this call. The URL is not echoed in errors.
+    """
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    payload = await _read_webhook_body(request)
+    if isinstance(payload, JSONResponse):
+        return payload
+
+    def _save() -> dict:
+        return db_webhooks.put_webhook(
+            config.DB_PATH,
+            client_id=client.id,
+            url=payload.get("url"),
+            rotate_secret=bool(payload.get("rotate_secret", False)),
+        )
+
+    try:
+        return await run_in_threadpool(_save)
+    except x402_mod.X402Error as exc:
+        return _x402_error(exc)
+
+
+@app.get("/v1/client/webhook")
+def v1_client_webhook_get(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
+    """Read the webhook. Account key only. Never returns the signing secret.
+
+    ``secret_prefix`` is the start of the ``whsec_`` value. ``last_delivery`` is
+    ``{"status", "at"}`` or null. No webhook is ``url: null`` and ``enabled: false``.
+    """
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    return db_webhooks.get_webhook(config.DB_PATH, client_id=client.id)
+
+
+@app.delete("/v1/client/webhook")
+def v1_client_webhook_delete(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
+    """Remove the webhook and drop deliveries that have not been posted. Account key only."""
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    return db_webhooks.delete_webhook(config.DB_PATH, client_id=client.id)
+
+
+@app.post("/v1/client/webhook/test")
+def v1_client_webhook_test(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
+    """Queue a webhook_test event. Account key only.
+
+    404 ``webhook_not_configured`` when none is saved. 409 ``webhook_disabled`` when
+    a 404 or 410 turned it off. 503 ``webhooks_unavailable`` when the encryption
+    key is unset. Shares the account security limit with rotation and webhook
+    writes (``SATSGATE_RL_MAX_SECURITY`` calls per window, keyed by client id).
+    """
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    try:
+        return db_webhooks.queue_test(config.DB_PATH, client_id=client.id)
+    except x402_mod.X402Error as exc:
+        return _x402_error(exc)
+
+
+def _webhook_body_rejected() -> JSONResponse:
+    return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_webhook_url"})
+
+
+async def _read_webhook_body(request: Request) -> dict | JSONResponse:
+    """Read url and rotate_secret. A bad body is invalid_webhook_url and does not echo the URL.
+
+    Content-Length is rejected before the body is read. The stream stops at
+    ``_MAX_WEBHOOK_BODY`` and the extra bytes are not kept or parsed.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > _MAX_WEBHOOK_BODY:
+                return _webhook_body_rejected()
+        except ValueError:
+            return _webhook_body_rejected()
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        if total + len(chunk) > _MAX_WEBHOOK_BODY:
+            return _webhook_body_rejected()
+        chunks.append(chunk)
+        total += len(chunk)
+    raw = b"".join(chunks)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return _webhook_body_rejected()
+    if not isinstance(payload, dict) or "url" not in payload:
+        return _webhook_body_rejected()
+    if set(payload) - {"url", "rotate_secret"}:
+        return _webhook_body_rejected()
+    flag = payload.get("rotate_secret", False)
+    if not isinstance(flag, bool):
+        return _webhook_body_rejected()
+    return {"url": payload.get("url"), "rotate_secret": flag}
 
 
 @app.post("/v1/connect/alert-email")

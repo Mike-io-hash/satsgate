@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Core **0.19.0**, hosted gate **0.15.1**, Python SDK **0.7.0**, self-hosted proxy **0.14.0**, satsgate-mcp **0.12.0**. The connect page stays **0.17.0**.
+
+### Added
+- `POST /v1/client/api-key/rotate` replaces the account key immediately. The new `sg_…` key is returned once. There is no grace period. Restricted `sgr_` keys are not changed. Only the current account key in `X-Api-Key` can call it.
+- A seller security webhook. `PUT /v1/client/webhook` registers an https URL and returns a `whsec_…` signing secret once. Replacing the URL keeps the secret unless `rotate_secret` is true. `GET` returns the URL, whether it is enabled, a secret prefix, and the last delivery, never the secret. `DELETE` removes it and drops deliveries that have not been posted. `POST /v1/client/webhook/test` queues a `webhook_test` event. Deliveries are `POST` JSON with `Satsgate-Webhook-Id`, `Satsgate-Webhook-Timestamp`, and `Satsgate-Webhook-Signature: v1=<hex HMAC-SHA256>`. The HMAC key is the UTF-8 bytes of the whole `whsec_` string, over `{timestamp}.{raw body}`. Receivers should reject a timestamp more than 300 seconds off. The secret is encrypted with `SATSGATE_SITE_SECRET_KEY`. A missing key is `503 webhooks_unavailable` and nothing is stored in plaintext.
+- Webhook events are `payee_lightning_changed`, `payee_evm_changed`, `payee_ofac_flagged`, `alert_email_changed`, `alert_email_removed`, `account_key_rotated`, and `webhook_test`. Confirmation emails stay email-only. A 2xx is delivered. Other failures retry up to 5 sends (the first try plus 4, after 60s, 5 minutes, 30 minutes, and 2 hours) and then fail. HTTP 404 or 410 disables that webhook and, when a confirmed alert address exists, queues a `webhook_disabled` email. `SATSGATE_WEBHOOKS=0` stops the sender thread. Accounts with no webhook are unchanged.
+
+### Changed
+- Security alert emails now say to rotate the account key with `POST /v1/client/api-key/rotate` first, then to write to support so the operator can pause the sites. They still say never to send a key, seed phrase, or private key. The sanctions email is unchanged: rotating a key does not lift an OFAC block.
+- `SECURITY.md` no longer says the account key cannot be rotated.
+- Account-key rotation and webhook create, replace, delete, and test share `SATSGATE_RL_MAX_SECURITY` (default 10) per `SATSGATE_RL_WINDOW_SECONDS`. The bucket is the client id, so a new account key does not reset it. Only the current account key is charged. A restricted key is not.
+
+### Fixed
+- Webhook response reads are raw bytes with `Accept-Encoding: identity`. The 4 KiB cap is applied before decompression, and reaching that cap is not a timeout. One 5 second wall-clock budget starts before DNS and covers connect, TLS, the request, the response headers, and the body. It is not restarted when the body starts. If it runs out at any point, including after part of the body has arrived, the connection is closed and that attempt fails and is retried. A response that finishes inside the budget is kept.
+- Each webhook send reserves its attempt before the POST. A crash and reclaim cannot produce a sixth send. The result is applied only for that reserved attempt.
+- Webhook create, URL change, secret rotation, re-enable, delete, and a 404 or 410 disable write a ledger row in the same transaction. The row has no secret, URL, query, or signing header.
+
+Deploy core 0.19.0 only. Do not rebuild the gate, the proxy, the MCP server, or the connect page, and do not publish packages. Back up `satsgate.sqlite3` and record the current core image id. Tag the rollback image `pre-0.19.0`. Startup adds `client_webhooks` and `webhook_outbox`. It also keeps the nullable `gate_receipts.signature_sha256` and `gate_receipts.settled_at` columns from 0.18.1. Existing rows stay. There is no backfill. Confirm `SATSGATE_SITE_SECRET_KEY` is set (64 hex characters) before relying on webhooks. `SATSGATE_WEBHOOKS` defaults to on. On a disposable test account: create a key, `PUT` a webhook pointed at a test receiver, rotate the account key, and check `webhook_test` and `account_key_rotated` with the quickstart verifier. Do not rotate client 1. `GET /health` reports `0.19.0`. Rollback is the `pre-0.19.0` image. The new tables stay, and they are harmless. The gate stays 0.15.1.
+
+The paragraphs below are the 0.18.1 notes.
+
 Core **0.18.1**, hosted gate **0.15.1**, Python SDK **0.7.0**, self-hosted proxy **0.14.0**, satsgate-mcp **0.12.0**. The connect page stays **0.17.0**.
 
 The hosted gate only charges. It never calls, relays, or serves the seller. A paid request returns HTTP 200, a compact HS256 receipt (`typ` `satsgate-receipt+jwt`), and `redeem_url`. The buyer repeats the request at the seller with `Satsgate-Receipt`. The seller checks the receipt offline (SDK, proxy `mode: receipt`, or the Express snippet). `pay_and_fetch` does both hops. A credit is taken when the receipt is issued, on Lightning after the invoice is confirmed and on USDC after settle. Test mode (`x402_mode: test`) mints and stores a receipt and does not debit. Self-hosted `POST /v1/paywall/*` is unchanged and still debits on settle. `SATSGATE_SITES_AUTO_APPROVE` stays off. It can approve only after a successful origin check, acceptance of the current `SATSGATE_TERMS_VERSION`, and an account that is not suspended. Terms in `docs/hosted-gate-terms.md` stay **DRAFT**.
