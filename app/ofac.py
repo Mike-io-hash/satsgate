@@ -115,5 +115,9 @@ def _flag_matches(addresses: frozenset[str]) -> None:
             row["client_id"],
             shorten_evm(address),
         )
-        if queued:
+        if getattr(queued, "email", False):
             email_send.notify()
+        if getattr(queued, "webhook", False):
+            from . import webhook_send
+
+            webhook_send.notify()

@@ -166,6 +166,7 @@ def set_pending(
 def remove(db_path: str, *, client_id: int, now: int | None = None) -> dict:
     now = int(time.time()) if now is None else int(now)
     queued = False
+    queued_webhook = False
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT * FROM clients WHERE id = ?", (int(client_id),)).fetchone()
@@ -174,15 +175,18 @@ def remove(db_path: str, *, client_id: int, now: int | None = None) -> dict:
             raise ValueError("client does not exist")
         confirmed = row["alert_email"]
         if confirmed:
-            _enqueue(
+            from . import security_events
+
+            fanout = security_events.queue(
                 conn,
-                client_id=int(client_id),
-                kind="alert_email_removed",
+                int(client_id),
+                "alert_email_removed",
+                {},
+                now,
                 to_email=confirmed,
-                params={},
-                now=now,
             )
             queued = True
+            queued_webhook = fanout.webhook
         conn.execute(
             """
             UPDATE clients
@@ -200,6 +204,10 @@ def remove(db_path: str, *, client_id: int, now: int | None = None) -> dict:
         conn.execute("COMMIT")
     if queued:
         email_send.notify()
+    if queued_webhook:
+        from . import webhook_send
+
+        webhook_send.notify()
     return {
         "alert_email": None,
         "alert_email_pending": None,
@@ -224,6 +232,7 @@ def preview(db_path: str, token: str, *, now: int | None = None) -> dict:
 
 def confirm(db_path: str, token: str, *, now: int | None = None) -> dict:
     now = int(time.time()) if now is None else int(now)
+    queued_webhook = False
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = _token_row(conn, token, now)
@@ -233,14 +242,17 @@ def confirm(db_path: str, token: str, *, now: int | None = None) -> dict:
         old = row["alert_email"]
         new = row["alert_email_pending"]
         if old and old != new:
-            _enqueue(
+            from . import security_events
+
+            fanout = security_events.queue(
                 conn,
-                client_id=int(row["id"]),
-                kind="alert_email_changed",
+                int(row["id"]),
+                "alert_email_changed",
+                {"masked_new": mask_email(new)},
+                now,
                 to_email=old,
-                params={"masked_new": mask_email(new)},
-                now=now,
             )
+            queued_webhook = fanout.webhook
         _enqueue(
             conn,
             client_id=int(row["id"]),
@@ -265,6 +277,10 @@ def confirm(db_path: str, token: str, *, now: int | None = None) -> dict:
         conn.execute("COMMIT")
         client_id = int(row["id"])
     email_send.notify()
+    if queued_webhook:
+        from . import webhook_send
+
+        webhook_send.notify()
     return {
         "ok": True,
         "client_id": client_id,
@@ -273,16 +289,18 @@ def confirm(db_path: str, token: str, *, now: int | None = None) -> dict:
     }
 
 
-def queue_ofac(conn, *, client_id: int, to_email: str, address: str, now: int) -> None:
+def queue_ofac(conn, *, client_id: int, to_email: str | None, address: str, now: int):
+    """Queue the sanctions alert. Email only when ``to_email`` is set; webhook either way."""
+    from . import security_events
     from .email_templates import shorten_evm
 
-    _enqueue(
+    return security_events.queue(
         conn,
-        client_id=int(client_id),
-        kind="payee_ofac_flagged",
-        to_email=to_email,
-        params={"address": shorten_evm(address), "at": int(now)},
-        now=int(now),
+        int(client_id),
+        "payee_ofac_flagged",
+        {"address": shorten_evm(address), "at": int(now)},
+        int(now),
+        to_email=to_email or None,
     )
 
 
@@ -297,17 +315,20 @@ def queue_payout(
     via: str,
     rails_cleared: bool,
     now: int,
-) -> bool:
-    """Queue a payout alert inside the caller's transaction. Returns whether a row was inserted."""
-    if not to_email:
-        return False
+):
+    """Queue a payout alert inside the caller's transaction.
+
+    The email is skipped when there is no confirmed address. The webhook is
+    independent of that address.
+    """
+    from . import security_events
+
     rail = "evm" if kind == "payee_evm_changed" else "lightning"
-    _enqueue(
+    return security_events.queue(
         conn,
-        client_id=int(client_id),
-        kind=kind,
-        to_email=to_email,
-        params=payout_params(
+        int(client_id),
+        kind,
+        payout_params(
             rail=rail,
             new_address=new_address,
             previous=previous,
@@ -315,9 +336,9 @@ def queue_payout(
             via=via,
             rails_cleared=rails_cleared,
         ),
-        now=now,
+        now,
+        to_email=to_email or None,
     )
-    return True
 
 
 def _enqueue(conn, *, client_id: int, kind: str, to_email: str, params: dict, now: int) -> None:

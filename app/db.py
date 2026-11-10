@@ -489,6 +489,64 @@ def _migrate_receipts(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_origin_checks_site ON origin_check_attempts(site_id, created_at)"
     )
+    _migrate_webhooks(conn)
+
+
+def _migrate_webhooks(conn: sqlite3.Connection) -> None:
+    """Seller security webhook and its outbox. Existing rows are not rewritten.
+
+    ``generation`` binds each outbox row to the webhook config that should send
+    it. Replacing the URL or the secret bumps the generation and drops queued
+    rows from the previous one. A delivery already in flight cannot disable the
+    newer config.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS client_webhooks (
+          client_id INTEGER PRIMARY KEY,
+          url TEXT NOT NULL,
+          secret_enc TEXT NOT NULL,
+          secret_prefix TEXT NOT NULL,
+          enabled INTEGER NOT NULL,
+          generation INTEGER NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          disabled_reason TEXT,
+          FOREIGN KEY(client_id) REFERENCES clients(id)
+        )
+        """
+    )
+    webhook_cols = {row["name"] for row in conn.execute("PRAGMA table_info(client_webhooks)").fetchall()}
+    if "generation" not in webhook_cols:
+        conn.execute("ALTER TABLE client_webhooks ADD COLUMN generation INTEGER NOT NULL DEFAULT 1")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS webhook_outbox (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          client_id INTEGER NOT NULL,
+          event_id TEXT NOT NULL UNIQUE,
+          generation INTEGER NOT NULL,
+          kind TEXT NOT NULL,
+          body_json TEXT NOT NULL,
+          status TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          next_attempt_at INTEGER NOT NULL,
+          created_at INTEGER NOT NULL,
+          sent_at INTEGER,
+          last_status INTEGER,
+          FOREIGN KEY(client_id) REFERENCES clients(id)
+        )
+        """
+    )
+    outbox_cols = {row["name"] for row in conn.execute("PRAGMA table_info(webhook_outbox)").fetchall()}
+    if "generation" not in outbox_cols:
+        conn.execute("ALTER TABLE webhook_outbox ADD COLUMN generation INTEGER NOT NULL DEFAULT 1")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_webhook_outbox_due ON webhook_outbox(status, next_attempt_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_webhook_outbox_client ON webhook_outbox(client_id, generation, id)"
+    )
 
 
 def hash_api_key(api_key: str) -> str:

@@ -2,19 +2,21 @@ from __future__ import annotations
 
 import time
 
-from . import db_alert_email, email_send
+from . import db_alert_email, email_send, webhook_send
 from .db import _connect
 
 
 def set_client_payee(db_path: str, *, client_id: int, payee_lightning_address: str | None) -> bool:
     """Save the Lightning payee. Returns whether the stored address changed.
 
-    A change, including the first address, queues an alert when a confirmed
-    email exists. The same value queues nothing. The alert row commits with
-    the payee write.
+    A change, including the first address, queues an alert. Email waits for a
+    confirmed address. The webhook does not. The same value queues nothing.
+    Both rows commit with the payee write.
     """
+    from .security_events import Fanout
+
     now = int(time.time())
-    queued = False
+    queued = Fanout()
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT * FROM clients WHERE id = ?", (int(client_id),)).fetchone()
@@ -46,8 +48,10 @@ def set_client_payee(db_path: str, *, client_id: int, payee_lightning_address: s
             if queued:
                 db_alert_email.raise_if_guarded()
         conn.execute("COMMIT")
-    if queued:
+    if queued.email:
         email_send.notify()
+    if queued.webhook:
+        webhook_send.notify()
     return changed
 
 

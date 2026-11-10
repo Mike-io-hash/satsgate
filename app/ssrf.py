@@ -347,6 +347,66 @@ def safe_post_json(
         _local.pinned_host = None
 
 
+def safe_post_bytes(
+    url: str,
+    body: bytes,
+    *,
+    headers: dict | None = None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    resolver: Callable | None = None,
+    max_bytes: int = 4 * 1024,
+    client: httpx.Client | None = None,
+) -> tuple[int, bytes]:
+    """POST exact bytes and return status plus a capped body. Redirects are rejected.
+
+    The response is streamed. ``Content-Length`` is not used as a buffer size:
+    a missing, huge, or lying length still stops at ``max_bytes``. The caller
+    signs ``body`` and must pass those same bytes. Header values are not logged.
+    """
+    if not isinstance(body, (bytes, bytearray)):
+        raise SSRFError("request_too_large")
+    raw = bytes(body)
+    if len(raw) > MAX_RESPONSE_BYTES:
+        raise SSRFError("request_too_large")
+    guarded = guard_url(url, resolver=resolver)
+    http = client or _shared_client()
+    limit = int(max_bytes)
+    if limit < 0:
+        raise SSRFError("response_too_large")
+    _local.pinned_ip = guarded.ip
+    _local.pinned_host = guarded.host
+    try:
+        with http.stream(
+            "POST",
+            guarded.url,
+            content=raw,
+            headers=_request_headers(headers),
+            timeout=timeout,
+            follow_redirects=False,
+        ) as response:
+            if 300 <= response.status_code < 400:
+                raise SSRFError("redirects_not_allowed")
+            chunks: list[bytes] = []
+            total = 0
+            for chunk in response.iter_bytes():
+                if total >= limit:
+                    break
+                room = limit - total
+                if len(chunk) > room:
+                    chunks.append(chunk[:room])
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            return response.status_code, b"".join(chunks)
+    except SSRFError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise SSRFError("fetch_failed") from exc
+    finally:
+        _local.pinned_ip = None
+        _local.pinned_host = None
+
+
 def safe_get_json(
     url: str,
     *,

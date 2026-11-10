@@ -7,7 +7,7 @@ import re
 import secrets
 import time
 
-from . import config, db, db_alert_email, email_send, x402
+from . import config, db, db_alert_email, email_send, webhook_send, x402
 from .db import ChallengeLimit, _connect, enforce_challenge_capacity
 
 
@@ -150,7 +150,9 @@ def verify_payee_signature(
     if consume_connect and not _connect_token_ok(row, connect_token, now):
         raise x402.X402Error("connect_link_invalid", status=401)
     kind = x402.verify_payee_control(message, signature, address=checksum, client_id=int(client_id))
-    queued = False
+    from .security_events import Fanout
+
+    queued = Fanout()
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT * FROM clients WHERE id = ?", (int(client_id),)).fetchone()
@@ -226,8 +228,10 @@ def verify_payee_signature(
             if queued:
                 db_alert_email.raise_if_guarded()
         conn.execute("COMMIT")
-    if queued:
+    if queued.email:
         email_send.notify()
+    if queued.webhook:
+        webhook_send.notify()
     return {"address": checksum, "verified_at": now, "rails_cleared": rails_cleared, "kind": kind}
 
 
@@ -287,31 +291,34 @@ def verified_payees(db_path: str) -> list[dict]:
     ]
 
 
-def flag_payee(db_path: str, *, client_id: int, now: int) -> bool:
+def flag_payee(db_path: str, *, client_id: int, now: int):
     """Mark the payee and turn x402 off. The outbox stores a shortened address only."""
     from . import db_alert_email
+    from .security_events import Fanout
 
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT * FROM clients WHERE id = ?", (int(client_id),)).fetchone()
         if row is None or row["payee_flagged_at"] is not None:
             conn.execute("ROLLBACK")
-            return False
+            return Fanout()
         conn.execute("UPDATE clients SET payee_flagged_at = ? WHERE id = ?", (int(now), int(client_id)))
         conn.execute(
             "UPDATE sites SET rail_x402 = 0, updated_at = ? WHERE client_id = ?",
             (int(now), int(client_id)),
         )
-        queued = False
+        to_email = None
         if row["alert_email"] and row["alert_email_confirmed_at"]:
-            db_alert_email.queue_ofac(
-                conn,
-                client_id=int(client_id),
-                to_email=row["alert_email"],
-                address=row["payee_evm_address"],
-                now=int(now),
-            )
-            queued = True
+            to_email = row["alert_email"]
+        queued = db_alert_email.queue_ofac(
+            conn,
+            client_id=int(client_id),
+            to_email=to_email,
+            address=row["payee_evm_address"] or "",
+            now=int(now),
+        )
+        if queued:
+            db_alert_email.raise_if_guarded()
         conn.execute("COMMIT")
     return queued
 

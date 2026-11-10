@@ -17,10 +17,13 @@ from starlette.concurrency import run_in_threadpool
 
 from . import config
 from . import db
+from . import db_account_key
 from . import db_alert_email
 from . import db_clients
 from . import db_keys
+from . import db_webhooks
 from . import email_send
+from . import webhook_send
 from . import db_reports
 from . import db_sites
 from . import db_verify
@@ -81,16 +84,27 @@ async def _lifespan(_app: FastAPI):
             target=email_send.loop, args=(email_stop,), name="satsgate-email", daemon=True
         )
         email_thread.start()
+    webhook_stop = threading.Event()
+    webhook_thread = None
+    if webhook_send.sender_should_run():
+        webhook_thread = threading.Thread(
+            target=webhook_send.loop, args=(webhook_stop,), name="satsgate-webhook", daemon=True
+        )
+        webhook_thread.start()
     try:
         yield
     finally:
         stop.set()
         email_stop.set()
+        webhook_stop.set()
         email_send.wake.set()
+        webhook_send.wake.set()
         if thread is not None:
             thread.join(timeout=1)
         if email_thread is not None:
             email_thread.join(timeout=1)
+        if webhook_thread is not None:
+            webhook_thread.join(timeout=1)
         ssrf.close()
 
 
@@ -385,6 +399,11 @@ def well_known_satsgate(request: Request) -> dict:
                 "evm_payee_connect": {"method": "POST", "path": "/v1/client/payee/evm/connect"},
                 "alert_email": {"method": "PUT", "path": "/v1/client/alert-email"},
                 "alert_email_delete": {"method": "DELETE", "path": "/v1/client/alert-email"},
+                "api_key_rotate": {"method": "POST", "path": "/v1/client/api-key/rotate"},
+                "webhook": {"method": "PUT", "path": "/v1/client/webhook"},
+                "webhook_get": {"method": "GET", "path": "/v1/client/webhook"},
+                "webhook_delete": {"method": "DELETE", "path": "/v1/client/webhook"},
+                "webhook_test": {"method": "POST", "path": "/v1/client/webhook/test"},
                 "connect_evm": {"method": "GET", "path": "/v1/connect/evm"},
                 "connect_evm_challenge": {"method": "POST", "path": "/v1/connect/evm/challenge"},
                 "connect_evm_verify": {"method": "POST", "path": "/v1/connect/evm/verify"},
@@ -978,6 +997,138 @@ def v1_client_alert_email_delete(x_api_key: str | None = Header(default=None, al
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
     return _alert_body(saved)
+
+
+_WEBHOOK_PUT_BODY = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "required": ["url"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "maxLength": 300,
+                            "description": "https URL with no username or password. Public addresses only.",
+                        },
+                        "rotate_secret": {
+                            "type": "boolean",
+                            "description": "When true, replace the whsec_ signing secret and return it once.",
+                        },
+                    },
+                }
+            }
+        },
+    }
+}
+
+
+@app.post("/v1/client/api-key/rotate")
+def v1_client_api_key_rotate(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
+    """Replace the account key now. Empty body. Only the current account key in X-Api-Key.
+
+    X-Connect-Token, an sgc_ session, a restricted sgr_ key, and X-Admin-Token are not accepted.
+    The old key stops working as soon as this commits. There is no grace period.
+    200 returns ``api_key`` (shown once) and ``prefix`` (the first 8 characters).
+    A restricted key is 403 insufficient_scope. A lost race is 401 invalid_api_key.
+    """
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    try:
+        rotated = db_account_key.rotate_account_key(config.DB_PATH, x_api_key or "")
+    except db_keys.AuthError as exc:
+        return JSONResponse(status_code=401, content={"ok": False, "error": exc.code})
+    return {"ok": True, "api_key": rotated["api_key"], "prefix": rotated["prefix"]}
+
+
+@app.put("/v1/client/webhook", openapi_extra=_WEBHOOK_PUT_BODY)
+async def v1_client_webhook_put(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+):
+    """Create or replace the security webhook. Account key only.
+
+    200 is ``ok``, ``url``, and ``enabled``. ``secret`` (``whsec_…``) is present
+    only on the first create or when ``rotate_secret`` is true. Replacing only
+    the URL keeps the secret and omits it. 503 ``webhooks_unavailable`` when
+    ``SATSGATE_SITE_SECRET_KEY`` is unset. ``SATSGATE_WEBHOOKS=0`` stops the
+    sender thread and does not block this call. The URL is not echoed in errors.
+    """
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    payload = await _read_webhook_body(request)
+    if isinstance(payload, JSONResponse):
+        return payload
+    try:
+        return db_webhooks.put_webhook(
+            config.DB_PATH,
+            client_id=client.id,
+            url=payload.get("url"),
+            rotate_secret=bool(payload.get("rotate_secret", False)),
+        )
+    except x402_mod.X402Error as exc:
+        return _x402_error(exc)
+
+
+@app.get("/v1/client/webhook")
+def v1_client_webhook_get(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
+    """Read the webhook. Account key only. Never returns the signing secret.
+
+    ``secret_prefix`` is the start of the ``whsec_`` value. ``last_delivery`` is
+    ``{"status", "at"}`` or null. No webhook is ``url: null`` and ``enabled: false``.
+    """
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    return db_webhooks.get_webhook(config.DB_PATH, client_id=client.id)
+
+
+@app.delete("/v1/client/webhook")
+def v1_client_webhook_delete(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
+    """Remove the webhook and drop deliveries that have not been posted. Account key only."""
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    return db_webhooks.delete_webhook(config.DB_PATH, client_id=client.id)
+
+
+@app.post("/v1/client/webhook/test")
+def v1_client_webhook_test(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
+    """Queue a webhook_test event. Account key only. Uses the same /v1 rate limit as other account writes.
+
+    404 ``webhook_not_configured`` when none is saved. 409 ``webhook_disabled`` when
+    a 404 or 410 turned it off. 503 ``webhooks_unavailable`` when the encryption
+    key is unset. The route is rate-limited with the other ``/v1`` account writes.
+    """
+    client = _account_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    try:
+        return db_webhooks.queue_test(config.DB_PATH, client_id=client.id)
+    except x402_mod.X402Error as exc:
+        return _x402_error(exc)
+
+
+async def _read_webhook_body(request: Request) -> dict | JSONResponse:
+    """Read url and rotate_secret. A bad body is invalid_webhook_url and does not echo the URL."""
+    raw = await request.body()
+    if len(raw) > 2048:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_webhook_url"})
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_webhook_url"})
+    if not isinstance(payload, dict) or "url" not in payload:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_webhook_url"})
+    flag = payload.get("rotate_secret", False)
+    if not isinstance(flag, bool):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_webhook_url"})
+    return {"url": payload.get("url"), "rotate_secret": flag}
 
 
 @app.post("/v1/connect/alert-email")

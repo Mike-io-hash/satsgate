@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # Load env vars from .env if present. Existing process env wins.
 load_dotenv()
 
-APP_VERSION = "0.18.1"
+APP_VERSION = "0.19.0"
 
 # production is the safe default. Local mock/dev only runs when this is explicit.
 SATSGATE_ENV = os.environ.get("SATSGATE_ENV", "production").strip().lower() or "production"
@@ -470,6 +470,9 @@ GEOIP_DB = os.environ.get("SATSGATE_GEOIP_DB", "/data/geoip/dbip-country-lite.mm
 OFAC_EVM_FILE = os.environ.get("SATSGATE_OFAC_EVM_FILE", "/data/ofac/ofac_evm.txt").strip() or "/data/ofac/ofac_evm.txt"
 RESEND_API_KEY = os.environ.get("SATSGATE_RESEND_API_KEY", "").strip()
 EMAIL_ENABLED = os.environ.get("SATSGATE_EMAIL_ENABLED", "1").strip() != "0"
+# Seller security webhooks. Default on. 0 stops the sender and refuses new URLs.
+# Delivery still no-ops when an account has not registered a webhook.
+WEBHOOKS_ENABLED = os.environ.get("SATSGATE_WEBHOOKS", "1").strip() != "0"
 BASE_RPC_URL = _base_rpc_url()
 SMART_WALLETS = os.environ.get("SATSGATE_SMART_WALLETS", "1").strip() != "0"
 
