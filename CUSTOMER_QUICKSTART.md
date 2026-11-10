@@ -64,13 +64,13 @@ curl -s -X POST https://api.satsgate.org/v1/client/api-key/rotate \
 
 `200` is `{ "ok": true, "api_key": "sg_…", "prefix": "sg_…xxxx" }`. `prefix` is the first 8 characters. A restricted key is `403 insufficient_scope`. After a successful rotate, the previous key is `401 invalid_api_key`. Save the new key, then keep using it as `X-Api-Key`. If you did not mean to rotate, write to support and ask for your sites to be paused. Never send the key, a seed phrase, or a private key.
 
-Rotation shares an account limit with webhook create, replace, delete, and the test call: `SATSGATE_RL_MAX_SECURITY` (default 10) per `SATSGATE_RL_WINDOW_SECONDS` (default 60). The bucket is the account, not the key, so a new key does not reset it. `429 rate_limited` includes `Retry-After`.
+Rotation shares an account limit with webhook create, replace, delete, and the test call: `SATSGATE_RL_MAX_SECURITY` (default 10) per `SATSGATE_RL_WINDOW_SECONDS` (default 60). Only the current account key spends it. A restricted key is rejected and does not use up the allowance. Replacing the account key does not start a new allowance. `429 rate_limited` includes `Retry-After`.
 
 A confirmed alert email is told. A security webhook, if you have one, gets the same `account_key_rotated` event. The event data is `at` (UTC text), `prefix`, and `via` (`api`). It does not include the old or new key.
 
 ## Security webhook
 
-Register an https URL to receive the same security events as the alert email, plus rotation. The URL is checked when you save it and again on every delivery: https only, no username or password, a public address, no redirects, a 5 second timeout, and at most 300 characters. Satsgate reads at most 4 KiB of the response.
+Register an https URL to receive the same security events as the alert email, plus rotation. The URL is checked when you save it and again on every delivery: https only, no username or password, a public address, no redirects, and at most 300 characters. Each delivery has one 5 second limit for the whole attempt: DNS, connect, TLS, the request, the response headers, and the body. Satsgate reads at most 4 KiB of the raw response and does not decompress it.
 
 ```bash
 curl -s -X PUT https://api.satsgate.org/v1/client/webhook \

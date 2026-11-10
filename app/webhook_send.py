@@ -23,8 +23,8 @@ MAX_ATTEMPTS = len(RETRY_DELAYS_SECONDS) + 1
 STALE_SENDING_SECONDS = 120
 POLL_SECONDS = 30
 RESPONSE_CAP_BYTES = 4 * 1024
-# Wall clock for one delivery, including a slow body. Separate from the
-# per-read socket timeout, which a dribbling receiver can reset.
+# One wall-clock budget for a delivery: DNS, connect, TLS, the request,
+# response headers, and the body. It is not restarted when the body starts.
 DELIVERY_DEADLINE_SECONDS = 5.0
 _TERMINAL_SSRF = frozenset({"destination_rejected", "redirects_not_allowed"})
 _DISABLE_STATUS = frozenset({404, 410})

@@ -1025,3 +1025,126 @@ def test_security_limit_follows_the_account_not_the_key(tmp_path, monkeypatch):
         assert blocked.headers["retry-after"]
         assert http.get("/v1/balance", headers={"X-Api-Key": newest}).status_code == 200
         assert http.get("/v1/balance", headers={"X-Api-Key": key}).status_code == 401
+
+
+def test_restricted_key_does_not_spend_the_security_quota(tmp_path, monkeypatch):
+    module = _load_app(
+        tmp_path,
+        **_env(
+            SATSGATE_RL_ENABLED="1",
+            SATSGATE_RL_MAX_SECURITY="2",
+            SATSGATE_RL_MAX_AUTH="100",
+            SATSGATE_RL_WINDOW_SECONDS="60",
+        ),
+    )
+    _patch_dns(monkeypatch, module)
+    calls = (
+        ("POST", "/v1/client/api-key/rotate", None),
+        ("PUT", "/v1/client/webhook", {"url": _HOOK}),
+        ("PUT", "/v1/client/webhook", {"url": _HOOK, "rotate_secret": True}),
+        ("DELETE", "/v1/client/webhook", None),
+        ("POST", "/v1/client/webhook/test", None),
+    )
+    with TestClient(module.app) as http:
+        key = _buy(http)
+        minted = http.post("/v1/api-keys", headers={"X-Api-Key": key}, json={"label": "paywall"})
+        restricted = minted.json()["api_key"]
+        for method, path, body in calls:
+            for _ in range(2):
+                denied = http.request(method, path, headers={"X-Api-Key": restricted}, json=body)
+                assert denied.status_code == 403, (method, path, denied.text)
+                assert denied.json()["error"] == "insufficient_scope"
+        rotated = http.post("/v1/client/api-key/rotate", headers={"X-Api-Key": key})
+        assert rotated.status_code == 200, rotated.text
+        again = http.post("/v1/client/api-key/rotate", headers={"X-Api-Key": rotated.json()["api_key"]})
+        assert again.status_code == 200, again.text
+        blocked = http.post("/v1/client/webhook/test", headers={"X-Api-Key": again.json()["api_key"]})
+        assert blocked.status_code == 429
+        assert blocked.json()["error"] == "rate_limited"
+        assert http.get("/v1/balance", headers={"X-Api-Key": again.json()["api_key"]}).status_code == 200
+
+
+def test_delivery_deadline_covers_dns_headers_and_body(tmp_path):
+    module = _load_app(tmp_path, **_env())
+    budget = 0.12
+    tolerance = 0.2
+
+    def assert_timeout(call) -> None:
+        started = time.monotonic()
+        with pytest.raises(module.ssrf.SSRFError) as caught:
+            call()
+        elapsed = time.monotonic() - started
+        assert caught.value.code == "fetch_failed"
+        assert elapsed <= budget + tolerance
+
+    def slow_headers(request: httpx.Request) -> httpx.Response:
+        time.sleep(0.6)
+        return httpx.Response(200, content=b"ok")
+
+    assert_timeout(
+        lambda: module.ssrf.safe_post_bytes(
+            _HOOK,
+            b"{}",
+            resolver=_public_resolver,
+            deadline=budget,
+            timeout=5.0,
+            client=httpx.Client(transport=httpx.MockTransport(slow_headers)),
+        )
+    )
+
+    def slow_dns(host, port, *args, **kwargs):
+        time.sleep(0.6)
+        return _public_resolver(host, port)
+
+    assert_timeout(
+        lambda: module.ssrf.safe_post_bytes(
+            _HOOK,
+            b"{}",
+            resolver=slow_dns,
+            deadline=budget,
+            timeout=5.0,
+            client=httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b"ok"))),
+        )
+    )
+
+    class LateBody(httpx.SyncByteStream):
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            time.sleep(0.6)
+            return b"late"
+
+        def close(self) -> None:
+            return None
+
+    assert_timeout(
+        lambda: module.ssrf.safe_post_bytes(
+            _HOOK,
+            b"{}",
+            resolver=_public_resolver,
+            deadline=budget,
+            timeout=5.0,
+            client=httpx.Client(
+                transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=LateBody()))
+            ),
+        )
+    )
+
+    seen = {}
+
+    def fast(request: httpx.Request) -> httpx.Response:
+        seen["accept"] = request.headers.get("accept-encoding")
+        return httpx.Response(200, content=b"ready")
+
+    status, payload = module.ssrf.safe_post_bytes(
+        _HOOK,
+        b"{}",
+        resolver=_public_resolver,
+        deadline=budget,
+        timeout=5.0,
+        client=httpx.Client(transport=httpx.MockTransport(fast)),
+    )
+    assert status == 200
+    assert payload == b"ready"
+    assert seen["accept"] == "identity"

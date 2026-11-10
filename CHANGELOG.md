@@ -17,10 +17,10 @@ Core **0.19.0**, hosted gate **0.15.1**, Python SDK **0.7.0**, self-hosted proxy
 ### Changed
 - Security alert emails now say to rotate the account key with `POST /v1/client/api-key/rotate` first, then to write to support so the operator can pause the sites. They still say never to send a key, seed phrase, or private key. The sanctions email is unchanged: rotating a key does not lift an OFAC block.
 - `SECURITY.md` no longer says the account key cannot be rotated.
-- Account-key rotation and webhook create, replace, delete, and test share `SATSGATE_RL_MAX_SECURITY` (default 10) per `SATSGATE_RL_WINDOW_SECONDS`. The bucket is the client id, so a new account key does not reset it.
+- Account-key rotation and webhook create, replace, delete, and test share `SATSGATE_RL_MAX_SECURITY` (default 10) per `SATSGATE_RL_WINDOW_SECONDS`. The bucket is the client id, so a new account key does not reset it. Only the current account key is charged. A restricted key is not.
 
 ### Fixed
-- Webhook response reads are raw bytes with `Accept-Encoding: identity`. The 4 KiB cap is applied before decompression, and a read is not started once the cap or the 5 second delivery deadline is met.
+- Webhook response reads are raw bytes with `Accept-Encoding: identity`. The 4 KiB cap is applied before decompression. One 5 second wall-clock budget covers DNS, connect, TLS, the request, the response headers, and the body. It is not restarted when the body starts. A read is not started once the cap is met.
 - Each webhook send reserves its attempt before the POST. A crash and reclaim cannot produce a sixth send. The result is applied only for that reserved attempt.
 - Webhook create, URL change, secret rotation, re-enable, delete, and a 404 or 410 disable write a ledger row in the same transaction. The row has no secret, URL, query, or signing header.
 

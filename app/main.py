@@ -309,7 +309,16 @@ async def rate_limit_mw(request: Request, call_next):
         return blocked
 
     path = request.url.path
-    if client is not None and (request.method, path) in _SECURITY_LIMIT_PATHS:
+    # Only a live account key spends this bucket. A restricted key, a connect
+    # token, or an unknown key is rejected by the route and must not lock the
+    # owner out of rotation or webhook changes. The client id is stable across
+    # account-key rotation, so a new sg_ key does not reset the bucket.
+    if (
+        client is not None
+        and raw_key is not None
+        and db_keys.key_kind(raw_key) == db_keys.SCOPE_ACCOUNT
+        and (request.method, path) in _SECURITY_LIMIT_PATHS
+    ):
         blocked = _reject_if_limited(RL_SECURITY, "s:" + str(client.id))
         if blocked:
             return blocked

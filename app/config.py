@@ -149,7 +149,8 @@ RL_MAX_CHALLENGE = int(os.environ.get("SATSGATE_RL_MAX_CHALLENGE", "30"))
 RL_MAX_TOPUP = int(os.environ.get("SATSGATE_RL_MAX_TOPUP", "10"))
 RL_MAX_KEYS = int(os.environ.get("SATSGATE_RL_MAX_KEYS", "10000"))
 # Account-key rotation and webhook writes share this bucket, keyed by client id.
-# Rotating the key does not open a new one. Window is RL_WINDOW_SECONDS.
+# Only the current account key is charged. A restricted key is not.
+# Rotating the account key does not open a new bucket. Window is RL_WINDOW_SECONDS.
 RL_MAX_SECURITY = int(os.environ.get("SATSGATE_RL_MAX_SECURITY", "10"))
 
 # Abuse caps for rows created before payment settles.

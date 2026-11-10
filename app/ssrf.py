@@ -354,8 +354,12 @@ def safe_post_json(
         _local.pinned_host = None
 
 
+# A worker that finishes on the deadline can still hand its result back.
+_DEADLINE_SLACK_SECONDS = 0.05
+
+
 class _ReadStopped(Exception):
-    """The body read hit the wall-clock deadline or a timeout. The status is already known."""
+    """This phase hit the delivery deadline. Do not start another read."""
 
 
 def _pull_chunk(stream, timeout: float):
@@ -392,22 +396,29 @@ def _pull_chunk(stream, timeout: float):
     return box.get("chunk", b"")
 
 
-def _read_raw_capped(response: httpx.Response, limit: int, deadline: float) -> bytes:
-    """Raw response bytes, never decoded, and no further read once ``limit`` is met."""
+def _read_raw_capped(response: httpx.Response, limit: int, deadline_at: float) -> tuple[bytes, bool]:
+    """Raw response bytes, never decoded, and no further read once ``limit`` is met.
+
+    Returns ``(body, timed_out)``. ``deadline_at`` is the delivery deadline,
+    not a fresh budget measured from the first body byte.
+    """
     if limit <= 0:
-        return b""
+        return b"", False
     chunks: list[bytes] = []
     total = 0
+    timed_out = False
     stream = response.iter_raw()
     release = True
     try:
         while total < limit:
-            remaining = deadline - time.monotonic()
+            remaining = deadline_at - time.monotonic()
             if remaining <= 0:
+                timed_out = True
                 break
             try:
                 chunk = _pull_chunk(stream, remaining)
             except _ReadStopped:
+                timed_out = True
                 release = False
                 break
             if chunk is None:
@@ -429,7 +440,30 @@ def _read_raw_capped(response: httpx.Response, limit: int, deadline: float) -> b
                 stream.close()
             except RuntimeError:
                 pass
-    return b"".join(chunks)
+    return b"".join(chunks), timed_out
+
+
+def _wait_for(fn, deadline_at: float):
+    """Run ``fn`` and give up at ``deadline_at``. A late result is ``fetch_failed``."""
+    remaining = deadline_at - time.monotonic()
+    if remaining <= 0:
+        raise SSRFError("fetch_failed")
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(remaining)
+    if worker.is_alive():
+        raise SSRFError("fetch_failed")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
 
 
 def safe_post_bytes(
@@ -448,26 +482,84 @@ def safe_post_bytes(
     The cap counts undecoded socket bytes. ``Accept-Encoding: identity`` is
     sent and ``Content-Encoding`` is not decoded, so a tiny gzip bomb cannot
     expand before the cap. Once ``max_bytes`` is in hand, no further read is
-    started. ``deadline`` is the wall-clock budget for the whole response,
-    not a fresh timeout per chunk. The caller signs ``body`` and must pass
-    those same bytes. Header values are not logged.
+    started. ``deadline`` is one wall-clock budget for DNS, connect, TLS, the
+    request, the headers, and the body. It is not restarted when the body
+    starts. The caller signs ``body`` and must pass those same bytes. Header
+    values are not logged.
     """
     if not isinstance(body, (bytes, bytearray)):
         raise SSRFError("request_too_large")
     raw = bytes(body)
     if len(raw) > MAX_RESPONSE_BYTES:
         raise SSRFError("request_too_large")
-    guarded = guard_url(url, resolver=resolver)
-    http = client or _shared_client()
     limit = int(max_bytes)
     if limit < 0:
         raise SSRFError("response_too_large")
     budget = float(timeout if deadline is None else deadline)
     if budget <= 0:
         raise SSRFError("fetch_failed")
+    # One expiry for every phase. A slow header must not get a fresh 5 s.
+    deadline_at = time.monotonic() + budget
+    box: dict = {}
+
+    def work() -> None:
+        try:
+            box["value"] = _post_bounded(
+                url,
+                raw,
+                headers=headers,
+                timeout=float(timeout),
+                deadline_at=deadline_at,
+                resolver=resolver,
+                limit=limit,
+                client=client,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            box["error"] = exc
+
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    worker.join(max(0.0, deadline_at - time.monotonic()) + _DEADLINE_SLACK_SECONDS)
+    if worker.is_alive():
+        raise SSRFError("fetch_failed")
+    if "error" in box:
+        err = box["error"]
+        if isinstance(err, SSRFError):
+            raise err
+        raise SSRFError("fetch_failed") from err
+    return box["value"]
+
+
+def _post_bounded(
+    url: str,
+    raw: bytes,
+    *,
+    headers: dict | None,
+    timeout: float,
+    deadline_at: float,
+    resolver: Callable | None,
+    limit: int,
+    client: httpx.Client | None,
+) -> tuple[int, bytes]:
+    """DNS through body, all measured against the same ``deadline_at``."""
+    lookup = resolver or socket.getaddrinfo
+
+    def bounded_lookup(host, port, *args, **kwargs):
+        return _wait_for(lambda: lookup(host, port, *args, **kwargs), deadline_at)
+
+    guarded = guard_url(url, resolver=bounded_lookup)
+    if deadline_at - time.monotonic() <= 0:
+        raise SSRFError("fetch_failed")
+    http = client or _shared_client()
     request_headers = _request_headers(headers)
     # Do not invite a compressed body. Decoding is what blows the cap.
     request_headers["accept-encoding"] = "identity"
+    remaining = deadline_at - time.monotonic()
+    if remaining <= 0:
+        raise SSRFError("fetch_failed")
+    # Each socket operation gets only the time still left, not a new full budget.
+    op_timeout = min(float(timeout), remaining)
+    # This thread performs the connect, so the pin has to be set here.
     _local.pinned_ip = guarded.ip
     _local.pinned_host = guarded.host
     try:
@@ -476,27 +568,23 @@ def safe_post_bytes(
             guarded.url,
             content=raw,
             headers=request_headers,
-            timeout=timeout,
+            timeout=op_timeout,
             follow_redirects=False,
         ) as response:
             if 300 <= response.status_code < 400:
                 raise SSRFError("redirects_not_allowed")
-            # Headers are in. The body is ignored by the webhook sender, so a
-            # slow remainder must not turn a known status into fetch_failed.
+            if deadline_at - time.monotonic() <= 0:
+                raise SSRFError("fetch_failed")
             # A preloaded body is already bytes; slice it and do not decode.
             # A streamed body is read raw so Content-Encoding is not expanded.
-            try:
-                if hasattr(response, "_content"):
-                    payload = bytes(response._content)[:limit]
-                else:
-                    payload = _read_raw_capped(response, limit, time.monotonic() + budget)
-            except _ReadStopped:
-                payload = b""
+            if hasattr(response, "_content"):
+                return response.status_code, bytes(response._content)[:limit]
+            payload, timed_out = _read_raw_capped(response, limit, deadline_at)
+            # Headers that arrived in time still count. A body that never
+            # produced a byte before the deadline does not.
+            if timed_out and not payload:
+                raise SSRFError("fetch_failed")
             return response.status_code, payload
-    except SSRFError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        raise SSRFError("fetch_failed") from exc
     finally:
         _local.pinned_ip = None
         _local.pinned_host = None
