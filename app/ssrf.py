@@ -354,53 +354,18 @@ def safe_post_json(
         _local.pinned_host = None
 
 
-# A worker that finishes on the deadline can still hand its result back.
-_DEADLINE_SLACK_SECONDS = 0.05
-
-
-class _ReadStopped(Exception):
-    """This phase hit the delivery deadline. Do not start another read."""
-
-
-def _pull_chunk(stream, timeout: float):
-    """Return the next raw chunk, or None at EOF.
-
-    ``next`` runs on a daemon thread so a dribbling receiver cannot hold the
-    caller past ``timeout``. A chunk that is still blocked when the wait ends
-    raises ``_ReadStopped`` and the caller must not pull again.
-    """
-    if timeout <= 0:
-        raise _ReadStopped()
-    box: dict = {}
-
-    def run() -> None:
-        try:
-            box["chunk"] = next(stream)
-        except StopIteration:
-            box["eof"] = True
-        except Exception as exc:  # noqa: BLE001
-            box["error"] = exc
-
-    worker = threading.Thread(target=run, daemon=True)
-    worker.start()
-    worker.join(timeout)
-    if worker.is_alive():
-        raise _ReadStopped()
-    if "error" in box:
-        err = box["error"]
-        if isinstance(err, (httpx.TimeoutException, TimeoutError, socket.timeout)):
-            raise _ReadStopped() from err
-        raise err
-    if box.get("eof"):
-        return None
-    return box.get("chunk", b"")
+# How long to wait, after closing the socket, for the delivery thread to exit.
+_ABORT_GRACE_SECONDS = 0.1
+# Slow DNS cannot pile up one thread per attempt.
+_RESOLVER_LIMIT = 4
+_resolver_slots = threading.BoundedSemaphore(_RESOLVER_LIMIT)
 
 
 def _read_raw_capped(response: httpx.Response, limit: int, deadline_at: float) -> tuple[bytes, bool]:
     """Raw response bytes, never decoded, and no further read once ``limit`` is met.
 
-    Returns ``(body, timed_out)``. ``deadline_at`` is the delivery deadline,
-    not a fresh budget measured from the first body byte.
+    Returns ``(body, timed_out)``. ``deadline_at`` is the delivery deadline.
+    A byte that arrives and then a stall is still a timeout.
     """
     if limit <= 0:
         return b"", False
@@ -408,20 +373,17 @@ def _read_raw_capped(response: httpx.Response, limit: int, deadline_at: float) -
     total = 0
     timed_out = False
     stream = response.iter_raw()
-    release = True
     try:
         while total < limit:
-            remaining = deadline_at - time.monotonic()
-            if remaining <= 0:
+            if deadline_at - time.monotonic() <= 0:
                 timed_out = True
                 break
             try:
-                chunk = _pull_chunk(stream, remaining)
-            except _ReadStopped:
-                timed_out = True
-                release = False
+                chunk = next(stream)
+            except StopIteration:
                 break
-            if chunk is None:
+            except Exception:
+                timed_out = True
                 break
             if not chunk:
                 continue
@@ -434,29 +396,35 @@ def _read_raw_capped(response: httpx.Response, limit: int, deadline_at: float) -
             if total >= limit:
                 break
     finally:
-        # Closing a generator another thread is still executing is unsafe.
-        if release:
-            try:
-                stream.close()
-            except RuntimeError:
-                pass
+        try:
+            stream.close()
+        except RuntimeError:
+            pass
     return b"".join(chunks), timed_out
 
 
-def _wait_for(fn, deadline_at: float):
-    """Run ``fn`` and give up at ``deadline_at``. A late result is ``fetch_failed``."""
+def _resolve_limited(lookup: Callable, host: str, port: int, args: tuple, kwargs: dict, deadline_at: float):
+    """DNS with at most ``_RESOLVER_LIMIT`` outstanding lookups.
+
+    A full set of lookups fails the next one immediately. A lookup that is
+    still running at the deadline does not start the HTTP request.
+    """
     remaining = deadline_at - time.monotonic()
     if remaining <= 0:
+        raise SSRFError("fetch_failed")
+    if not _resolver_slots.acquire(blocking=False):
         raise SSRFError("fetch_failed")
     box: dict = {}
 
     def run() -> None:
         try:
-            box["value"] = fn()
+            box["value"] = lookup(host, port, *args, **kwargs)
         except BaseException as exc:  # noqa: BLE001
             box["error"] = exc
+        finally:
+            _resolver_slots.release()
 
-    worker = threading.Thread(target=run, daemon=True)
+    worker = threading.Thread(target=run, name="satsgate-webhook-dns", daemon=True)
     worker.start()
     worker.join(remaining)
     if worker.is_alive():
@@ -464,6 +432,33 @@ def _wait_for(fn, deadline_at: float):
     if "error" in box:
         raise box["error"]
     return box.get("value")
+
+
+def _abort_active_connections(client: httpx.Client | None) -> None:
+    """Close the connection this delivery is using so the pool slot is freed."""
+    if client is None:
+        return
+    transport = getattr(client, "_transport", None)
+    pool = getattr(transport, "_pool", None)
+    if pool is None:
+        return
+    for conn in list(getattr(pool, "_connections", ())):
+        try:
+            if conn.is_closed() or conn.is_idle():
+                continue
+        except Exception:
+            pass
+        inner = getattr(conn, "_connection", None)
+        stream = getattr(inner, "_network_stream", None) if inner is not None else None
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def safe_post_bytes(
@@ -500,57 +495,93 @@ def safe_post_bytes(
         raise SSRFError("fetch_failed")
     # One expiry for every phase. A slow header must not get a fresh 5 s.
     deadline_at = time.monotonic() + budget
+    lookup = resolver or socket.getaddrinfo
+
+    def bounded_lookup(host, port, *args, **kwargs):
+        return _resolve_limited(lookup, host, port, args, kwargs, deadline_at)
+
+    guarded = guard_url(url, resolver=bounded_lookup)
+    if deadline_at - time.monotonic() <= 0:
+        raise SSRFError("fetch_failed")
+    http = client if client is not None else _delivery_client()
+    owns_client = client is None
     box: dict = {}
 
     def work() -> None:
         try:
             box["value"] = _post_bounded(
-                url,
+                guarded,
                 raw,
                 headers=headers,
                 timeout=float(timeout),
                 deadline_at=deadline_at,
-                resolver=resolver,
                 limit=limit,
-                client=client,
+                client=http,
             )
         except BaseException as exc:  # noqa: BLE001
             box["error"] = exc
 
-    worker = threading.Thread(target=work, daemon=True)
+    worker = threading.Thread(target=work, name="satsgate-webhook-http", daemon=True)
     worker.start()
-    worker.join(max(0.0, deadline_at - time.monotonic()) + _DEADLINE_SLACK_SECONDS)
-    if worker.is_alive():
-        raise SSRFError("fetch_failed")
-    if "error" in box:
-        err = box["error"]
-        if isinstance(err, SSRFError):
-            raise err
-        raise SSRFError("fetch_failed") from err
-    return box["value"]
+    try:
+        worker.join(max(0.0, deadline_at - time.monotonic()))
+        if worker.is_alive():
+            # The read is still inside httpx. Closing the stream unblocks it
+            # and gives the pool slot back before we return.
+            _abort_active_connections(http)
+            worker.join(_ABORT_GRACE_SECONDS)
+            raise SSRFError("fetch_failed")
+        if "error" in box:
+            err = box["error"]
+            if isinstance(err, SSRFError):
+                raise err
+            raise SSRFError("fetch_failed") from err
+        return box["value"]
+    finally:
+        if owns_client:
+            try:
+                http.close()
+            except Exception:
+                pass
+
+
+def _delivery_client() -> httpx.Client:
+    """A private client so one slow receiver cannot fill the shared pool."""
+    import httpcore
+    import ssl
+
+    ssl_context = ssl.create_default_context()
+    pool = httpcore.ConnectionPool(
+        ssl_context=ssl_context,
+        max_connections=2,
+        max_keepalive_connections=1,
+        retries=0,
+        network_backend=_PinnedNetworkBackend(),
+    )
+    transport = httpx.HTTPTransport(retries=0, trust_env=False)
+    transport._pool.close()
+    transport._pool = pool
+    return httpx.Client(
+        transport=transport,
+        timeout=httpx.Timeout(DEFAULT_TIMEOUT_SECONDS),
+        follow_redirects=False,
+        trust_env=False,
+    )
 
 
 def _post_bounded(
-    url: str,
+    guarded: GuardedURL,
     raw: bytes,
     *,
     headers: dict | None,
     timeout: float,
     deadline_at: float,
-    resolver: Callable | None,
     limit: int,
-    client: httpx.Client | None,
+    client: httpx.Client,
 ) -> tuple[int, bytes]:
-    """DNS through body, all measured against the same ``deadline_at``."""
-    lookup = resolver or socket.getaddrinfo
-
-    def bounded_lookup(host, port, *args, **kwargs):
-        return _wait_for(lambda: lookup(host, port, *args, **kwargs), deadline_at)
-
-    guarded = guard_url(url, resolver=bounded_lookup)
+    """Connect through body, measured against the deadline chosen before DNS."""
     if deadline_at - time.monotonic() <= 0:
         raise SSRFError("fetch_failed")
-    http = client or _shared_client()
     request_headers = _request_headers(headers)
     # Do not invite a compressed body. Decoding is what blows the cap.
     request_headers["accept-encoding"] = "identity"
@@ -563,7 +594,7 @@ def _post_bounded(
     _local.pinned_ip = guarded.ip
     _local.pinned_host = guarded.host
     try:
-        with http.stream(
+        with client.stream(
             "POST",
             guarded.url,
             content=raw,
@@ -578,11 +609,12 @@ def _post_bounded(
             # A preloaded body is already bytes; slice it and do not decode.
             # A streamed body is read raw so Content-Encoding is not expanded.
             if hasattr(response, "_content"):
+                if deadline_at - time.monotonic() <= 0:
+                    raise SSRFError("fetch_failed")
                 return response.status_code, bytes(response._content)[:limit]
             payload, timed_out = _read_raw_capped(response, limit, deadline_at)
-            # Headers that arrived in time still count. A body that never
-            # produced a byte before the deadline does not.
-            if timed_out and not payload:
+            # Any miss, including after a few body bytes, is a failed attempt.
+            if timed_out:
                 raise SSRFError("fetch_failed")
             return response.status_code, payload
     finally:

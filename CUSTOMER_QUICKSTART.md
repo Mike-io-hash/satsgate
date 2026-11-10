@@ -70,7 +70,7 @@ A confirmed alert email is told. A security webhook, if you have one, gets the s
 
 ## Security webhook
 
-Register an https URL to receive the same security events as the alert email, plus rotation. The URL is checked when you save it and again on every delivery: https only, no username or password, a public address, no redirects, and at most 300 characters. Each delivery has one 5 second limit for the whole attempt: DNS, connect, TLS, the request, the response headers, and the body. Satsgate reads at most 4 KiB of the raw response and does not decompress it.
+Register an https URL to receive the same security events as the alert email, plus rotation. The URL is checked when you save it and again on every delivery: https only, no username or password, a public address, no redirects, and at most 300 characters. Each delivery has one 5 second limit for the whole attempt, starting before DNS and covering connect, TLS, the request, the response headers, and the body. If those 5 seconds run out at any point, even after a few body bytes have arrived, that attempt fails and will be retried. Satsgate closes the connection when the limit runs out. It reads at most 4 KiB of the raw response and does not decompress it. Finishing inside the limit, or stopping at 4 KiB, is a normal response.
 
 ```bash
 curl -s -X PUT https://api.satsgate.org/v1/client/webhook \

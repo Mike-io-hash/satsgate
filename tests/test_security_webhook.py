@@ -816,18 +816,18 @@ def test_response_cap_ignores_compression_and_stops_at_the_limit(tmp_path):
             gate.set()
 
     started = time.monotonic()
-    status, payload = module.ssrf.safe_post_bytes(
-        _HOOK,
-        b"{}",
-        resolver=_public_resolver,
-        timeout=5.0,
-        deadline=0.25,
-        client=httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=SlowTail()))),
-    )
+    with pytest.raises(module.ssrf.SSRFError) as caught:
+        module.ssrf.safe_post_bytes(
+            _HOOK,
+            b"{}",
+            resolver=_public_resolver,
+            timeout=5.0,
+            deadline=0.25,
+            client=httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=SlowTail()))),
+        )
     elapsed = time.monotonic() - started
     gate.set()
-    assert status == 200
-    assert payload == b"abc"
+    assert caught.value.code == "fetch_failed"
     assert elapsed < 1.0
 
 
@@ -1067,7 +1067,7 @@ def test_restricted_key_does_not_spend_the_security_quota(tmp_path, monkeypatch)
 def test_delivery_deadline_covers_dns_headers_and_body(tmp_path):
     module = _load_app(tmp_path, **_env())
     budget = 0.12
-    tolerance = 0.2
+    tolerance = 0.35
 
     def assert_timeout(call) -> None:
         started = time.monotonic()
@@ -1148,3 +1148,292 @@ def test_delivery_deadline_covers_dns_headers_and_body(tmp_path):
     assert status == 200
     assert payload == b"ready"
     assert seen["accept"] == "identity"
+
+
+def _http_workers() -> list[threading.Thread]:
+    return [thread for thread in threading.enumerate() if thread.name == "satsgate-webhook-http" and thread.is_alive()]
+
+
+def _dns_workers() -> list[threading.Thread]:
+    return [thread for thread in threading.enumerate() if thread.name == "satsgate-webhook-dns" and thread.is_alive()]
+
+
+class _CloseableStream(httpx.SyncByteStream):
+    """Not used. Pool tests speak HTTP on a fake network stream."""
+
+
+def _pool_client(backend):
+    import ssl
+
+    import httpcore
+
+    pool = httpcore.ConnectionPool(
+        ssl_context=ssl.create_default_context(),
+        max_connections=1,
+        max_keepalive_connections=1,
+        retries=0,
+        network_backend=backend,
+    )
+    transport = httpx.HTTPTransport(retries=0, trust_env=False)
+    transport._pool.close()
+    transport._pool = pool
+    client = httpx.Client(transport=transport, follow_redirects=False, trust_env=False)
+    return client, pool
+
+
+class _ScriptedBackend:
+    """In-memory HTTP/1.1 peer. ``close`` unblocks a stalled read."""
+
+    def __init__(self, mode: str) -> None:
+        self.mode = mode
+        self.connects = 0
+        self.streams: list[_ScriptedStream] = []
+
+    def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        self.connects += 1
+        stream = _ScriptedStream(self.mode)
+        self.streams.append(stream)
+        return stream
+
+    def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        raise OSError("no unix socket")
+
+    def sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
+
+
+class _ScriptedStream:
+    def __init__(self, mode: str) -> None:
+        import httpcore
+
+        self._errors = httpcore
+        self.mode = mode
+        self.closed = threading.Event()
+        self.was_closed = False
+        self._header = b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\n"
+        self._index = 0
+        self._body_started = False
+
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        if self.was_closed or self.closed.is_set():
+            return b""
+        if self.mode == "fast":
+            self.was_closed = True
+            return self._header + b"fastbody"
+        if self.mode == "headers":
+            if self.closed.wait(0.01):
+                return b""
+            if self._index >= len(self._header):
+                if self.closed.wait(0.01):
+                    return b""
+                return b"x"
+            self._index += 1
+            return self._header[self._index - 1 : self._index]
+        if not self._body_started:
+            self._body_started = True
+            return self._header + b"x"
+        if self.closed.wait(0 if timeout == 0 else (timeout if timeout is not None else 2)):
+            return b""
+        raise self._errors.ReadTimeout()
+
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        if self.was_closed:
+            raise OSError("closed")
+
+    def close(self) -> None:
+        self.was_closed = True
+        self.closed.set()
+
+    def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        return self
+
+    def get_extra_info(self, info: str):
+        return None
+
+
+def _pool_in_use(pool) -> int:
+    used = 0
+    for conn in list(pool.connections):
+        try:
+            if not conn.is_closed() and not conn.is_idle():
+                used += 1
+        except Exception:
+            used += 1
+    return used
+
+
+def test_expired_delivery_releases_the_pool_and_the_worker(tmp_path):
+    module = _load_app(tmp_path, **_env())
+    budget = 0.12
+    tolerance = 0.35
+
+    def deliver(mode: str):
+        backend = _ScriptedBackend(mode)
+        client, pool = _pool_client(backend)
+        started = time.monotonic()
+        with pytest.raises(module.ssrf.SSRFError) as caught:
+            module.ssrf.safe_post_bytes(
+                _HOOK,
+                b"{}",
+                resolver=_public_resolver,
+                deadline=budget,
+                timeout=5.0,
+                client=client,
+            )
+        elapsed = time.monotonic() - started
+        assert caught.value.code == "fetch_failed"
+        assert elapsed <= budget + tolerance
+        deadline = time.monotonic() + 0.5
+        while _http_workers() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert _http_workers() == []
+        assert _pool_in_use(pool) == 0
+        assert backend.streams
+        assert backend.streams[-1].was_closed
+        fast = _ScriptedBackend("fast")
+        # Reuse the same pool by swapping only the backend's behavior is not
+        # possible; the next delivery goes through this same pool object.
+        pool._network_backend = fast
+        status, payload = module.ssrf.safe_post_bytes(
+            _HOOK,
+            b"ok",
+            resolver=_public_resolver,
+            deadline=1.0,
+            timeout=1.0,
+            client=client,
+        )
+        assert status == 200
+        assert payload == b"fastbody"
+        assert fast.connects == 1
+        client.close()
+
+    deliver("headers")
+    deliver("body")
+    assert _http_workers() == []
+
+    for _ in range(4):
+        backend = _ScriptedBackend("headers")
+        client, _pool = _pool_client(backend)
+        with pytest.raises(module.ssrf.SSRFError):
+            module.ssrf.safe_post_bytes(
+                _HOOK,
+                b"{}",
+                resolver=_public_resolver,
+                deadline=budget,
+                timeout=5.0,
+                client=client,
+            )
+        client.close()
+    deadline = time.monotonic() + 0.5
+    while _http_workers() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(_http_workers()) <= 1
+
+
+def test_resolver_threads_are_bounded_and_do_not_post(tmp_path):
+    module = _load_app(tmp_path, **_env())
+    release = threading.Event()
+    connects = {"n": 0}
+
+    def slow_dns(host, port, *args, **kwargs):
+        release.wait(0.4)
+        return _public_resolver(host, port)
+
+    class CountingBackend(_ScriptedBackend):
+        def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+            connects["n"] += 1
+            return super().connect_tcp(host, port, timeout, local_address, socket_options)
+
+    backend = CountingBackend("fast")
+    client, _pool = _pool_client(backend)
+    errors: list[str] = []
+
+    def once():
+        try:
+            module.ssrf.safe_post_bytes(
+                _HOOK,
+                b"{}",
+                resolver=slow_dns,
+                deadline=0.1,
+                timeout=5.0,
+                client=client,
+            )
+        except module.ssrf.SSRFError as exc:
+            errors.append(exc.code)
+
+    threads = [threading.Thread(target=once) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    found = time.monotonic() + 0.3
+    while len(_dns_workers()) < 4 and time.monotonic() < found:
+        time.sleep(0.01)
+    assert len(_dns_workers()) <= 4
+    started = time.monotonic()
+    once()
+    assert time.monotonic() - started < 0.08
+    assert errors[-1] == "fetch_failed"
+    for thread in threads:
+        thread.join(1)
+    assert connects["n"] == 0
+    release.set()
+    deadline = time.monotonic() + 1
+    while _dns_workers() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    client.close()
+
+
+def test_partial_or_slow_body_is_a_retryable_failure(tmp_path, monkeypatch):
+    module = _load_app(tmp_path, **_env())
+    _patch_dns(monkeypatch, module)
+
+    def attempt(mode: str) -> None:
+        backend = _ScriptedBackend(mode)
+        client, _pool = _pool_client(backend)
+
+        def poster(url, body, headers, timeout):
+            return module.ssrf.safe_post_bytes(
+                url,
+                body,
+                headers=headers,
+                timeout=timeout,
+                deadline=0.1,
+                resolver=_public_resolver,
+                client=client,
+            )
+
+        module.webhook_send.poster = poster
+        with TestClient(module.app) as http:
+            key = _buy(http)
+            assert _put_hook(http, key).status_code == 200
+            assert http.post("/v1/client/webhook/test", headers={"X-Api-Key": key}).status_code == 200
+        now = int(_hooks()[-1]["next_attempt_at"])
+        module.webhook_send.pump_once(now=now)
+        row = _hooks()[-1]
+        assert row["status"] == "pending"
+        assert int(row["attempts"]) == 1
+        assert int(row["next_attempt_at"]) - now == 60
+        client.close()
+        with sqlite3.connect(os_db()) as conn:
+            conn.execute("DELETE FROM webhook_outbox")
+            conn.execute("DELETE FROM client_webhooks")
+
+    attempt("body")
+    attempt("headers")
+
+    for status_code, body in ((200, b"ready"), (204, b""), (404, b"no"), (410, b"gone")):
+        seen = {}
+
+        def handler(request, status_code=status_code, body=body):
+            seen["accept"] = request.headers.get("accept-encoding")
+            return httpx.Response(status_code, content=body)
+
+        code, payload = module.ssrf.safe_post_bytes(
+            _HOOK,
+            b"{}",
+            resolver=_public_resolver,
+            deadline=1.0,
+            client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+        assert code == status_code
+        assert payload == body
+        assert seen["accept"] == "identity"
