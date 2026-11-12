@@ -417,19 +417,45 @@ def test_presigned_query_is_not_stored_or_printed(tmp_path, monkeypatch) -> None
     assert module.PRIMARY in dest.read_text(encoding="utf-8")
 
 
+def test_dense_siblings_are_unlinked_when_their_parent_ends(tmp_path) -> None:
+    """Thousands of empty siblings must not stay attached after they end.
+
+    iterparse attaches the next sibling before the end event is delivered.
+    Unlinking only the parent's last child leaves the finished ones behind.
+    """
+    module = _load()
+    path = tmp_path / "siblings.xml"
+    count = 10_000
+    path.write_bytes(b"<Sanctions><Noise>" + b"<Pad/>" * count + b"</Noise></Sanctions>")
+    seen: dict[str, int] = {}
+
+    def on_end(elem) -> None:
+        if module._local(elem.tag) == "Noise":
+            seen["children"] = len(elem)
+
+    module._walk(path, on_end)
+    assert seen["children"] == 0
+
+
 def test_large_xml_rss_stays_within_budget(tmp_path) -> None:
+    import sys
+
+    if sys.platform != "linux":
+        pytest.skip("OFAC RSS budget is measured with VmHWM on Linux")
     module_path = ROOT / "scripts" / "ofac_evm_update.py"
     address = _ADDRESS
     small = tmp_path / "pad16.xml"
     large = tmp_path / "pad128.xml"
-    _write_padded(small, 16 * 1024 * 1024, address)
-    _write_padded(large, 128 * 1024 * 1024, address)
+    _write_dense(small, 16 * 1024 * 1024, address)
+    _write_dense(large, 128 * 1024 * 1024, address)
     assert small.stat().st_size >= 16 * 1024 * 1024
     assert large.stat().st_size >= 128 * 1024 * 1024
     first = _measure_child(module_path, small)
     second = _measure_child(module_path, large)
     assert first["count"] == second["count"] == 1
     assert first["digest"] == second["digest"]
+    assert first["rss_kib"] > 0
+    assert second["rss_kib"] > 0
     assert second["rss_kib"] <= 192 * 1024
     assert second["rss_kib"] - first["rss_kib"] <= 32 * 1024
     print(
@@ -463,33 +489,16 @@ def _download_temps() -> list[str]:
     return sorted(path.name for path in root.glob(".ofac-download-*"))
 
 
-def _write_padded(path: Path, target: int, address: str) -> None:
-    pad = b"<Pad>" + (b"n" * 180) + b"</Pad>"
-    feature = (
-        "<DistinctParties><DistinctParty><Profile>"
-        f"<Feature FeatureTypeID=\"9\"><FeatureVersion><VersionDetail>{address}</VersionDetail></FeatureVersion></Feature>"
-        "</Profile></DistinctParty></DistinctParties>"
-        "<ReferenceValueSets><FeatureTypeValues>"
-        "<FeatureType ID=\"9\">Digital Currency Address - ETH</FeatureType>"
-        "</FeatureTypeValues></ReferenceValueSets>"
-    ).encode()
-    header = b'<?xml version="1.0"?><Sanctions xmlns="urn:ofac-test"><Noise>'
-    footer = b"</Noise></Sanctions>"
+def _write_dense(path: Path, target: int, address: str) -> None:
+    """One parent, many short siblings, then one address. Written in chunks."""
+    header = b'<Sanctions><FeatureType ID="9">Digital Currency Address - ETH</FeatureType><Noise>'
+    pad = b"<Pad>" + (b"n" * 40) + b"</Pad>"
+    tail = b"</Noise><Feature FeatureTypeID=\"9\"><Value>" + address.encode("ascii") + b"</Value></Feature></Sanctions>"
     with path.open("wb") as handle:
         handle.write(header)
-        half = max(0, (target // 2) - len(header))
-        written = len(header)
-        while written < half:
+        while handle.tell() + len(tail) < target:
             handle.write(pad)
-            written += len(pad)
-        handle.write(b"</Noise>")
-        handle.write(feature)
-        handle.write(b"<Noise>")
-        written = handle.tell()
-        while written + len(footer) < target:
-            handle.write(pad)
-            written += len(pad)
-        handle.write(footer)
+        handle.write(tail)
 
 
 def _measure_child(script: Path, xml_path: Path) -> dict[str, object]:
@@ -520,9 +529,11 @@ def _measure_child(script: Path, xml_path: Path) -> dict[str, object]:
     )
     assert proc.returncode == 0, proc.stderr[-400:]
     count, rss, seconds, python, digest = proc.stdout.strip().split()
+    rss_kib = int(rss)
+    assert rss_kib > 0, "VmHWM was not found"
     return {
         "count": int(count),
-        "rss_kib": int(rss),
+        "rss_kib": rss_kib,
         "seconds": seconds,
         "python": python,
         "digest": digest,

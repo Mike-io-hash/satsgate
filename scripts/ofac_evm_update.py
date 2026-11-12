@@ -177,12 +177,29 @@ def _local(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
+def _detach(parent: ET.Element, elem: ET.Element) -> None:
+    """Unlink ``elem`` wherever it sits among its siblings.
+
+    iterparse attaches later siblings before this end event is delivered, so
+    the finished element is not the parent's last child. Identity, not
+    position, decides which child goes.
+    """
+    if len(parent) and parent[0] is elem:
+        del parent[0]
+        return
+    for index, child in enumerate(parent):
+        if child is elem:
+            del parent[index]
+            return
+
+
 def _walk(path: Path, on_end) -> None:
     """Visit each element at its end, then free what no open parent still needs.
 
     Children of a ``Feature`` stay until that feature is handled, so the parent
     can still read their text. Every other finished element is cleared and
-    unlinked. The live set is the open path plus the feature currently ending.
+    unlinked, including when the parser has already attached the next sibling.
+    The live set is the open path plus the feature currently ending.
     """
     context = ET.iterparse(os.fspath(path), events=("start", "end"))  # nosec B314
     stack: list[ET.Element] = []
@@ -197,8 +214,8 @@ def _walk(path: Path, on_end) -> None:
         if inside_feature:
             continue
         elem.clear()
-        if stack and len(stack[-1]) and stack[-1][-1] is elem:
-            del stack[-1][-1]
+        if stack:
+            _detach(stack[-1], elem)
 
 
 def _feature_type_names(path: Path) -> dict[str, str]:
