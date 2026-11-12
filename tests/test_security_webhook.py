@@ -1627,7 +1627,9 @@ class _RecordingBackend:
         self.deadline = deadline
 
     def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
-        self.events.append(("connect", timeout, self.clock["t"]))
+        now = self.clock["t"]
+        self.events.append(("connect", timeout, now))
+        self.clock["t"] = now + 0.05
         return _RecordingStream(self)
 
     def connect_unix_socket(self, path, timeout=None, socket_options=None):
@@ -1652,13 +1654,17 @@ class _RecordingStream:
         return b"H"
 
     def write(self, buffer, timeout=None):
-        self.backend.events.append(("write", timeout, self.backend.clock["t"]))
+        now = self.backend.clock["t"]
+        self.backend.events.append(("write", timeout, now))
+        self.backend.clock["t"] = now + 0.05
 
     def close(self):
         return None
 
     def start_tls(self, ssl_context, server_hostname=None, timeout=None):
-        self.backend.events.append(("tls", timeout, self.backend.clock["t"]))
+        now = self.backend.clock["t"]
+        self.backend.events.append(("tls", timeout, now))
+        self.backend.clock["t"] = now + 0.05
         return self
 
     def get_extra_info(self, info):
@@ -1690,9 +1696,15 @@ def test_socket_timeouts_stay_inside_the_delivery_deadline(tmp_path, monkeypatch
         assert caught.value.code == "fetch_failed"
     finally:
         client.close()
-    kinds = [item[0] for item in events]
-    assert "connect" in kinds and "tls" in kinds and "write" in kinds and "read" in kinds
-    assert any(kind == "read" and timeout is not None and timeout < 0.4 for kind, timeout, _now in events)
+    by_kind = {kind: (timeout, now) for kind, timeout, now in events}
+    assert {"connect", "tls", "write", "read"} <= set(by_kind)
+    connect_timeout, connect_now = by_kind["connect"]
+    tls_timeout, tls_now = by_kind["tls"]
+    write_timeout, write_now = by_kind["write"]
+    assert connect_now < tls_now < write_now
+    assert tls_timeout < connect_timeout
+    assert write_timeout < tls_timeout
+    assert any(kind == "read" and timeout is not None and timeout < write_timeout for kind, timeout, _now in events)
     for kind, timeout, now in events:
         assert timeout is not None
         assert timeout <= (deadline - now) + 1e-6
@@ -1753,6 +1765,7 @@ class _LoopbackPin:
         self.module = module
         self.port = port
         self.connects = 0
+        self.socks: list[socket.socket] = []
 
     def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
         from httpcore._backends.sync import SyncStream
@@ -1765,6 +1778,7 @@ class _LoopbackPin:
             raise self.module.ssrf.SSRFError("destination_rejected")
         self.connects += 1
         sock = socket.create_connection(("127.0.0.1", self.port), timeout=timeout)
+        self.socks.append(sock)
         return SyncStream(sock)
 
     def connect_unix_socket(self, path, timeout=None, socket_options=None):
@@ -1774,7 +1788,7 @@ class _LoopbackPin:
         time.sleep(seconds)
 
 
-def _serve_tls(cert_path, key_path, mode: str, origin: dict, release: threading.Event):
+def _serve_tls(cert_path, key_path, mode: str, origin: dict, release: threading.Event, phase: dict | None = None):
     import ssl
 
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -1798,17 +1812,25 @@ def _serve_tls(cert_path, key_path, mode: str, origin: dict, release: threading.
                 if not chunk:
                     break
                 buf += chunk
-            if mode == "fast":
+            chosen = phase["mode"] if phase is not None else mode
+            if chosen == "fast":
                 body = b"ready"
                 tls.sendall(
                     b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n" + body
                 )
                 release.wait(2)
                 return
-            if mode == "redirect":
+            if chosen == "redirect":
                 tls.sendall(
                     b"HTTP/1.1 302 Found\r\nLocation: https://hooks.example/next\r\nContent-Length: 0\r\n\r\n"
                 )
+                release.wait(2)
+                return
+            if chosen == "dribble":
+                # Several header bytes, never the blank line that would finish them.
+                for byte in b"HTTP/1.1 200 OK\r\nX-A: 1\r\n"[:8]:
+                    tls.sendall(bytes([byte]))
+                    time.sleep(0.04)
                 release.wait(2)
                 return
             while origin.get("t") is None and not release.is_set():
@@ -1817,13 +1839,13 @@ def _serve_tls(cert_path, key_path, mode: str, origin: dict, release: threading.
                 delay = origin["t"] + 0.3 - time.monotonic()
                 if delay > 0:
                     time.sleep(min(delay, 1))
-            if mode == "headers":
+            if chosen == "headers":
                 tls.sendall(b"H")
-            elif mode == "body200":
+            elif chosen == "body200":
                 tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\nx")
-            elif mode == "body404":
+            elif chosen == "body404":
                 tls.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 20\r\nConnection: close\r\n\r\nx")
-            elif mode == "body410":
+            elif chosen == "body410":
                 tls.sendall(b"HTTP/1.1 410 Gone\r\nContent-Length: 20\r\nConnection: close\r\n\r\nx")
             release.wait(2)
         except Exception:
@@ -1864,17 +1886,20 @@ def test_real_tls_stalls_fail_and_fast_responses_stay(tmp_path):
     cert_dir.mkdir()
     listeners = []
     try:
-        for mode in ("headers", "body200", "body404", "body410"):
+        for mode in ("dribble", "body200", "body404", "body410"):
             cert_path, key_path = _mint_cert(cert_dir, "hooks.example")
             release = threading.Event()
             origin = {"t": None}
-            port, thread, workers, listener = _serve_tls(cert_path, key_path, mode, origin, release)
+            phase = {"mode": mode}
+            port, thread, workers, listener = _serve_tls(
+                cert_path, key_path, mode, origin, release, phase
+            )
             listeners.append((release, thread, workers, listener, cert_path, key_path))
             backend = _LoopbackPin(module, port)
             client, pool = _tls_client(module, cert_path, backend)
             try:
-                repeats = 8 if mode == "headers" else 1
-                for _ in range(repeats):
+                for _ in range(8):
+                    phase["mode"] = mode
                     origin["t"] = time.monotonic()
                     started = origin["t"]
                     with pytest.raises(module.ssrf.SSRFError) as caught:
@@ -1887,32 +1912,30 @@ def test_real_tls_stalls_fail_and_fast_responses_stay(tmp_path):
                             client=client,
                         )
                     elapsed = time.monotonic() - started
+                    # Worker bound is deadline + 0.1 s. The extra 0.15 s is measurement tolerance only.
                     assert caught.value.code == "fetch_failed"
                     assert elapsed <= 0.4 + 0.1 + 0.15
                     assert _http_workers() == []
                     assert _pool_in_use(pool) == 0
+                    assert backend.socks[-1].fileno() == -1
+                    phase["mode"] = "fast"
+                    status, payload = module.ssrf.safe_post_bytes(
+                        _HOOK,
+                        b"{}",
+                        resolver=_public_resolver,
+                        deadline=1.0,
+                        timeout=1.0,
+                        client=client,
+                    )
+                    assert status == 200
+                    assert payload == b"ready"
+                    assert _http_workers() == []
             finally:
                 release.set()
                 client.close()
                 for worker in workers:
                     worker.join(1)
                 thread.join(1)
-        cert_path, key_path = _mint_cert(cert_dir, "hooks.example")
-        release = threading.Event()
-        port, thread, workers, listener = _serve_tls(cert_path, key_path, "fast", {"t": None}, release)
-        listeners.append((release, thread, workers, listener, cert_path, key_path))
-        backend = _LoopbackPin(module, port)
-        client, _pool = _tls_client(module, cert_path, backend)
-        try:
-            status, payload = module.ssrf.safe_post_bytes(
-                _HOOK, b"{}", resolver=_public_resolver, deadline=1.0, client=client
-            )
-            assert status == 200
-            assert payload == b"ready"
-        finally:
-            release.set()
-            client.close()
-            thread.join(1)
         wrong_cert, wrong_key = _mint_cert(cert_dir, "other.example")
         release = threading.Event()
         port, thread, workers, listener = _serve_tls(wrong_cert, wrong_key, "fast", {"t": None}, release)
