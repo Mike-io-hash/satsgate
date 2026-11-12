@@ -489,6 +489,95 @@ def _download_temps() -> list[str]:
     return sorted(path.name for path in root.glob(".ofac-download-*"))
 
 
+def test_full_updater_rss_stays_within_budget(tmp_path) -> None:
+    """The cron entry point, not only extract_evm, stays inside P-3."""
+    import sys
+
+    if sys.platform != "linux":
+        pytest.skip("OFAC RSS budget is measured with VmHWM on Linux")
+    module_path = ROOT / "scripts" / "ofac_evm_update.py"
+    small = tmp_path / "upd16.xml"
+    large = tmp_path / "upd128.xml"
+    _write_dense(small, 16 * 1024 * 1024, _ADDRESS)
+    _write_dense(large, 128 * 1024 * 1024, _ADDRESS)
+    first = _measure_updater(module_path, small, tmp_path / "out16.txt")
+    second = _measure_updater(module_path, large, tmp_path / "out128.txt")
+    assert first["count"] == second["count"] == 1
+    assert first["rss_kib"] > 0 and second["rss_kib"] > 0
+    assert second["rss_kib"] <= 192 * 1024
+    assert second["rss_kib"] - first["rss_kib"] <= 32 * 1024
+    for dest in (tmp_path / "out16.txt", tmp_path / "out128.txt"):
+        text = dest.read_text(encoding="utf-8")
+        assert _ADDRESS in text
+        assert "X-Amz-" not in text
+        assert "?" not in text.splitlines()[0]
+    print(
+        f"OFAC_UPDATER bytes16={small.stat().st_size} rss16_kib={first['rss_kib']} "
+        f"seconds16={first['seconds']} bytes128={large.stat().st_size} "
+        f"rss128_kib={second['rss_kib']} seconds128={second['seconds']} py={second['python']}"
+    )
+
+
+def _measure_updater(script: Path, xml_path: Path, dest: Path) -> dict[str, object]:
+    import subprocess
+    import sys
+
+    code = (
+        "import sys, time, importlib.util\n"
+        "from pathlib import Path\n"
+        "spec=importlib.util.spec_from_file_location('ofac_evm_update', sys.argv[1])\n"
+        "mod=importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n"
+        "mod.MIN_ADDRESSES=1\n"
+        "src=Path(sys.argv[2])\n"
+        "dest=Path(sys.argv[3])\n"
+        "class Resp:\n"
+        "    def __init__(self):\n"
+        "        self._fh=src.open('rb')\n"
+        "        self.status=200\n"
+        "        self.headers={'Content-Type':'text/xml'}\n"
+        "    def read(self, amt=-1):\n"
+        "        if amt is None or int(amt)<0:\n"
+        "            raise AssertionError('unlimited read')\n"
+        "        return self._fh.read(int(amt))\n"
+        "    def geturl(self):\n"
+        "        return mod.PRIMARY\n"
+        "    def close(self):\n"
+        "        self._fh.close()\n"
+        "class Opener:\n"
+        "    def open(self, request, timeout=60):\n"
+        "        if request.full_url!=mod.PRIMARY:\n"
+        "            raise AssertionError('unexpected host')\n"
+        "        return Resp()\n"
+        "mod.build_opener=lambda *a, **k: Opener()\n"
+        "mod.sys.argv=['ofac_evm_update.py', str(dest)]\n"
+        "started=time.perf_counter()\n"
+        "code=mod.main()\n"
+        "elapsed=time.perf_counter()-started\n"
+        "rss=0\n"
+        "for line in open('/proc/self/status', encoding='ascii'):\n"
+        "    if line.startswith('VmHWM:'):\n"
+        "        rss=int(line.split()[1])\n"
+        "        break\n"
+        "count=0\n"
+        "if dest.exists():\n"
+        "    count=sum(1 for line in dest.read_text(encoding='utf-8').splitlines() if line.startswith('0x'))\n"
+        "sys.stdout.write(f'{count} {rss} {elapsed:.3f} {sys.version.split()[0]} {code}\\n')\n"
+        "raise SystemExit(code)\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code, str(script), str(xml_path), str(dest)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr[-400:]
+    count, rss, seconds, python, _exit = proc.stdout.strip().splitlines()[-1].split()
+    rss_kib = int(rss)
+    assert rss_kib > 0, "VmHWM was not found"
+    return {"count": int(count), "rss_kib": rss_kib, "seconds": seconds, "python": python}
+
+
 def _write_dense(path: Path, target: int, address: str) -> None:
     """One parent, many short siblings, then one address. Written in chunks."""
     header = b'<Sanctions><FeatureType ID="9">Digital Currency Address - ETH</FeatureType><Noise>'

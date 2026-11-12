@@ -561,6 +561,67 @@ def test_gate_402_contact_reaches_buyers_and_head_stays_empty(tmp_path, monkeypa
             _close(client, empty_client)
 
 
+def test_challenge_http_402_stays_a_public_502(tmp_path, monkeypatch):
+    """A non-200 challenge from core is not a public 402.
+
+    ``create_challenge`` turns every non-200, including 402, into
+    ``unavailable``. The public body is ``502 paywall_unavailable`` and does
+    not gain ``abuse_contact``.
+    """
+    module = _load_app(tmp_path)
+    _patch_dns(monkeypatch, module)
+
+    class _Challenge402(_CoreOnly):
+        def __init__(self, app) -> None:
+            super().__init__(app)
+            self.challenge_calls = 0
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            if request.url.host != "core.test":
+                raise AssertionError("gate called a non-core host")
+            if request.method == "POST" and request.url.path.endswith("/challenge"):
+                self.challenge_calls += 1
+                return httpx.Response(
+                    402,
+                    json={"ok": False, "error": "payment_required"},
+                    headers={"Cache-Control": "no-store"},
+                )
+            return await super().handle_async_request(request)
+
+    with TestClient(module.app) as core:
+        _prepare(core)
+        transport = _Challenge402(module.app)
+        client = httpx.AsyncClient(transport=transport, base_url="http://core.test", timeout=5)
+        gate = create_app(_settings())
+        gate.state.core_client = client
+        empty = create_app(_settings(abuse_contact=""))
+        empty_client = httpx.AsyncClient(transport=transport, base_url="http://core.test", timeout=5)
+        empty.state.core_client = empty_client
+        try:
+            with TestClient(gate) as http:
+                response = http.get("/my-shop/blog/post")
+                assert response.status_code == 502
+                body = response.json()
+                assert body["error"] == "paywall_unavailable"
+                assert body["ok"] is False
+                assert "abuse_contact" not in body
+                assert "invoice" not in body and "receipt" not in body
+                assert response.headers["cache-control"] == "no-store"
+                head = http.head("/my-shop/blog/post")
+                assert head.status_code == 502
+                assert head.content == b""
+                assert head.headers["cache-control"] == "no-store"
+            with TestClient(empty) as http:
+                quiet = http.get("/my-shop/blog/post")
+                assert quiet.status_code == 502
+                assert quiet.json()["error"] == "paywall_unavailable"
+                assert "abuse_contact" not in quiet.json()
+                assert quiet.headers["cache-control"] == response.headers["cache-control"]
+            assert transport.challenge_calls >= 1
+        finally:
+            _close(client, empty_client)
+
+
 def test_one_rail_only(tmp_path, monkeypatch):
     module = _load_app(tmp_path)
     _patch_dns(monkeypatch, module)
