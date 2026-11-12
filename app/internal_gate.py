@@ -651,9 +651,13 @@ def _x402_receipt_after_expired_offer(
     PAYMENT-SIGNATURE must be byte-identical to the one that settled: SHA-256
     of its exact UTF-8 string, compared in constant time. A row with no stored
     hash (issued before that column) is not recoverable. Recovery also stops
-    ``X402_RECEIPT_RECOVERY_SECONDS`` after settle. A mismatch on client, site,
-    path, hash, or that clock returns None so the caller sends the original
-    402. A receipt whose own ``exp`` has passed still raises ``token_expired``.
+    ``X402_RECEIPT_RECOVERY_SECONDS`` after settle. ``0`` disables this path,
+    including the same second as settle, and does not load the origin secret.
+    A mismatch on client, site, path, hash, or that clock returns None so the
+    caller sends the original 402. A receipt whose own ``exp`` has passed, with
+    the window enabled, still raises ``token_expired``. A coherent persisted
+    settlement adds the original ``PAYMENT-RESPONSE``. A missing or inconsistent
+    settlement raises ``paywall_unavailable`` and does not return a receipt.
     """
     from . import db_receipts
     from . import x402
@@ -693,8 +697,12 @@ def _x402_receipt_after_expired_offer(
             path,
         )
         return None
-    settled_at = row.get("settled_at")
     window = int(config.X402_RECEIPT_RECOVERY_SECONDS)
+    # 0 disables recovery. The inclusive comparison below would otherwise
+    # accept the settle second, and an expired receipt must stay 402 here.
+    if window == 0:
+        return None
+    settled_at = row.get("settled_at")
     in_window = settled_at is not None and now <= int(settled_at) + window
     if not in_window and now < int(row["exp"]):
         log.warning(
@@ -705,7 +713,117 @@ def _x402_receipt_after_expired_offer(
         )
         return None
     secret = db_sites.load_origin_secret(config.DB_PATH, site_id=int(site_id))
-    return existing_body(payment_key, secret=secret, aud=aud, now=now)
+    if now >= int(row["exp"]):
+        return existing_body(payment_key, secret=secret, aud=aud, now=now)
+    header = _persisted_payment_response(
+        row,
+        payload,
+        client_id=client_id,
+        aud=aud,
+        path=path,
+        payment_key=payment_key,
+    )
+    issued = existing_body(payment_key, secret=secret, aud=aud, now=now)
+    if issued is None:
+        return None
+    issued["payment_response"] = header
+    return issued
+
+
+def _persisted_payment_response(
+    receipt: dict,
+    payload: dict,
+    *,
+    client_id: int,
+    aud: str,
+    path: str,
+    payment_key: str,
+) -> str:
+    """Rebuild ``PAYMENT-RESPONSE`` from the settled authorization row.
+
+    Decoded signature fields are used only as the lookup key, and only after
+    the exact header hash matched. They are not proof of payment. A missing or
+    inconsistent row is an internal inconsistency, not a buyer signature error.
+    """
+    from . import db_x402
+    from . import x402
+    from .gate_receipts import ReceiptIssueError
+
+    fields = _settlement_lookup_key(payload)
+    if fields is None or receipt.get("payment_hash") != payment_key:
+        raise ReceiptIssueError("paywall_unavailable", 502)
+    network, asset, payer, nonce = fields
+    if receipt.get("network") != network:
+        raise ReceiptIssueError("paywall_unavailable", 502)
+    row = db_x402.authorization_row(
+        config.DB_PATH,
+        network=network,
+        asset=asset,
+        payer=payer,
+        nonce=nonce,
+    )
+    if row is None:
+        raise ReceiptIssueError("paywall_unavailable", 502)
+    if (
+        str(row["nonce"]).lower() != nonce
+        or row["network"] != network
+        or row["asset"] != asset
+        or row["payer"] != payer
+        or row["state"] != "settled"
+    ):
+        raise ReceiptIssueError("paywall_unavailable", 502)
+    tx = row["tx_hash"]
+    if not isinstance(tx, str) or not _valid_tx(tx):
+        raise ReceiptIssueError("paywall_unavailable", 502)
+    offer = db_x402.get_offer(config.DB_PATH, str(row["offer_id"]))
+    expected = gate_resource(aud, path)
+    if offer is None or int(offer["client_id"]) != int(client_id) or offer.get("resource") != expected:
+        raise ReceiptIssueError("paywall_unavailable", 502)
+    offer_network = offer.get("network")
+    if offer_network not in {None, ""} and offer_network != network:
+        raise ReceiptIssueError("paywall_unavailable", 502)
+    return x402.payment_response_b64(tx=tx, payer=str(row["payer"]), network=network)
+
+
+def _settlement_lookup_key(payload: dict) -> tuple[str, str, str, str] | None:
+    """Network, asset, payer, and nonce from a hash-checked payload. No time check."""
+    from . import x402
+
+    accepted = payload.get("accepted")
+    inner = payload.get("payload")
+    authorization = inner.get("authorization") if isinstance(inner, dict) else None
+    if not isinstance(accepted, dict) or not isinstance(authorization, dict):
+        return None
+    network = accepted.get("network")
+    nonce = authorization.get("nonce")
+    if not isinstance(network, str) or network not in x402._USDC_BY_NETWORK:
+        return None
+    if not isinstance(nonce, str) or not x402._BYTES32.fullmatch(nonce):
+        return None
+    try:
+        asset = x402.checksum_address(accepted.get("asset"))
+        payer = x402.checksum_address(authorization.get("from"))
+    except x402.X402Error:
+        return None
+    if asset != x402.usdc_for_network(network):
+        return None
+    if not x402.is_checksum_address(str(authorization.get("from"))):
+        return None
+    return network, asset, payer, nonce.lower()
+
+
+def _valid_tx(tx: str) -> bool:
+    if not tx.startswith("0x") or len(tx) < 10:
+        return False
+    return all(char in "0123456789abcdefABCDEF" for char in tx[2:])
+
+
+def _json_with_payment_response(issued: dict) -> JSONResponse:
+    response = JSONResponse(content=issued, headers=_NO_STORE)
+    header = issued.get("payment_response")
+    if isinstance(header, str) and header and "\r" not in header and "\n" not in header:
+        response.headers["PAYMENT-RESPONSE"] = header
+    return response
 
 
 @router.post("/internal/gate/x402/receipt")
@@ -761,7 +879,7 @@ def internal_x402_receipt(body: X402ReceiptIn, request: Request):
             )
             if issued is None:
                 raise
-            return JSONResponse(content=issued, headers=_NO_STORE)
+            return _json_with_payment_response(issued)
         payment_key = db_receipts.x402_key(fields["nonce"])
         now = int(time.time())
         try:
@@ -840,7 +958,4 @@ def internal_x402_receipt(body: X402ReceiptIn, request: Request):
         )
     except ValueError as exc:
         return _balance_error(exc)
-    response = JSONResponse(content=issued, headers=_NO_STORE)
-    if issued.get("payment_response"):
-        response.headers["PAYMENT-RESPONSE"] = issued["payment_response"]
-    return response
+    return _json_with_payment_response(issued)

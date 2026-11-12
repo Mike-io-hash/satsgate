@@ -1437,3 +1437,632 @@ def test_partial_or_slow_body_is_a_retryable_failure(tmp_path, monkeypatch):
         assert code == status_code
         assert payload == body
         assert seen["accept"] == "identity"
+
+
+def _permit_value(module) -> int:
+    return int(module.ssrf._resolver_slots._value)
+
+
+class _DnsCtorBoom(threading.Thread):
+    def __init__(self, *args, **kwargs):
+        if kwargs.get("name") == "satsgate-webhook-dns":
+            raise RuntimeError("constructor failed")
+        super().__init__(*args, **kwargs)
+
+
+class _DnsStartBoom(threading.Thread):
+    def start(self):
+        if self.name == "satsgate-webhook-dns":
+            raise RuntimeError("start failed")
+        super().start()
+
+
+def test_dns_permit_returns_when_the_worker_never_starts(tmp_path, monkeypatch):
+    module = _load_app(tmp_path, **_env())
+    assert _permit_value(module) == 4
+    real_thread = threading.Thread
+    connects = {"n": 0}
+
+    class _Counting(_ScriptedBackend):
+        def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+            connects["n"] += 1
+            return super().connect_tcp(host, port, timeout, local_address, socket_options)
+
+    for boom in (_DnsCtorBoom, _DnsStartBoom):
+        monkeypatch.setattr(module.ssrf.threading, "Thread", boom)
+        client, _pool = _pool_client(_Counting("fast"))
+        try:
+            for _ in range(5):
+                with pytest.raises(module.ssrf.SSRFError) as caught:
+                    module.ssrf.safe_post_bytes(
+                        _HOOK,
+                        b"{}",
+                        resolver=_public_resolver,
+                        deadline=0.2,
+                        timeout=5.0,
+                        client=client,
+                    )
+                assert caught.value.code == "fetch_failed"
+            assert connects["n"] == 0
+            assert _permit_value(module) == 4
+            assert _dns_workers() == []
+        finally:
+            client.close()
+
+    monkeypatch.setattr(module.ssrf.threading, "Thread", real_thread)
+    client, _pool = _pool_client(_ScriptedBackend("fast"))
+    try:
+        status, payload = module.ssrf.safe_post_bytes(
+            _HOOK,
+            b"{}",
+            resolver=_public_resolver,
+            deadline=1.0,
+            client=client,
+        )
+        assert status == 200
+        assert payload == b"fastbody"
+        assert _permit_value(module) == 4
+    finally:
+        client.close()
+
+
+def test_dns_permit_is_released_once_and_held_until_lookup_ends(tmp_path):
+    module = _load_app(tmp_path, **_env())
+    client, _pool = _pool_client(_ScriptedBackend("fast"))
+    try:
+        status, _payload = module.ssrf.safe_post_bytes(
+            _HOOK, b"{}", resolver=_public_resolver, deadline=1.0, client=client
+        )
+        assert status == 200
+        assert _permit_value(module) == 4
+
+        def gai(host, port, *args, **kwargs):
+            raise socket.gaierror("lookup failed")
+
+        with pytest.raises(module.ssrf.SSRFError) as caught:
+            module.ssrf.safe_post_bytes(_HOOK, b"{}", resolver=gai, deadline=1.0, client=client)
+        assert caught.value.code == "destination_rejected"
+        assert _permit_value(module) == 4
+
+        def boom(host, port, *args, **kwargs):
+            raise RuntimeError("lookup exploded")
+
+        with pytest.raises(RuntimeError):
+            module.ssrf.safe_post_bytes(_HOOK, b"{}", resolver=boom, deadline=1.0, client=client)
+        assert _permit_value(module) == 4
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking(host, port, *args, **kwargs):
+            started.set()
+            release.wait(3)
+            return _public_resolver(host, port)
+
+        with pytest.raises(module.ssrf.SSRFError) as caught:
+            module.ssrf.safe_post_bytes(_HOOK, b"{}", resolver=blocking, deadline=0.05, client=client)
+        assert caught.value.code == "fetch_failed"
+        assert started.is_set()
+        assert _dns_workers()
+        assert _permit_value(module) == 3
+        release.set()
+        deadline = time.monotonic() + 1
+        while _dns_workers() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert _dns_workers() == []
+        assert _permit_value(module) == 4
+
+        release_all = threading.Event()
+
+        def hold(host, port, *args, **kwargs):
+            release_all.wait(3)
+            return _public_resolver(host, port)
+
+        errors: list[str] = []
+
+        def once():
+            try:
+                module.ssrf.safe_post_bytes(_HOOK, b"{}", resolver=hold, deadline=0.4, client=client)
+            except module.ssrf.SSRFError as exc:
+                errors.append(exc.code)
+
+        threads = [threading.Thread(target=once) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        found = time.monotonic() + 0.5
+        while len(_dns_workers()) < 4 and time.monotonic() < found:
+            time.sleep(0.01)
+        assert len(_dns_workers()) == 4
+        assert _permit_value(module) == 0
+        started_fifth = time.monotonic()
+        once()
+        assert time.monotonic() - started_fifth < 0.08
+        assert errors[-1] == "fetch_failed"
+        release_all.set()
+        for thread in threads:
+            thread.join(1)
+        deadline = time.monotonic() + 1
+        while _dns_workers() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert _permit_value(module) == 4
+        status, payload = module.ssrf.safe_post_bytes(
+            _HOOK, b"ok", resolver=_public_resolver, deadline=1.0, client=client
+        )
+        assert status == 200
+        assert payload == b"fastbody"
+    finally:
+        client.close()
+        for thread in threading.enumerate():
+            if thread.name == "satsgate-webhook-dns" and thread is not threading.current_thread():
+                thread.join(0.2)
+
+
+def test_dns_start_failure_uses_only_the_reserved_attempt(tmp_path, monkeypatch):
+    module = _load_app(tmp_path, **_env())
+    _patch_dns(monkeypatch, module)
+    monkeypatch.setattr(module.ssrf.threading, "Thread", _DnsStartBoom)
+    with TestClient(module.app) as http:
+        key = _buy(http)
+        credits = http.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"]
+        assert _put_hook(http, key).status_code == 200
+        assert http.post("/v1/client/webhook/test", headers={"X-Api-Key": key}).status_code == 200
+    now = int(_hooks()[-1]["next_attempt_at"])
+    module.webhook_send.pump_once(now=now)
+    row = _hooks()[-1]
+    assert row["status"] == "pending"
+    assert int(row["attempts"]) == 1
+    assert int(row["last_status"]) == 0
+    assert int(row["next_attempt_at"]) - now == 60
+    module.webhook_send.pump_once(now=now)
+    assert int(_hooks()[-1]["attempts"]) == 1
+    with TestClient(module.app) as http:
+        assert http.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"] == credits
+    assert _permit_value(module) == 4
+
+
+class _RecordingBackend:
+    def __init__(self, events, clock, deadline):
+        self.events = events
+        self.clock = clock
+        self.deadline = deadline
+
+    def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        now = self.clock["t"]
+        self.events.append(("connect", timeout, now))
+        self.clock["t"] = now + 0.05
+        return _RecordingStream(self)
+
+    def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        raise OSError("no unix")
+
+    def sleep(self, seconds):
+        return None
+
+
+class _RecordingStream:
+    def __init__(self, backend):
+        self.backend = backend
+        self._sent = 0
+
+    def read(self, max_bytes, timeout=None):
+        now = self.backend.clock["t"]
+        self.backend.events.append(("read", timeout, now))
+        if now >= self.backend.deadline:
+            raise TimeoutError("read after deadline")
+        self.backend.clock["t"] = now + 0.25
+        self._sent += 1
+        return b"H"
+
+    def write(self, buffer, timeout=None):
+        now = self.backend.clock["t"]
+        self.backend.events.append(("write", timeout, now))
+        self.backend.clock["t"] = now + 0.05
+
+    def close(self):
+        return None
+
+    def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        now = self.backend.clock["t"]
+        self.backend.events.append(("tls", timeout, now))
+        self.backend.clock["t"] = now + 0.05
+        return self
+
+    def get_extra_info(self, info):
+        return None
+
+
+def test_socket_timeouts_stay_inside_the_delivery_deadline(tmp_path, monkeypatch):
+    module = _load_app(tmp_path, **_env())
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(module.ssrf.time, "monotonic", lambda: clock["t"])
+    events: list[tuple] = []
+    deadline = clock["t"] + 0.4
+    backend = _RecordingBackend(events, clock, deadline)
+    import ssl
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    client, _pool = _pool_client(backend)
+    client._transport._pool._ssl_context = context
+    try:
+        with pytest.raises(module.ssrf.SSRFError) as caught:
+            module.ssrf.safe_post_bytes(
+                _HOOK,
+                b"{}",
+                resolver=_public_resolver,
+                deadline=0.4,
+                timeout=5.0,
+                client=client,
+            )
+        assert caught.value.code == "fetch_failed"
+    finally:
+        client.close()
+    by_kind = {kind: (timeout, now) for kind, timeout, now in events}
+    assert {"connect", "tls", "write", "read"} <= set(by_kind)
+    connect_timeout, connect_now = by_kind["connect"]
+    tls_timeout, tls_now = by_kind["tls"]
+    write_timeout, write_now = by_kind["write"]
+    assert connect_now < tls_now < write_now
+    assert tls_timeout < connect_timeout
+    assert write_timeout < tls_timeout
+    assert any(kind == "read" and timeout is not None and timeout < write_timeout for kind, timeout, _now in events)
+    for kind, timeout, now in events:
+        assert timeout is not None
+        assert timeout <= (deadline - now) + 1e-6
+        assert now < deadline
+
+
+def _mint_cert(directory, hostname: str):
+    import os
+    from datetime import datetime, timedelta, timezone
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)])
+    now = datetime.now(timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(hours=1))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(hostname)]), critical=False)
+        .sign(key, hashes.SHA256())
+    )
+    key_path = directory / "key.pem"
+    cert_path = directory / "cert.pem"
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    os.chmod(key_path, 0o600)
+    return cert_path, key_path
+
+
+def _tls_client(module, cert_path, backend):
+    import ssl
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.load_verify_locations(cafile=str(cert_path))
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    client, pool = _pool_client(backend)
+    pool._ssl_context = context
+    return client, pool
+
+
+class _LoopbackPin:
+    def __init__(self, module, port: int) -> None:
+        self.module = module
+        self.port = port
+        self.connects = 0
+        self.socks: list[socket.socket] = []
+
+    def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        from httpcore._backends.sync import SyncStream
+
+        pinned = getattr(self.module.ssrf._local, "pinned_ip", None)
+        pinned_host = getattr(self.module.ssrf._local, "pinned_host", None)
+        if not pinned or not self.module.ssrf.is_public_ip(str(pinned)):
+            raise self.module.ssrf.SSRFError("destination_rejected")
+        if pinned_host and str(host).lower().rstrip(".") != str(pinned_host):
+            raise self.module.ssrf.SSRFError("destination_rejected")
+        self.connects += 1
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=timeout)
+        self.socks.append(sock)
+        return SyncStream(sock)
+
+    def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        raise OSError("no unix")
+
+    def sleep(self, seconds):
+        time.sleep(seconds)
+
+
+def _serve_tls(cert_path, key_path, mode: str, origin: dict, release: threading.Event, phase: dict | None = None):
+    import ssl
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(16)
+    listener.settimeout(0.2)
+    port = listener.getsockname()[1]
+    workers: list[threading.Thread] = []
+
+    def handle(conn):
+        tls = None
+        try:
+            tls = context.wrap_socket(conn, server_side=True)
+            tls.settimeout(1)
+            buf = b""
+            while b"\r\n\r\n" not in buf and len(buf) < 8192:
+                chunk = tls.recv(1024)
+                if not chunk:
+                    break
+                buf += chunk
+            chosen = phase["mode"] if phase is not None else mode
+            if chosen == "fast":
+                body = b"ready"
+                tls.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n" + body
+                )
+                release.wait(2)
+                return
+            if chosen == "redirect":
+                tls.sendall(
+                    b"HTTP/1.1 302 Found\r\nLocation: https://hooks.example/next\r\nContent-Length: 0\r\n\r\n"
+                )
+                release.wait(2)
+                return
+            if chosen == "dribble":
+                # Several header bytes, never the blank line that would finish them.
+                for byte in b"HTTP/1.1 200 OK\r\nX-A: 1\r\n"[:8]:
+                    tls.sendall(bytes([byte]))
+                    time.sleep(0.04)
+                release.wait(2)
+                return
+            while origin.get("t") is None and not release.is_set():
+                time.sleep(0.01)
+            if origin.get("t") is not None:
+                delay = origin["t"] + 0.3 - time.monotonic()
+                if delay > 0:
+                    time.sleep(min(delay, 1))
+            if chosen == "headers":
+                tls.sendall(b"H")
+            elif chosen == "body200":
+                tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\nx")
+            elif chosen == "body404":
+                tls.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 20\r\nConnection: close\r\n\r\nx")
+            elif chosen == "body410":
+                tls.sendall(b"HTTP/1.1 410 Gone\r\nContent-Length: 20\r\nConnection: close\r\n\r\nx")
+            release.wait(2)
+        except Exception:
+            return
+        finally:
+            try:
+                if tls is not None:
+                    tls.close()
+                else:
+                    conn.close()
+            except Exception:
+                return
+
+    def accept():
+        while not release.is_set():
+            try:
+                conn, _addr = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            worker = threading.Thread(target=handle, args=(conn,), daemon=True)
+            workers.append(worker)
+            worker.start()
+        try:
+            listener.close()
+        except OSError:
+            return
+
+    thread = threading.Thread(target=accept, daemon=True)
+    thread.start()
+    return port, thread, workers, listener
+
+
+def test_real_tls_stalls_fail_and_fast_responses_stay(tmp_path):
+    module = _load_app(tmp_path, **_env())
+    cert_dir = tmp_path / "tls"
+    cert_dir.mkdir()
+    listeners = []
+    try:
+        for mode in ("dribble", "body200", "body404", "body410"):
+            cert_path, key_path = _mint_cert(cert_dir, "hooks.example")
+            release = threading.Event()
+            origin = {"t": None}
+            phase = {"mode": mode}
+            port, thread, workers, listener = _serve_tls(
+                cert_path, key_path, mode, origin, release, phase
+            )
+            listeners.append((release, thread, workers, listener, cert_path, key_path))
+            backend = _LoopbackPin(module, port)
+            client, pool = _tls_client(module, cert_path, backend)
+            try:
+                for _ in range(8):
+                    phase["mode"] = mode
+                    origin["t"] = time.monotonic()
+                    started = origin["t"]
+                    with pytest.raises(module.ssrf.SSRFError) as caught:
+                        module.ssrf.safe_post_bytes(
+                            _HOOK,
+                            b"{}",
+                            resolver=_public_resolver,
+                            deadline=0.4,
+                            timeout=5.0,
+                            client=client,
+                        )
+                    elapsed = time.monotonic() - started
+                    # Worker bound is deadline + 0.1 s. The extra 0.15 s is measurement tolerance only.
+                    assert caught.value.code == "fetch_failed"
+                    assert elapsed <= 0.4 + 0.1 + 0.15
+                    assert _http_workers() == []
+                    assert _pool_in_use(pool) == 0
+                    assert backend.socks[-1].fileno() == -1
+                    phase["mode"] = "fast"
+                    status, payload = module.ssrf.safe_post_bytes(
+                        _HOOK,
+                        b"{}",
+                        resolver=_public_resolver,
+                        deadline=1.0,
+                        timeout=1.0,
+                        client=client,
+                    )
+                    assert status == 200
+                    assert payload == b"ready"
+                    assert _http_workers() == []
+            finally:
+                release.set()
+                client.close()
+                for worker in workers:
+                    worker.join(1)
+                thread.join(1)
+        wrong_cert, wrong_key = _mint_cert(cert_dir, "other.example")
+        release = threading.Event()
+        port, thread, workers, listener = _serve_tls(wrong_cert, wrong_key, "fast", {"t": None}, release)
+        listeners.append((release, thread, workers, listener, wrong_cert, wrong_key))
+        backend = _LoopbackPin(module, port)
+        client, _pool = _tls_client(module, wrong_cert, backend)
+        # Trust the other name, then ask for hooks.example. Hostname verification fails.
+        try:
+            with pytest.raises(module.ssrf.SSRFError) as caught:
+                module.ssrf.safe_post_bytes(
+                    _HOOK, b"{}", resolver=_public_resolver, deadline=1.0, client=client
+                )
+            assert caught.value.code == "fetch_failed"
+        finally:
+            release.set()
+            client.close()
+            thread.join(1)
+        backend = _LoopbackPin(module, port)
+        with pytest.raises(module.ssrf.SSRFError) as caught:
+            module.ssrf.safe_post_bytes(
+                _HOOK,
+                b"{}",
+                resolver=lambda host, port, *args, **kwargs: [
+                    (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.2.0.8", port))
+                ],
+                deadline=1.0,
+                client=httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200))),
+            )
+        assert caught.value.code == "destination_rejected"
+        assert backend.connects == 0
+
+        def slow(host, port, *args, **kwargs):
+            time.sleep(0.3)
+            return _public_resolver(host, port)
+
+        connects = {"n": 0}
+
+        class _Count(_ScriptedBackend):
+            def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+                connects["n"] += 1
+                return super().connect_tcp(host, port, timeout, local_address, socket_options)
+
+        client, _pool = _pool_client(_Count("fast"))
+        try:
+            with pytest.raises(module.ssrf.SSRFError) as caught:
+                module.ssrf.safe_post_bytes(
+                    _HOOK, b"{}", resolver=slow, deadline=0.1, timeout=5.0, client=client
+                )
+            assert caught.value.code == "fetch_failed"
+            assert connects["n"] == 0
+        finally:
+            client.close()
+    finally:
+        for release, thread, workers, listener, cert_path, key_path in listeners:
+            release.set()
+            try:
+                listener.close()
+            except OSError:
+                pass
+            for worker in workers:
+                worker.join(0.5)
+            thread.join(0.5)
+            cert_path.unlink(missing_ok=True)
+            key_path.unlink(missing_ok=True)
+        assert _http_workers() == []
+
+
+def test_sender_deadline_miss_retries_and_then_stops(tmp_path, monkeypatch):
+    module = _load_app(tmp_path, **_env())
+    _patch_dns(monkeypatch, module)
+    cert_dir = tmp_path / "tls"
+    cert_dir.mkdir()
+    cert_path, key_path = _mint_cert(cert_dir, "hooks.example")
+    release = threading.Event()
+    origin = {"t": None}
+    port, thread, workers, listener = _serve_tls(cert_path, key_path, "body404", origin, release)
+    backend = _LoopbackPin(module, port)
+    client, _pool = _tls_client(module, cert_path, backend)
+
+    def poster(url, body, headers, timeout):
+        origin["t"] = time.monotonic()
+        return module.ssrf.safe_post_bytes(
+            url,
+            body,
+            headers=headers,
+            timeout=timeout,
+            deadline=0.4,
+            resolver=_public_resolver,
+            client=client,
+        )
+
+    try:
+        module.webhook_send.poster = poster
+        with TestClient(module.app) as http:
+            key = _buy(http)
+            credits = http.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"]
+            assert _put_hook(http, key).status_code == 200
+            assert http.post("/v1/client/webhook/test", headers={"X-Api-Key": key}).status_code == 200
+        now = int(_hooks()[-1]["next_attempt_at"])
+        module.webhook_send.pump_once(now=now)
+        row = _hooks()[-1]
+        assert row["status"] == "pending"
+        assert int(row["attempts"]) == 1
+        assert int(row["last_status"]) == 0
+        assert int(row["next_attempt_at"]) - now == 60
+        assert int(_rows("SELECT enabled FROM client_webhooks")[0]["enabled"]) == 1
+        module.webhook_send.pump_once(now=now)
+        assert int(_hooks()[-1]["attempts"]) == 1
+        for _ in range(4):
+            now = int(_hooks()[-1]["next_attempt_at"])
+            module.webhook_send.pump_once(now=now)
+        assert _hooks()[-1]["status"] == "failed"
+        assert int(_hooks()[-1]["attempts"]) == 5
+        module.webhook_send.pump_once(now=now + 100_000)
+        assert int(_hooks()[-1]["attempts"]) == 5
+        with TestClient(module.app) as http:
+            assert http.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"] == credits
+    finally:
+        release.set()
+        client.close()
+        for worker in workers:
+            worker.join(0.5)
+        thread.join(0.5)
+        try:
+            listener.close()
+        except OSError:
+            pass
+        cert_path.unlink(missing_ok=True)
+        key_path.unlink(missing_ok=True)
+        module.webhook_send.poster = None

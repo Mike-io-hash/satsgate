@@ -161,7 +161,14 @@ def _challenge_response(result: CoreResult, reason: str | None, site: CachedSite
     return JSONResponse(body, status_code=402, headers=headers)
 
 
-def _failure(result: CoreResult) -> JSONResponse:
+def _with_abuse_contact(body: dict[str, object], status: int, settings: Settings) -> dict[str, object]:
+    """Add the configured contact on a public 402 JSON body. Other statuses stay as they are."""
+    if status == 402 and settings.abuse_contact:
+        body["abuse_contact"] = settings.abuse_contact
+    return body
+
+
+def _failure(result: CoreResult, settings: Settings) -> JSONResponse:
     if result.action == "missing":
         return _json(404, "not_found")
     if result.action == "limited":
@@ -169,7 +176,7 @@ def _failure(result: CoreResult) -> JSONResponse:
         return _json(429, result.error or "rate_limited", retry_after_seconds=retry)
     if result.action == "pending":
         retry = result.retry_after if result.retry_after is not None else 1
-        return JSONResponse(
+        body = _with_abuse_contact(
             {
                 "ok": False,
                 "error": "payment_pending",
@@ -177,6 +184,11 @@ def _failure(result: CoreResult) -> JSONResponse:
                 "payment_hash": result.payment_hash,
                 "hint": _PENDING_HINT,
             },
+            402,
+            settings,
+        )
+        return JSONResponse(
+            body,
             status_code=402,
             headers={"Retry-After": str(retry), "Cache-Control": "no-store"},
         )
@@ -184,8 +196,17 @@ def _failure(result: CoreResult) -> JSONResponse:
         extra: dict[str, object] = {}
         if result.reason:
             extra["reason"] = result.reason
+        if result.http_status == 402 and settings.abuse_contact:
+            extra["abuse_contact"] = settings.abuse_contact
         return _json(result.http_status, result.error, **extra)
     return _json(502, "paywall_unavailable")
+
+
+def _head_if_402(response: Response, *, head: bool) -> Response:
+    """HEAD keeps the 402 status and headers and does not invent a JSON body."""
+    if head and response.status_code == 402:
+        return Response(status_code=402, headers=dict(response.headers))
+    return response
 
 
 def _rate_limited(request: Request, slug: str, buyer_ip: str | None, *, test_mode: bool) -> JSONResponse | None:
@@ -329,20 +350,18 @@ async def handle(request: Request) -> Response:
             return _receipt_response(paid, site, route_path, head=method == "HEAD")
         if paid.action == "missing":
             request.app.state.cache.drop(slug)
-        return _failure(paid)
+        return _head_if_402(_failure(paid, settings), head=method == "HEAD")
 
     challenge = await create_challenge(client, settings, site, route, buyer_ip)
     if challenge.action == "missing":
         request.app.state.cache.drop(slug)
         return _json(404, "not_found")
     if challenge.action == "limited":
-        return _failure(challenge)
+        return _failure(challenge, settings)
     if challenge.action != "challenge":
         return _json(502, "paywall_unavailable")
     response = _challenge_response(challenge, None, site, route_path, settings)
-    if method == "HEAD":
-        return Response(status_code=402, headers=dict(response.headers))
-    return response
+    return _head_if_402(response, head=method == "HEAD")
 
 
 @asynccontextmanager
