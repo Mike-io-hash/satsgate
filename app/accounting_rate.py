@@ -11,9 +11,8 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Callable
-from urllib.request import Request, urlopen
 
-from . import config, rates
+from . import config, rates, ssrf
 
 log = logging.getLogger("satsgate.accounting_rate")
 
@@ -64,15 +63,16 @@ def _fetch_coingecko(now: int) -> AccountingRate | None:
     if fetcher is not None:
         payload = fetcher(_URL)
     else:
-        headers = {"Accept": "application/json", "User-Agent": "satsgate"}
+        params = None
         if config.COINGECKO_API_KEY:
-            headers["x-cg-demo-api-key"] = config.COINGECKO_API_KEY
-        request = Request(_URL, headers=headers)
+            # Query form of the optional demo key. The value is not logged.
+            params = {"x_cg_demo_api_key": config.COINGECKO_API_KEY}
         try:
-            with urlopen(request, timeout=float(config.ACCOUNTING_RATE_TIMEOUT_S)) as response:
-                import json
-
-                payload = json.loads(response.read(8192).decode("utf-8", "replace"))
+            payload = ssrf.safe_get_json(
+                _URL,
+                params=params,
+                timeout=float(config.ACCOUNTING_RATE_TIMEOUT_S),
+            )
         except Exception:
             log.info("accounting rate coingecko unavailable")
             return None
