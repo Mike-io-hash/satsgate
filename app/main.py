@@ -376,15 +376,25 @@ def _upstream_error(exc: Exception) -> JSONResponse:
 
 @app.get("/v1/rates")
 def v1_rates():
-    """BTC/USD median. A quote for merchants. Not a price Satsgate converts at."""
-    view = rates.snapshot()
+    """Effective BTC/USD quote. It does not name where the number came from."""
+    from .accounting_rate import effective_rate
+
+    rate = effective_rate()
+    if rate is None:
+        return {
+            "ok": True,
+            "pair": "BTC-USD",
+            "value": None,
+            "fetched_at": None,
+            "status": "unavailable",
+        }
     return {
         "ok": True,
         "pair": "BTC-USD",
-        "value": view["value"],
-        "sources": view["sources"],
-        "fetched_at": view["fetched_at"],
-        "status": view["status"],
+        "value": rate.value,
+        "fetched_at": rate.fetched_at,
+        "status": "ok",
+        "source": rate.source,
     }
 
 

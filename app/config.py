@@ -569,7 +569,6 @@ SIGNUP_MAX_GLOBAL_PER_DAY = _optional_int("SATSGATE_SIGNUP_MAX_GLOBAL_PER_DAY", 
 ACCOUNTING_RATE_CACHE_S = _optional_int("SATSGATE_ACCOUNTING_RATE_CACHE_S", 60, minimum=0, maximum=86_400)
 ACCOUNTING_RATE_STALE_S = _optional_int("SATSGATE_ACCOUNTING_RATE_STALE_S", 3600, minimum=1, maximum=86_400)
 ACCOUNTING_RATE_TIMEOUT_S = _optional_int("SATSGATE_ACCOUNTING_RATE_TIMEOUT_S", 3, minimum=1, maximum=30)
-COINGECKO_API_KEY = os.environ.get("SATSGATE_COINGECKO_API_KEY", "").strip()
 TOPUP_MIN_SATS = _optional_int("SATSGATE_TOPUP_MIN_SATS", 1000, minimum=1, maximum=10_000_000)
 TOPUP_MIN_USD_ATOMIC = _optional_int("SATSGATE_TOPUP_MIN_USD_ATOMIC", 1_000_000, minimum=1, maximum=10**15)
 # Positive. 0 is rejected so the unlock estimate never divides by zero.

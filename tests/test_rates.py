@@ -95,6 +95,11 @@ def test_median_one_source_all_down_outlier_and_stale(tmp_path, monkeypatch):
     rates.fetcher = lambda _name: None
     with rates._lock:
         rates._state = None
+    module.chainlink.poster = lambda *_args, **_kwargs: (
+        200,
+        {"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "down"}},
+    )
+    module.accounting_rate.reset_for_tests()
     empty = rates.refresh()
     assert empty["status"] == "unavailable"
     assert empty["value"] is None
