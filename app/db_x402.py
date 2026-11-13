@@ -997,7 +997,13 @@ def grant_topup_credits(
         if bal is None:
             conn.execute("ROLLBACK")
             raise ValueError("client does not exist")
+        offer_row = conn.execute(
+            "SELECT grant_msat FROM payment_offers WHERE id = ?",
+            (offer_id,),
+        ).fetchone()
         msat_added = int(credits) * 2000
+        if offer_row is not None and offer_row["grant_msat"] is not None:
+            msat_added = int(offer_row["grant_msat"])
         conn.execute(
             "UPDATE clients SET credits = credits + ?, balance_msat = balance_msat + ? WHERE id = ?",
             (int(credits), msat_added, int(client_id)),
@@ -1039,6 +1045,16 @@ def grant_topup_credits(
                 network,
             ),
         )
+        if offer_row is not None:
+            source = conn.execute(
+                "SELECT accounting_source, rate_fetched_at FROM payment_offers WHERE id = ?",
+                (offer_id,),
+            ).fetchone()
+            if source is not None and source["accounting_source"]:
+                conn.execute(
+                    "UPDATE topups SET rate_source = ?, rate_as_of = ?, delta_msat = ? WHERE payment_hash = ?",
+                    (source["accounting_source"], source["rate_fetched_at"], msat_added, payment_hash),
+                )
         cur = conn.execute(
             """
             UPDATE x402_authorizations
@@ -1050,11 +1066,15 @@ def grant_topup_credits(
         if cur.rowcount != 1:
             conn.execute("ROLLBACK")
             raise x402.X402Error("x402_replay", status=409)
-        new_balance = conn.execute("SELECT credits FROM clients WHERE id = ?", (int(client_id),)).fetchone()
+        new_balance = conn.execute(
+            "SELECT credits, balance_msat FROM clients WHERE id = ?", (int(client_id),)
+        ).fetchone()
         conn.execute("COMMIT")
     return {
         "credits_added": int(credits),
         "credits": int(new_balance[0]),
+        "msat_added": msat_added,
+        "balance_msat": int(new_balance[1]),
         "tx_hash": tx_hash,
     }
 

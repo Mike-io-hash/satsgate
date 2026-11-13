@@ -216,10 +216,10 @@ class SatsgateClient:
 
     # --- Billing / account ---
 
-    def list_plans(self) -> list[dict]:
+    def list_plans(self) -> dict:
+        """Model B pricing. There is no pack catalogue to index."""
         r = self._http.get(f"{self.base_url}/v1/plans")
-        data = self._ok_or_raise(r)
-        return data["plans"]
+        return self._ok_or_raise(r)
 
     def balance(self) -> dict:
         r = self._http.get(f"{self.base_url}/v1/balance", headers=self._headers())

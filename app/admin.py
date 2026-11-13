@@ -148,6 +148,52 @@ def v1_admin_suspend(
     return {"ok": True, "client_id": int(client_id), "suspended": True}
 
 
+class RefundIn(BaseModel):
+    msat: int = Field(..., ge=1)
+    reason: str = Field(..., min_length=1, max_length=200)
+    ref: str | None = Field(default=None, max_length=120)
+
+
+@router.post("/v1/admin/clients/{client_id}/refund")
+def v1_admin_refund(
+    client_id: int,
+    body: RefundIn,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+):
+    """Credit prepaid balance. Does not send Lightning or USDC. The token is not logged."""
+    err = _require_admin(x_admin_token)
+    if err:
+        return err
+    if int(body.msat) > int(config.ADMIN_REFUND_MAX_MSAT):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "refund_too_large"})
+    client = db.get_client_by_id(config.DB_PATH, int(client_id))
+    if client is None:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "client_not_found"})
+    if db.client_is_suspended(config.DB_PATH, client_id=int(client_id)):
+        return JSONResponse(status_code=403, content={"ok": False, "error": "account_suspended"})
+    from .refunds import credit_manual
+
+    now = int(time.time())
+    with db._connect(config.DB_PATH) as conn:
+        flagged = conn.execute(
+            "SELECT payee_flagged_at FROM clients WHERE id = ?",
+            (int(client_id),),
+        ).fetchone()
+        if flagged is not None and flagged["payee_flagged_at"] is not None:
+            return JSONResponse(status_code=403, content={"ok": False, "error": "payee_flagged"})
+        conn.execute("BEGIN IMMEDIATE")
+        balance = credit_manual(
+            conn,
+            client_id=int(client_id),
+            msat=int(body.msat),
+            reason=body.reason,
+            ref=body.ref,
+            now=now,
+        )
+        conn.execute("COMMIT")
+    return {"ok": True, "client_id": int(client_id), "balance_msat": balance, "msat": int(body.msat)}
+
+
 @router.post("/v1/admin/clients/{client_id}/unsuspend")
 def v1_admin_unsuspend(
     client_id: int,

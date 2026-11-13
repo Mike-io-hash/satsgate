@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -118,8 +119,8 @@ def test_topup_flow_creates_api_key_and_credits(client):
     r4 = client.get("/v1/balance", headers={"X-Api-Key": api_key})
     assert r4.status_code == 200
     d4 = r4.json()
-    assert d4["credits"] == d3["new_balance"]
-    assert d4["credits"] == d1["msat_credit"] // 2000
+    assert d4["balance_msat"] == d3["new_balance"]
+    assert d4["balance_msat"] == d1["msat_credit"]
 
 
 def test_paywall_verify_is_idempotent_per_payment_hash(client):
@@ -132,7 +133,7 @@ def test_paywall_verify_is_idempotent_per_payment_hash(client):
     topup = client.post("/v1/topup/lightning", json={"sats": 1000}, headers={"Authorization": _auth(mac1, pre1)}).json()
     api_key = topup["api_key"]
 
-    bal_before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    bal_before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
 
     # Challenge paywall
     r2 = client.post(
@@ -168,8 +169,8 @@ def test_paywall_verify_is_idempotent_per_payment_hash(client):
     v2 = r4.json()
     assert v2["charged_credits"] == 0
 
-    bal_after = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
-    assert bal_after == bal_before - 1
+    bal_after = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
+    assert bal_after == bal_before - 100
 
 
 def test_forecast_has_recommendation_keys(client):
@@ -205,7 +206,9 @@ def test_forecast_has_recommendation_keys(client):
     data = r2.json()
     assert data["ok"] is True
 
-    rec = data["recommendation"]
-    assert "recommended_purchase" in rec
-    assert "should_topup_now" in rec
-    assert "trigger_at_iso" in rec
+    assert data["recommendation"] is None
+    assert data["forecast"]["status"] in {"insufficient_data", "low_sample", "ok"}
+    assert "recommended_purchase" not in data["forecast"]
+    dumped = json.dumps(data)
+    for pack in ("trial", "starter", "growth", "scale", "hyper", "mega"):
+        assert pack not in dumped

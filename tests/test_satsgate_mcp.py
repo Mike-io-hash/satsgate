@@ -174,7 +174,7 @@ def _hrp(invoice: str) -> str:
 
 
 def test_version_and_bolt11_amount() -> None:
-    assert __version__ == "0.12.0"
+    assert __version__ == "0.13.0"
     assert amount_sats(SPEC_INVOICE) == 250_000
     assert expires_at(SPEC_INVOICE) == 1_496_314_718
     assert amount_sats("lnbc200n1ignored") == 20

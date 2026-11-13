@@ -358,10 +358,8 @@ def test_topup_is_mainnet_only_while_the_switch_is_on(tmp_path, monkeypatch) -> 
     buyer = Account.create()
     with TestClient(module.app) as http:
         key = _buy(http)
-        quoted = http.get("/v1/topup/trial/x402", headers={"X-Api-Key": key})
-        assert quoted.status_code == 410, quoted.text
-        assert quoted.json()["error"] == "packs_retired"
-        return
+        quoted = http.post("/v1/topup/usdc", headers={"X-Api-Key": key}, json={"usd": "1.00"})
+        assert quoted.status_code == 402, quoted.text
         document = json.loads(base64.b64decode(quoted.headers["payment-required"]))
         assert [item["network"] for item in document["accepts"]] == ["eip155:8453"]
         assert document["accepts"][0]["asset"] == _BASE_USDC
@@ -376,13 +374,14 @@ def test_topup_is_mainnet_only_while_the_switch_is_on(tmp_path, monkeypatch) -> 
     _patch_dns(monkeypatch, module)
     _quote(module)
     with TestClient(module.app) as http:
-        paid = http.get(
-            "/v1/topup/trial/x402",
+        paid = http.post(
+            "/v1/topup/usdc",
             headers={"X-Api-Key": key, "PAYMENT-SIGNATURE": signature},
+            json={"usd": "1.00"},
         )
         assert paid.status_code == 402
         assert paid.json()["error"] == "network_mismatch"
-        fresh = http.get("/v1/topup/trial/x402", headers={"X-Api-Key": key})
+        fresh = http.post("/v1/topup/usdc", headers={"X-Api-Key": key}, json={"usd": "1.00"})
         assert fresh.status_code == 402, fresh.text
         fresh_doc = json.loads(base64.b64decode(fresh.headers["payment-required"]))
         assert fresh_doc["accepts"][0]["network"] == "eip155:84532"

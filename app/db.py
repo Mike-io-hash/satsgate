@@ -878,11 +878,15 @@ def settle_topup_and_credit(
             if stored_id is None:
                 conn.execute("ROLLBACK")
                 raise ValueError("topup not found")
-            bal = conn.execute("SELECT credits FROM clients WHERE id = ?", (int(stored_id),)).fetchone()
+            bal = conn.execute(
+                "SELECT balance_msat FROM clients WHERE id = ?", (int(stored_id),)
+            ).fetchone()
             conn.execute("COMMIT")
             return {
                 "credits_added": 0,
+                "msat_added": 0,
                 "new_balance": int(bal[0]) if bal else 0,
+                "balance_msat": int(bal[0]) if bal else 0,
                 "client_id": int(stored_id),
                 "api_key": None,
             }
@@ -898,6 +902,9 @@ def settle_topup_and_credit(
         elif client_id is not None:
             target_id = int(client_id)
         else:
+            from .signup import consume_signup
+
+            consume_signup(conn, ip=str(topup["requester_ip"] or "") or None, now=now)
             api_key, target_id = _insert_client(conn, now)
 
         conn.execute(
@@ -923,14 +930,18 @@ def settle_topup_and_credit(
             (target_id, credits_added, msat_added, "topup_settled", payment_hash, now),
         )
 
-        bal_row = conn.execute("SELECT credits FROM clients WHERE id = ?", (target_id,)).fetchone()
+        bal_row = conn.execute(
+            "SELECT balance_msat FROM clients WHERE id = ?", (target_id,)
+        ).fetchone()
         new_balance = int(bal_row[0]) if bal_row else 0
 
         conn.execute("COMMIT")
 
     return {
         "credits_added": credits_added,
+        "msat_added": msat_added,
         "new_balance": new_balance,
+        "balance_msat": new_balance,
         "client_id": target_id,
         "api_key": api_key,
     }

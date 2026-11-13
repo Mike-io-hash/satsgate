@@ -8,18 +8,18 @@
 
 The merchant flow from a cold start:
 
-1. Top up payment verifications (credits) and save the API key. `GET /v1/topup/{plan_id}` returns the invoice. Pay it, then poll `GET /v1/topup/status/{payment_hash}`.
+1. Open an account with `POST /v1/accounts` (empty body). The `sg_` key is returned once. Top up any amount with `POST /v1/topup/lightning` (`{"sats": N}`, minimum 1,000) or `POST /v1/topup/usdc` (`{"usd": "1.00"}`, minimum US$1). Pay, then poll `GET /v1/topup/status/{payment_hash}` for Lightning.
 2. Register the Lightning Address that receives your users' payments with `POST /v1/client/payee`. The first `POST /v1/paywall/challenge` that includes `payee_lightning_address` saves it too (`payee_saved: true`). Change it later with `POST /v1/client/payee`.
 3. `POST /v1/paywall/challenge` and give that invoice to your user. A proxy or MCP server should use a restricted key for this step (see [Restricted API keys](#restricted-api-keys)).
-4. When they have paid, unlock with `GET /v1/paywall/status/{payment_hash}` (any wallet, when the payee advertises LUD-21) or `POST /v1/paywall/verify` (preimage). The first settled call spends 1 credit. A repeat spends 0.
+4. When they have paid, unlock with `GET /v1/paywall/status/{payment_hash}` (any wallet, when the payee advertises LUD-21) or `POST /v1/paywall/verify` (preimage). A live unlock is free until the monthly quota is used, then it debits the locked milisat fee. A repeat spends 0.
 
 Challenge plus status (or verify) is the per-purchase pair, after the account has credits and a payee.
 
 It’s a hosted + self-hostable FastAPI service that gives you:
 
 - **L402 paywall primitives** (invoice + macaroon, preimage or LUD-21 confirmation)
-- **Prepaid payment verifications** (credits) for predictable costs (**1 verification = 1 successful paid unlock**; **verifications don’t expire**)
-- **Usage & reporting** (ledger, daily series, forecast + purchase recommendation)
+- **Prepaid balance in milisatoshis** (`balance_msat`). It does not expire. The free quota does, on the first of each UTC month.
+- **Usage & reporting** (ledger, daily series, forecast). The forecast does not recommend a pack.
 - **Roadmap (active)**: new wallet backends, integrations, and production hardening
 
 Your users pay **your** Lightning Address (LNURL-pay). satsgate is **non-custodial** (we never hold your funds) and doesn’t require end-user accounts or KYC.
@@ -39,7 +39,7 @@ A new site leaves x402 off and the mode unset. Turning x402 on without a mode st
 
 Satsgate never custodies, receives, forwards, or refunds buyer funds. The USDC moves from the buyer to the merchant's `payTo`. Satsgate does not hold a buyer wallet and does not run its own facilitator.
 
-Hosted beta: https://api.satsgate.org (start in [`CUSTOMER_QUICKSTART.md`](./CUSTOMER_QUICKSTART.md)). Minimum top-up: **1000 sats → 200 payment verifications** (anti-abuse; no expiry).
+Hosted beta: https://api.satsgate.org (start in [`CUSTOMER_QUICKSTART.md`](./CUSTOMER_QUICKSTART.md)). Minimum Lightning top-up: **1,000 sats**. Minimum USDC top-up: **US$1**. Prepaid balance does not expire.
 
 No LLM in the hot path: satsgate is a lightweight, low-latency “cashier/turnstile” that sits in front of your agent.
 

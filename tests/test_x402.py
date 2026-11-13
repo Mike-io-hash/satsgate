@@ -55,7 +55,12 @@ def _load_app(tmp_path: Path, **env: str):
     for name in list(sys.modules.keys()):
         if name == "app" or name.startswith("app."):
             sys.modules.pop(name, None)
-    return importlib.import_module("app.main")
+    module = importlib.import_module("app.main")
+    rates = importlib.import_module("app.accounting_rate")
+    rates.fetcher = lambda _url: {"bitcoin": {"usd": 80070}}
+    rates.reset_for_tests()
+    module.accounting_rate = rates
+    return module
 
 
 def _patch_dns(monkeypatch, module):
@@ -192,7 +197,7 @@ def _install_poster(post) -> None:
 
 
 def _credits(http: TestClient, key: str) -> int:
-    return http.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"]
+    return http.get("/v1/balance", headers={"X-Api-Key": key}).json()["balance_msat"]
 
 
 def test_x402_is_off_by_default_and_lightning_is_unchanged(tmp_path, monkeypatch):

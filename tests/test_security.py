@@ -108,8 +108,8 @@ def test_one_sat_cross_tenant_token_does_not_verify(client):
     victim_key = _buy_client(client)
     attacker_key = _buy_client(client)
 
-    victim_before = client.get("/v1/balance", headers={"X-Api-Key": victim_key}).json()["credits"]
-    attacker_before = client.get("/v1/balance", headers={"X-Api-Key": attacker_key}).json()["credits"]
+    victim_before = client.get("/v1/balance", headers={"X-Api-Key": victim_key}).json()["balance_msat"]
+    attacker_before = client.get("/v1/balance", headers={"X-Api-Key": attacker_key}).json()["balance_msat"]
 
     # The attacker chooses the victim's public resource name and the minimum amount.
     stolen = _challenge(client, attacker_key, resource=resource, amount_sats=1)
@@ -142,7 +142,7 @@ def test_one_sat_cross_tenant_token_does_not_verify(client):
     assert hidden.json()["error"] == "client mismatch"
     assert "resource" not in hidden.json()
 
-    victim_after = client.get("/v1/balance", headers={"X-Api-Key": victim_key}).json()["credits"]
+    victim_after = client.get("/v1/balance", headers={"X-Api-Key": victim_key}).json()["balance_msat"]
     assert victim_after == victim_before
 
     # The same token is a real payment for the account that minted it.
@@ -153,15 +153,15 @@ def test_one_sat_cross_tenant_token_does_not_verify(client):
     )
     assert accepted.status_code == 200, accepted.text
     assert accepted.json()["charged_credits"] == 1
-    attacker_after = client.get("/v1/balance", headers={"X-Api-Key": attacker_key}).json()["credits"]
-    assert attacker_after == attacker_before - 1
+    attacker_after = client.get("/v1/balance", headers={"X-Api-Key": attacker_key}).json()["balance_msat"]
+    assert attacker_after == attacker_before - 100
 
 
 def test_resource_is_required_and_must_match(client):
     api_key = _buy_client(client)
     challenge = _challenge(client, api_key, resource="api/premium", amount_sats=5)
     auth = _pay(client, challenge)
-    before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
 
     missing = client.post(
         "/v1/paywall/verify",
@@ -182,7 +182,7 @@ def test_resource_is_required_and_must_match(client):
     assert mismatch_body["expected_resource"] == "api/other"
     assert "exactly match" in mismatch_body["detail"]
 
-    after = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    after = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
     assert after == before
 
 
@@ -190,7 +190,7 @@ def test_bad_preimage_expired_token_and_bad_signature_are_rejected(client):
     api_key = _buy_client(client)
     challenge = _challenge(client, api_key, resource="api/premium")
     preimage = client.get(f"/dev/mock/pay/{challenge['payment_hash']}").json()["preimage"]
-    before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
 
     flipped = ("0" if preimage[0] != "0" else "1") + preimage[1:]
     bad_preimage = client.post(
@@ -245,7 +245,7 @@ def test_bad_preimage_expired_token_and_bad_signature_are_rejected(client):
     assert expired_res.status_code == 401
     assert expired_res.json()["error"] == "invoice expired"
 
-    after = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    after = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
     assert after == before
 
 
@@ -433,7 +433,7 @@ def test_concurrent_verify_charges_once(client):
     from app import config, db_verify
 
     client_id = client.get("/v1/client", headers={"X-Api-Key": api_key}).json()["client_id"]
-    before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
     barrier = threading.Barrier(2)
     results: list[dict] = []
     errors: list[BaseException] = []
@@ -461,8 +461,8 @@ def test_concurrent_verify_charges_once(client):
 
     assert errors == []
     assert sum(item["charged"] for item in results) == 1
-    after = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
-    assert after == before - 1
+    after = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
+    assert after == before - 300
 
 
 def test_lud21_is_optional_and_enforced_when_advertised(client):
@@ -470,7 +470,7 @@ def test_lud21_is_optional_and_enforced_when_advertised(client):
     challenge = _challenge(client, api_key, resource="api/premium")
     preimage = client.get(f"/dev/mock/pay/{challenge['payment_hash']}").json()["preimage"]
     auth = _auth(challenge["macaroon"], preimage)
-    before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
 
     from app import config, db
 
@@ -499,7 +499,7 @@ def test_lud21_is_optional_and_enforced_when_advertised(client):
 
     assert rejected.status_code == 401
     assert rejected.json()["error"] == "lud21_not_settled"
-    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"] == before
 
     def _settled(**_kwargs):
         return None
@@ -1745,7 +1745,7 @@ def test_paywall_paid_after_ten_minutes_still_unlocks(client):
     finally:
         _restore_wallet(wallet, original)
 
-    before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
     import app.main as mainmod
 
     original_time = time.time
@@ -1764,7 +1764,7 @@ def test_paywall_paid_after_ten_minutes_still_unlocks(client):
     assert paid_late.json()["charged_credits"] == 1
     assert paid_late.json()["cache_until"] == paid_late.json()["claim_until"]
     assert "cache_until" in paid_late.json()["note"]
-    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before - 1
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"] == before - 2000
 
     # In-flight 10-minute caveat: the stored invoice is still open, so proof unlocks it.
     wallet, original = _with_paywall_invoice_lifetime(24 * 60 * 60)
@@ -1786,7 +1786,7 @@ def test_paywall_paid_after_ten_minutes_still_unlocks(client):
         payee=legacy.get("payee_lightning_address"),
     )
     assert l402.peek_bindings(legacy_mac)["exp"] < time.time() - 600
-    legacy_before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    legacy_before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
     no_proof = client.get(
         f"/v1/paywall/status/{legacy['payment_hash']}",
         headers={"X-Api-Key": api_key, "Authorization": f"L402 {legacy_mac}"},
@@ -1794,7 +1794,7 @@ def test_paywall_paid_after_ten_minutes_still_unlocks(client):
     )
     assert no_proof.status_code == 401
     assert no_proof.json()["error"] == "preimage_required"
-    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == legacy_before
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"] == legacy_before
 
     legacy_preimage = client.get(f"/dev/mock/pay/{legacy['payment_hash']}").json()["preimage"]
     unlocked = client.post(
@@ -1806,7 +1806,7 @@ def test_paywall_paid_after_ten_minutes_still_unlocks(client):
     assert unlocked.json()["charged_credits"] == 1
     assert unlocked.json()["valid_until"] < time.time()
     assert unlocked.json()["claim_until"] > time.time()
-    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == legacy_before - 1
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"] == legacy_before - 400
 
     # A closed window does not unlock, even if LUD-21 would report the invoice settled.
     wallet, original = _with_paywall_invoice_lifetime(24 * 60 * 60)
@@ -1826,7 +1826,7 @@ def test_paywall_paid_after_ten_minutes_still_unlocks(client):
         expires_at=int(time.time()) - config.PAYWALL_CLAIM_GRACE_SECONDS - 5,
         created_at=int(time.time()) - config.PAYWALL_TOKEN_TTL_CAP_SECONDS - 5,
     )
-    closed_before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    closed_before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
     original_confirm = wallet_lnaddr.confirm_lud21
     wallet_lnaddr.confirm_lud21 = lambda **_kwargs: None
     try:
@@ -1839,7 +1839,7 @@ def test_paywall_paid_after_ten_minutes_still_unlocks(client):
         wallet_lnaddr.confirm_lud21 = original_confirm
     assert rejected.status_code == 401
     assert rejected.json()["error"] == "invoice expired"
-    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == closed_before
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"] == closed_before
 
     # Grace still covers a payment made just as the invoice expired.
     wallet, original = _with_paywall_invoice_lifetime(24 * 60 * 60)
@@ -1849,7 +1849,7 @@ def test_paywall_paid_after_ten_minutes_still_unlocks(client):
         _restore_wallet(wallet, original)
     _set_paywall_window(grace["payment_hash"], expires_at=int(time.time()) - 30)
     grace_preimage = client.get(f"/dev/mock/pay/{grace['payment_hash']}").json()["preimage"]
-    grace_before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    grace_before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
     grace_paid = client.post(
         "/v1/paywall/verify",
         headers={"X-Api-Key": api_key, "Authorization": _auth(grace["macaroon"], grace_preimage)},
@@ -1857,7 +1857,7 @@ def test_paywall_paid_after_ten_minutes_still_unlocks(client):
     )
     assert grace_paid.status_code == 200, grace_paid.text
     assert grace_paid.json()["charged_credits"] == 1
-    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == grace_before - 1
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"] == grace_before - 200
 
 
 def test_paywall_claim_cap_bounds_a_long_invoice(client):
@@ -1888,7 +1888,7 @@ def test_paywall_claim_cap_bounds_a_long_invoice(client):
             created_at=int(now) - 3601,
         )
         preimage = client.get(f"/dev/mock/pay/{challenge['payment_hash']}").json()["preimage"]
-        before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+        before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
         rejected = client.post(
             "/v1/paywall/verify",
             headers={"X-Api-Key": api_key, "Authorization": _auth(challenge["macaroon"], preimage)},
@@ -1898,7 +1898,7 @@ def test_paywall_claim_cap_bounds_a_long_invoice(client):
         config.PAYWALL_TOKEN_TTL_CAP_SECONDS = previous
     assert rejected.status_code == 401
     assert rejected.json()["error"] == "invoice expired"
-    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"] == before
 
 
 def test_paywall_old_row_uses_decoded_invoice_expiry(client):
@@ -1927,7 +1927,7 @@ def test_paywall_old_row_uses_decoded_invoice_expiry(client):
     mainmod.bolt11_expiry_unix = lambda _invoice: issued_at + 24 * 60 * 60
     try:
         preimage = client.get(f"/dev/mock/pay/{challenge['payment_hash']}").json()["preimage"]
-        before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+        before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
         unlocked = client.post(
             "/v1/paywall/verify",
             headers={"X-Api-Key": api_key, "Authorization": _auth(expired, preimage)},
@@ -1938,7 +1938,7 @@ def test_paywall_old_row_uses_decoded_invoice_expiry(client):
     assert unlocked.status_code == 200, unlocked.text
     assert unlocked.json()["charged_credits"] == 1
     assert unlocked.json()["invoice_expires_at"] == issued_at + 24 * 60 * 60
-    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before - 1
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"] == before - 600
 
 
 def test_first_challenge_saves_payee_and_mismatch_explains_how_to_change_it(client):
@@ -1993,7 +1993,7 @@ def test_status_and_verify_share_one_charge_and_document_pending_codes(client):
 
     api_key = _buy_client(client)
     challenge = _challenge(client, api_key, resource="api/premium", amount_sats=21)
-    before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
     with db._connect(config.DB_PATH) as conn:
         conn.execute(
             "UPDATE paywall_challenges SET verify_url = ? WHERE payment_hash = ?",
@@ -2034,7 +2034,7 @@ def test_status_and_verify_share_one_charge_and_document_pending_codes(client):
     assert verify_body["status"] == "pending"
     assert verify_body["charged_credits"] == 0
     assert "200" in verify_body["note"]
-    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"] == before
 
     wallet_lnaddr.confirm_lud21 = lambda **_kwargs: None
     try:
@@ -2049,7 +2049,7 @@ def test_status_and_verify_share_one_charge_and_document_pending_codes(client):
     assert unlocked.json()["charged_credits"] == 1
     assert unlocked.json()["settled"] is True
     assert "GET /v1/paywall/status" in unlocked.json()["note"]
-    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before - 1
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"] == before - 2000
 
     replay = client.post(
         "/v1/paywall/verify",
@@ -2064,7 +2064,7 @@ def test_status_and_verify_share_one_charge_and_document_pending_codes(client):
     )
     assert replay.status_code == 200, replay.text
     assert replay.json()["charged_credits"] == 0
-    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before - 1
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"] == before - 2000
 
 
 def test_paywall_window_env_rejects_bad_values(tmp_path):
@@ -2106,7 +2106,7 @@ def test_paywall_and_ticket_can_settle_from_stored_verify_url(client):
 
     api_key = _buy_client(client)
     challenge = _challenge(client, api_key, resource="api/premium", amount_sats=4)
-    before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
     with db._connect(config.DB_PATH) as conn:
         conn.execute(
             "UPDATE paywall_challenges SET verify_url = ? WHERE payment_hash = ?",
@@ -2129,7 +2129,7 @@ def test_paywall_and_ticket_can_settle_from_stored_verify_url(client):
         wallet_lnaddr.confirm_lud21 = original
     assert pending.status_code == 200, pending.text
     assert pending.json()["settled"] is False
-    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"] == before
 
     stranger = _buy_client(client)
     rejected = client.get(
@@ -2151,7 +2151,7 @@ def test_paywall_and_ticket_can_settle_from_stored_verify_url(client):
         wallet_lnaddr.confirm_lud21 = original
     assert unlocked.status_code == 200, unlocked.text
     assert unlocked.json()["charged_credits"] == 1
-    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before - 1
+    assert client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"] == before - 400
 
     # Replay does not ask LUD-21 again and does not charge.
     wallet_lnaddr.confirm_lud21 = _not_settled

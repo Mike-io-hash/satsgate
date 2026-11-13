@@ -7,24 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Core **0.20.0**, hosted gate **0.15.2**, Python SDK **0.7.0**, self-hosted proxy **0.14.0**, satsgate-mcp **0.12.0**. The connect page stays **0.17.0**.
+Core **0.20.0**, hosted gate **0.15.2**, Python SDK **0.8.0**, self-hosted proxy **0.14.0**, satsgate-mcp **0.13.0**. The connect page stays **0.17.0**.
 
 ### Breaking
-- Prepaid balance moves from credits to milisatoshis. `GET /v1/balance` and `GET /v1/client` add `balance_msat`, `balance_sats`, and `estimated_unlocks_remaining` (with `free_unlocks_remaining` and `paid_unlocks_estimate`). The legacy `credits` integer is still present in this draft and is not the source of truth.
-- Credit packs are retired. `GET /v1/topup/{trial,starter,growth,scale,hyper,mega}` and the matching `/x402` URLs return `410` `packs_retired`. Top up with `POST /v1/topup/lightning` and an amount of sats.
-- `GET /v1/plans` describes model B. It is no longer a Trial–Mega catalogue.
-- `cost_credits`, if sent, is accepted and ignored. The live debit is the formula (2 sats, 10% cap, USDC floor), after the monthly free quota. A caller that sent a value other than 1 no longer buys that many unlocks.
+- Prepaid balance is `balance_msat` (integer) and `balance_sats` (3-decimal string). `credits` is no longer a balance field on `GET /v1/balance`, `GET /v1/client`, or the usage responses.
+- `POST /v1/accounts` opens an account. The `sg_` key is returned once, with status 201. A body with extra fields is rejected.
+- Credit packs are retired. `GET /v1/topup/{trial,starter,growth,scale,hyper,mega}` and the matching `/x402` URLs return `410` `packs_retired`. Top up with `POST /v1/topup/lightning` (`{"sats": N}`) or `POST /v1/topup/usdc` (`{"usd": "1.00"}` or `{"usd_atomic": N}`).
+- An unauthenticated Lightning top-up can still create the first account, and it uses the same signup counters as `POST /v1/accounts` (3 per IP per UTC day, 100 global per UTC day).
+- `GET /v1/plans` describes model B. It is no longer a Trial–Mega catalogue. `GET /v1/usage/forecast` does not recommend a pack.
+- `cost_credits`, if sent, is accepted and ignored. The live debit is the formula (2 sats, 10% cap, USDC floor), after the monthly free quota.
+- An `sgr_` key can read balance, quota, forecast, and advice, including `GET /v1/balance`. It cannot sign up, top up, change the payee, refund, or rotate.
 
 ### Added
 - 500 free successful live unlocks per UTC month, shared by accounts that pay out to the same Lightning Address or the same verified EVM address. Prepaid is charged only after that quota. The fee is locked when the challenge is issued.
 - A conversion tool, `python -m app.migrate_credits_to_msat`, turns existing credits into 2,000 msat each. It does not open a database it was not given. Production apply is a later step and needs a separate OK.
-- Accounting BTC rate (CoinGecko, with the buyer median as backup) for Satsgate's own USDC math. Buyer 402 quotes still use the Bitstamp, Coinbase, and Kraken median only.
-- Webhook kinds `balance.low` and `balance.zero`.
+- Accounting BTC rate (CoinGecko, with the buyer median as backup) for Satsgate's own USDC math. A missing or stale rate rejects a USDC top-up and a live USDC-priced challenge with `503` `rate_unavailable`. It does not stop Lightning.
+- Seller advice: `add_lightning` under US$0.01, and `balance_low` / `balance_zero` on the account. These are not attached to a buyer 402.
+- `POST /v1/admin/clients/{id}/refund` credits prepaid balance. It does not pay Lightning or USDC out. The audit line does not include the admin token. Automatic repair credits a second debit or a debit with no settlement.
+- Webhook kinds `balance.low` and `balance.zero`, edge-triggered.
 
 ### Changed
-- Hosted gate stays **0.15.2**. A buyer who cannot be offered a challenge still receives `502` `paywall_unavailable`. The gate did not need a new error string.
-- SDK stays **0.7.0**. It still sends `cost_credits`, which core ignores, and still reads `charged_credits` (1 when a prepaid debit happened, 0 otherwise).
-- MCP stays **0.12.0** in this draft. The public tool schema has not yet been switched off the old `credits` field.
+- Hosted gate stays **0.15.2**. When core will not issue a challenge, the buyer still receives `502` `paywall_unavailable`. The body does not contain `insufficient_balance`. The seller sees `409` `insufficient_balance`.
+- SDK **0.8.0**. `list_plans()` returns the model B document. There is no pack array to index. It still sends `cost_credits`, which core ignores, and still reads `charged_credits`.
+- MCP **0.13.0**. `credits_balance` reads `balance_msat` and the estimate. An `sgr_` key is allowed. The tool does not top up or rotate.
 - Terms text in `docs/hosted-gate-terms.md` is model B, without a draft banner. `SATSGATE_TERMS_VERSION` is still set at deploy.
 
 The paragraphs below are the 0.19.1 notes.

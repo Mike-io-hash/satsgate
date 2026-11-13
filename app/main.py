@@ -6,11 +6,9 @@ import threading
 import time
 from urllib.parse import urlsplit
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from math import ceil
 from typing import Any
 
-from fastapi import FastAPI, Header, Query, Request
+from fastapi import Body, FastAPI, Header, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
@@ -52,7 +50,7 @@ from .l402 import (
     www_authenticate_header,
 )
 from .mock_wallet import MockWallet
-from .plans import get_plan, list_plans, recommend_purchase
+from .plans import get_plan
 from .quota import FundsRefused
 from .rate_limit import RateLimiter
 from .wallet_lnaddr import LightningAddressWallet, LnurlError
@@ -206,6 +204,16 @@ def _account_client(x_api_key: str | None) -> db.Client | JSONResponse:
     if isinstance(auth, JSONResponse):
         return auth
     if auth.scope != db_keys.SCOPE_ACCOUNT:
+        return _insufficient_scope(auth.scope)
+    return auth.client
+
+
+def _reader_client(x_api_key: str | None) -> db.Client | JSONResponse:
+    """Account key or restricted key. Reads only: balance, quota, forecast, advice."""
+    auth = _authenticate(x_api_key)
+    if isinstance(auth, JSONResponse):
+        return auth
+    if auth.scope not in {db_keys.SCOPE_ACCOUNT, db_keys.SCOPE_PAYWALL, db_keys.SCOPE_SITES_READ, db_keys.SCOPE_SITES_WRITE}:
         return _insufficient_scope(auth.scope)
     return auth.client
 
@@ -460,13 +468,13 @@ def well_known_satsgate(request: Request) -> dict:
             },
         },
         "pricing": {
-            "currency": "sats",
-            "credit_definition": (
-                "1 credit = 1 successful paid unlock, charged once per payment_hash by "
-                "POST /v1/paywall/verify or GET /v1/paywall/status. The debit does not depend on amount_sats. "
-                "Credits do not expire."
-            ),
-            "plans": list_plans(),
+            "model": "B",
+            "unit": "msat",
+            "accounts": {"method": "POST", "path": "/v1/accounts"},
+            "topup_lightning": {"method": "POST", "path": "/v1/topup/lightning"},
+            "topup_usdc": {"method": "POST", "path": "/v1/topup/usdc"},
+            "balance": "balance_msat",
+            "free_quota_per_utc_month": int(config.FREE_QUOTA),
         },
         "links": {
             "health": f"{base_url}/health",
@@ -492,7 +500,7 @@ def _balance_fields(client: db.Client) -> dict:
         free = quota.free_remaining(conn, client.id, now)
         resets, local = quota.reset_displays(now)
     estimate = estimate_unlocks(int(client.balance_msat), free)
-    return {
+    fields = {
         "balance_msat": int(client.balance_msat),
         "balance_sats": balance_sats_text(int(client.balance_msat)),
         "quota_remaining": free,
@@ -500,6 +508,41 @@ def _balance_fields(client: db.Client) -> dict:
         "quota_resets_at_local": local,
         **estimate,
     }
+    from .advice import balance_advice
+
+    tip = balance_advice(
+        balance_msat=int(client.balance_msat),
+        free_remaining=free,
+        resets_at=resets,
+        resets_local=local,
+    )
+    if tip is not None:
+        fields["advice"] = tip
+    return fields
+
+
+def _site_lightning_advice(client: db.Client, site: dict) -> dict | None:
+    """add_lightning when a route is under US$0.01 and no Lightning Address is set."""
+    from .advice import add_lightning_for_price
+
+    rate = rates.quote_rate()
+    has = bool(client.payee_lightning_address)
+    for route in site.get("routes") or []:
+        currency = route.get("price_currency") or "sats"
+        atomic = None
+        if currency == "sats" and rate is not None and route.get("price_sats"):
+            atomic = rates._raw_usd_atomic(int(route["price_sats"]), rate)
+        tip = add_lightning_for_price(
+            price_currency=currency,
+            price_usd_atomic=route.get("price_usd_atomic"),
+            price_sats=route.get("price_sats"),
+            has_lightning=has,
+            buyer_usd_atomic=atomic,
+            rate_known=rate is not None,
+        )
+        if tip is not None:
+            return tip
+    return None
 
 
 @app.get("/v1/plans")
@@ -511,15 +554,15 @@ def v1_plans() -> dict:
 
 @app.get("/v1/balance")
 def v1_balance(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
-    client = _account_client(x_api_key)
+    client = _reader_client(x_api_key)
     if isinstance(client, JSONResponse):
         return client
-    return {"ok": True, "client_id": client.id, "credits": client.credits, **_balance_fields(client)}
+    return {"ok": True, "client_id": client.id, **_balance_fields(client)}
 
 
 @app.get("/v1/client")
 def v1_client(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
-    client = _account_client(x_api_key)
+    client = _reader_client(x_api_key)
     if isinstance(client, JSONResponse):
         return client
 
@@ -528,7 +571,6 @@ def v1_client(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
     return {
         "ok": True,
         "client_id": client.id,
-        "credits": client.credits,
         **_balance_fields(client),
         "payee_lightning_address": client.payee_lightning_address,
         "payee_evm_address": evm["address"] if evm else None,
@@ -566,7 +608,7 @@ def v1_ledger(
     return {
         "ok": True,
         "client_id": client.id,
-        "balance": client.credits,
+        "balance_msat": int(client.balance_msat),
         "entries": entries,
         "next_before_id": next_before_id,
     }
@@ -591,7 +633,7 @@ def v1_usage_summary(
     return {
         "ok": True,
         "client_id": client.id,
-        "balance": client.credits,
+        "balance_msat": int(client.balance_msat),
         "window_hours": since_hours,
         "summary": summary,
     }
@@ -615,7 +657,7 @@ def v1_usage_daily(
     return {
         "ok": True,
         "client_id": client.id,
-        "balance": client.credits,
+        "balance_msat": int(client.balance_msat),
         "daily": daily,
     }
 
@@ -624,131 +666,32 @@ def v1_usage_daily(
 def v1_usage_forecast(
     x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
     lookback_hours: int = 24,
-    buffer_days: int = 7,
-    max_topups: int = 3,
-    trigger_hours: int = 24,
 ):
-    """Simple forecast + purchase recommendation.
-
-    - Forecast: estimates hours/days remaining based on recent usage.
-    - Recommendation: suggests a plan to keep a buffer (default: 7 days).
-    """
-
-    client = _account_client(x_api_key)
+    """Pace of recent paid unlocks, in milisatoshis. Never names a pack."""
+    client = _reader_client(x_api_key)
     if isinstance(client, JSONResponse):
         return client
-
     lookback_hours = max(1, min(int(lookback_hours), 24 * 30))
-    buffer_days = max(1, min(int(buffer_days), 365))
-    max_topups = max(1, min(int(max_topups), 50))
-    trigger_hours = max(0, min(int(trigger_hours), 24 * 365))
-
     forecast = db_reports.usage_forecast(
         config.DB_PATH,
         client_id=client.id,
-        current_balance_credits=client.credits,
+        current_balance_credits=int(client.balance_msat),
         lookback_hours=lookback_hours,
     )
-
-    rate_per_day = float(forecast.get("verify_rate_credits_per_day") or 0.0)
-    rate_per_hour = (rate_per_day / 24.0) if rate_per_day > 0 else 0.0
-    now_ts = int(forecast.get("now_ts") or int(time.time()))
-
-    # Minimum desired buffer (in credits) to cover `buffer_days` at the current pace.
-    target_balance_credits = int(ceil(rate_per_day * float(buffer_days))) if rate_per_day > 0 else 0
-    additional_credits_needed = max(0, target_balance_credits - int(client.credits))
-
-    # When should we buy?
-    credits_until_target: int | None = None
-    # tiempo hasta llegar al "buffer" (target_balance_credits)
-    topup_in_hours: float | None = None
-    topup_in_days: float | None = None
-    topup_at_ts: int | None = None
-    topup_at_iso: str | None = None
-    topup_now: bool | None = None
-
-    # Trigger: recargar cuando falten <= trigger_hours para llegar al buffer
-    trigger_now: bool | None = None
-    trigger_in_hours: float | None = None
-    trigger_at_ts: int | None = None
-    trigger_at_iso: str | None = None
-
-    if rate_per_hour > 0 and target_balance_credits > 0:
-        credits_until_target = int(client.credits) - target_balance_credits
-
-        # If you're at/below the buffer, recommend buying now.
-        if credits_until_target <= 0:
-            topup_in_hours = 0.0
-        else:
-            topup_in_hours = credits_until_target / rate_per_hour
-
-        topup_in_days = topup_in_hours / 24.0
-        topup_at_ts = int(now_ts + (topup_in_hours * 3600))
-        topup_at_iso = datetime.fromtimestamp(topup_at_ts, tz=timezone.utc).isoformat()
-        topup_now = topup_in_hours == 0.0
-
-        # Trigger: sugerir recarga cuando falten <= trigger_hours para llegar al buffer
-        trigger_now = topup_in_hours <= float(trigger_hours)
-        trigger_in_hours = max(0.0, topup_in_hours - float(trigger_hours))
-        trigger_at_ts = int(now_ts + (trigger_in_hours * 3600))
-        trigger_at_iso = datetime.fromtimestamp(trigger_at_ts, tz=timezone.utc).isoformat()
-
-    # What to buy when it's time to top up?
-    credits_to_buy_recommended = 0
-    recommended = None
-    if rate_per_day > 0 and target_balance_credits > 0:
-        # Typical buy: 1 full buffer. This tends to space top-ups ~buffer_days apart.
-        credits_to_buy_recommended = target_balance_credits
-        recommended = recommend_purchase(credits_to_buy_recommended, max_topups=max_topups)
-
-    projected_balance = int(client.credits)
-    if recommended:
-        projected_balance += int(recommended.get("credits_total") or 0)
-
-    projected_days_remaining = None
-    if rate_per_day > 0:
-        projected_days_remaining = projected_balance / rate_per_day
-
-    recommendation_reason: str
-    if rate_per_day <= 0 or topup_in_hours is None:
-        recommendation_reason = "insufficient_data"
-    elif topup_now is True:
-        recommendation_reason = "topup_now"
-    elif trigger_now is True:
-        recommendation_reason = "trigger_now"
-    else:
-        recommendation_reason = "wait_until_trigger"
-
+    public = dict(forecast)
+    public["current_balance_msat"] = int(client.balance_msat)
+    if int(public.get("verify_events") or 0) == 0:
+        public["status"] = "insufficient_data"
+        public["estimated_hours_remaining"] = None
+        public["estimated_days_remaining"] = None
+        public["estimated_depletion_ts"] = None
+        public["estimated_depletion_iso"] = None
     return {
         "ok": True,
         "client_id": client.id,
-        "balance": client.credits,
-        "forecast": forecast,
-        "recommendation": {
-            "buffer_days": buffer_days,
-            "max_topups": max_topups,
-            "lookback_hours": lookback_hours,
-            "rate_credits_per_day": rate_per_day,
-            "target_balance_credits": target_balance_credits,
-            "additional_credits_needed": additional_credits_needed,
-            "credits_until_target": credits_until_target,
-            "topup_now": topup_now,
-            "topup_in_hours": topup_in_hours,
-            "topup_in_days": topup_in_days,
-            "topup_at_ts": topup_at_ts,
-            "topup_at_iso": topup_at_iso,
-            "trigger_hours": trigger_hours,
-            "should_topup_now": trigger_now,
-            "trigger_in_hours": trigger_in_hours,
-            "trigger_at_ts": trigger_at_ts,
-            "trigger_at_iso": trigger_at_iso,
-            "credits_to_buy_recommended": credits_to_buy_recommended,
-            "recommended_purchase": recommended,
-            "projected_balance_after_purchase": projected_balance,
-            "projected_days_remaining_after_purchase": projected_days_remaining,
-            "reason": recommendation_reason,
-            "note": "Suggested purchase aims to keep ~buffer_days of runway and reduce top-up friction.",
-        },
+        "balance_msat": int(client.balance_msat),
+        "forecast": public,
+        "recommendation": None,
     }
 
 
@@ -1522,7 +1465,12 @@ def v1_sites_get(slug: str, x_api_key: str | None = Header(default=None, alias="
     site = db_sites.get_site_for_client(config.DB_PATH, client_id=auth.client.id, slug=slug)
     if site is None:
         return JSONResponse(status_code=404, content={"ok": False, "error": "site_not_found"})
-    return {"ok": True, "site": _without_secret(site)}
+    public = _without_secret(site)
+    tip = _site_lightning_advice(auth.client, public)
+    body = {"ok": True, "site": public}
+    if tip is not None:
+        body["advice"] = tip
+    return body
 
 
 @app.patch("/v1/sites/{slug}")
@@ -1950,11 +1898,20 @@ def _claim_topup(
         # Created inside the settlement transaction so two claims cannot mint two keys.
         credit_client_id = None
 
-    res = db.settle_topup_and_credit(
-        config.DB_PATH,
-        payment_hash=payment_hash,
-        client_id=credit_client_id,
-    )
+    from .signup import SignupLimited
+
+    try:
+        res = db.settle_topup_and_credit(
+            config.DB_PATH,
+            payment_hash=payment_hash,
+            client_id=credit_client_id,
+        )
+    except SignupLimited as exc:
+        return JSONResponse(
+            status_code=429,
+            headers={"Retry-After": str(exc.retry_after)},
+            content={"ok": False, "error": exc.code, "retry_after_seconds": exc.retry_after},
+        )
     return _topup_success_body(plan=plan, payment_hash=payment_hash, res=res)
 
 
@@ -2005,6 +1962,126 @@ def v1_topup_status(
     return result
 
 
+class SignupIn(BaseModel):
+    """Empty object only. Personal data is refused."""
+
+    model_config = {"extra": "forbid"}
+
+
+@app.post("/v1/accounts")
+def v1_accounts(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+    body: SignupIn | None = Body(default=None),
+):
+    """Open an account. The sg_ key is returned once. No invoice and no personal data."""
+    del body
+    from .signup import SignupLimited, create_account
+
+    if x_api_key:
+        if db_keys.key_kind(x_api_key) == "restricted":
+            try:
+                auth = db_keys.authenticate(config.DB_PATH, x_api_key)
+            except db_keys.AuthError as exc:
+                return JSONResponse(status_code=401, content={"ok": False, "error": exc.code})
+            return _insufficient_scope(auth.scope)
+        existing = db.get_client_by_api_key(config.DB_PATH, x_api_key)
+        if existing is not None:
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "account_exists", "client_id": existing.id},
+            )
+    blocked = _geoblock_quote(request)
+    if blocked is not None:
+        return blocked
+    try:
+        api_key, client_id = create_account(config.DB_PATH, ip=_peer_ip(request) or None)
+    except SignupLimited as exc:
+        return JSONResponse(
+            status_code=429,
+            headers={"Retry-After": str(exc.retry_after)},
+            content={"ok": False, "error": exc.code, "retry_after_seconds": exc.retry_after},
+        )
+    client = db.get_client_by_id(config.DB_PATH, client_id)
+    assert client is not None
+    return JSONResponse(
+        status_code=201,
+        content={"ok": True, "api_key": api_key, "client_id": client_id, **_balance_fields(client)},
+    )
+
+
+class UsdcTopupIn(BaseModel):
+    model_config = {"extra": "forbid"}
+    usd: str | None = None
+    usd_atomic: int | None = Field(default=None, ge=1)
+
+
+def _usd_to_atomic(body: UsdcTopupIn) -> int | JSONResponse:
+    if body.usd is not None and body.usd_atomic is not None:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "amount_conflict"})
+    if body.usd_atomic is not None:
+        return int(body.usd_atomic)
+    text = (body.usd or "").strip()
+    if not text:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "amount_required"})
+    import re
+
+    if re.fullmatch(r"\d+(\.\d{1,6})?", text) is None:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_amount"})
+    whole, _, frac = text.partition(".")
+    atomic = int(whole) * 1_000_000 + int((frac + "000000")[:6])
+    return atomic
+
+
+@app.post("/v1/topup/usdc")
+def v1_topup_usdc(
+    body: UsdcTopupIn,
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+    payment_signature: str | None = Header(default=None, alias="PAYMENT-SIGNATURE"),
+):
+    """Authenticated free-amount USDC top-up. A missing accounting rate is 503, not a 402."""
+    from . import x402_topup
+
+    client = _topup_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    if client is None:
+        return JSONResponse(status_code=401, content={"ok": False, "error": "api_key_required"})
+    if db.client_is_suspended(config.DB_PATH, client_id=client.id):
+        return JSONResponse(status_code=403, content={"ok": False, "error": "account_suspended"})
+    atomic = _usd_to_atomic(body)
+    if isinstance(atomic, JSONResponse):
+        return atomic
+    if atomic < int(config.TOPUP_MIN_USD_ATOMIC):
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": "amount_too_small", "min_usd_atomic": int(config.TOPUP_MIN_USD_ATOMIC)},
+        )
+    if payment_signature:
+        try:
+            return x402_topup.settle_amount(client_id=client.id, encoded=payment_signature)
+        except x402_mod.X402Error as exc:
+            return JSONResponse(status_code=exc.status, content={"ok": False, "error": exc.code})
+    blocked = _geoblock_quote(request)
+    if blocked is not None:
+        return blocked
+    base = str(request.base_url).rstrip("/")
+    try:
+        view = x402_topup.issue_amount(
+            client_id=client.id,
+            usd_atomic=atomic,
+            resource_url=f"{base}/v1/topup/usdc",
+        )
+    except x402_mod.X402Error as exc:
+        return JSONResponse(status_code=exc.status, content={"ok": False, "error": exc.code})
+    return JSONResponse(
+        status_code=402,
+        headers={"PAYMENT-REQUIRED": view["payment_required"]},
+        content=view,
+    )
+
+
 class LightningTopupIn(BaseModel):
     sats: int = Field(..., ge=1, le=10_000_000)
 
@@ -2048,6 +2125,18 @@ def v1_topup_lightning(
     blocked = _geoblock_quote(request)
     if blocked is not None:
         return blocked
+    if client is None:
+        from .signup import SignupLimited, room_for_signup
+
+        try:
+            with db._connect(config.DB_PATH) as conn:
+                room_for_signup(conn, ip=_peer_ip(request) or None, now=int(time.time()))
+        except SignupLimited as exc:
+            return JSONResponse(
+                status_code=429,
+                headers={"Retry-After": str(exc.retry_after)},
+                content={"ok": False, "error": exc.code, "retry_after_seconds": exc.retry_after},
+            )
     msat_credit = credit_msat_for_principal(int(body.sats))
     try:
         inv = WALLET.create_invoice(
@@ -2803,13 +2892,30 @@ def _issue_paywall_challenge(
     except db.ChallengeLimit as exc:
         return _challenge_limited(exc)
     except FundsRefused:
+        from .advice import balance_advice
+        from .quota import free_remaining, reset_displays
+
+        now = int(time.time())
+        with db._connect(config.DB_PATH) as conn:
+            free = free_remaining(conn, auth.client.id, now)
+        resets, local = reset_displays(now)
+        content = {
+            "ok": False,
+            "error": "insufficient_balance",
+            "hint": "Top up with POST /v1/topup/lightning or POST /v1/topup/usdc.",
+        }
+        tip = balance_advice(
+            balance_msat=int(auth.client.balance_msat),
+            free_remaining=free,
+            resets_at=resets,
+            resets_local=local,
+            cannot_cover_fee=True,
+        )
+        if tip is not None:
+            content["advice"] = tip
         return JSONResponse(
             status_code=409,
-            content={
-                "ok": False,
-                "error": "insufficient_balance",
-                "hint": "Top up with POST /v1/topup/lightning or POST /v1/topup/usdc.",
-            },
+            content=content,
         )
     except Exception:  # noqa: BLE001
         return JSONResponse(status_code=500, content={"ok": False, "error": "db_error"})

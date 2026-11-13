@@ -374,7 +374,7 @@ def test_lightning_receipt_is_idempotent_and_debits_once(tmp_path, monkeypatch):
     _patch_dns(monkeypatch, module)
     with TestClient(module.app) as core:
         key, secret = _prepare(core)
-        before = core.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"]
+        before = core.get("/v1/balance", headers={"X-Api-Key": key}).json()["balance_msat"]
         gate, core_client, _origin = _open_gate(module.app, _settings())
         try:
             with gate as http:
@@ -394,8 +394,8 @@ def test_lightning_receipt_is_idempotent_and_debits_once(tmp_path, monkeypatch):
                 again = http.get("/my-shop/blog/post", headers=_auth(offered["macaroon"], preimage))
                 assert again.status_code == 200, again.text
                 assert again.json()["receipt"] == body["receipt"]
-                after = core.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"]
-                assert after == before - 1
+                after = core.get("/v1/balance", headers={"X-Api-Key": key}).json()["balance_msat"]
+                assert after == before - 2000
                 from satsgate_sdk.receipts import verify_receipt
 
                 verified = verify_receipt(body["receipt"], secret=secret, site="my-shop", path="/blog/post")

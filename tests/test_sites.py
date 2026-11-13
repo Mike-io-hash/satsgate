@@ -329,7 +329,7 @@ def test_migration_adds_tables_and_leaves_a_realistic_database(tmp_path, monkeyp
         assert http.get("/health").json() == {"ok": True, "version": "0.20.0"}
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})
         assert balance.status_code == 200
-        assert balance.json()["credits"] == 42
+        assert balance.json()["balance_msat"] == 0
         old_ledger = http.get("/v1/ledger", headers={"X-Api-Key": legacy_key}).json()["entries"]
         settled = next(row for row in old_ledger if row["reason"] == "topup_settled")
         assert settled["ref"] == "old-payment"
@@ -509,7 +509,8 @@ def test_scopes_limits_and_other_owners(http: TestClient, monkeypatch):
     assert challenge.status_code == 403
     assert challenge.json()["error"] == "insufficient_scope"
     balance = http.get("/v1/balance", headers={"X-Api-Key": writer_key})
-    assert balance.status_code == 403
+    assert balance.status_code == 200
+    assert "balance_msat" in balance.json()
 
     still = http.post(
         "/v1/paywall/challenge",

@@ -1603,7 +1603,7 @@ def test_dns_start_failure_uses_only_the_reserved_attempt(tmp_path, monkeypatch)
     monkeypatch.setattr(module.ssrf.threading, "Thread", _DnsStartBoom)
     with TestClient(module.app) as http:
         key = _buy(http)
-        credits = http.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"]
+        credits = http.get("/v1/balance", headers={"X-Api-Key": key}).json()["balance_msat"]
         assert _put_hook(http, key).status_code == 200
         assert http.post("/v1/client/webhook/test", headers={"X-Api-Key": key}).status_code == 200
     now = int(_hooks()[-1]["next_attempt_at"])
@@ -1616,7 +1616,7 @@ def test_dns_start_failure_uses_only_the_reserved_attempt(tmp_path, monkeypatch)
     module.webhook_send.pump_once(now=now)
     assert int(_hooks()[-1]["attempts"]) == 1
     with TestClient(module.app) as http:
-        assert http.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"] == credits
+        assert http.get("/v1/balance", headers={"X-Api-Key": key}).json()["balance_msat"] == credits
     assert _permit_value(module) == 4
 
 
@@ -2031,7 +2031,7 @@ def test_sender_deadline_miss_retries_and_then_stops(tmp_path, monkeypatch):
         module.webhook_send.poster = poster
         with TestClient(module.app) as http:
             key = _buy(http)
-            credits = http.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"]
+            credits = http.get("/v1/balance", headers={"X-Api-Key": key}).json()["balance_msat"]
             assert _put_hook(http, key).status_code == 200
             assert http.post("/v1/client/webhook/test", headers={"X-Api-Key": key}).status_code == 200
         now = int(_hooks()[-1]["next_attempt_at"])
@@ -2052,7 +2052,7 @@ def test_sender_deadline_miss_retries_and_then_stops(tmp_path, monkeypatch):
         module.webhook_send.pump_once(now=now + 100_000)
         assert int(_hooks()[-1]["attempts"]) == 5
         with TestClient(module.app) as http:
-            assert http.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"] == credits
+            assert http.get("/v1/balance", headers={"X-Api-Key": key}).json()["balance_msat"] == credits
     finally:
         release.set()
         client.close()

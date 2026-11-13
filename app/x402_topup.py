@@ -339,9 +339,107 @@ def settle(*, client_id: int, plan: Plan, encoded: str) -> dict:
         "testing": x402.mode_labels(fields["network"])["testing"],
         "x402_mode": x402.mode_labels(fields["network"])["x402_mode"],
         "amount_usd_atomic": int(offer["amount_usd_atomic"]),
+        "msat_added": granted.get("msat_added"),
+        "balance_msat": granted.get("balance_msat"),
         "payment_response": x402.payment_response_b64(
             tx=granted["tx_hash"],
             payer=fields["payer"],
             network=fields["network"],
         ),
     }
+
+
+def issue_amount(*, client_id: int, usd_atomic: int, resource_url: str) -> dict:
+    """402 for a free-amount USDC top-up priced at the accounting rate."""
+    from .accounting_rate import accounting_rate
+    from .pricing import bonus_bps, credit_msat_for_principal, sats_ceil_from_usd
+
+    treasury = _treasury()
+    now = int(time.time())
+    if int(usd_atomic) < int(config.TOPUP_MIN_USD_ATOMIC):
+        raise x402.X402Error("amount_too_small", status=400)
+    snap = accounting_rate(now=now)
+    if snap is None:
+        raise x402.X402Error("rate_unavailable", status=503)
+    principal = sats_ceil_from_usd(int(usd_atomic), int(snap.rate_num), int(snap.rate_den))
+    msat_credit = credit_msat_for_principal(principal)
+    resource = "v1/topup/usdc"
+    network = x402.topup_network()
+    window = timeout_seconds()
+    requirements = x402.accept_for(
+        resource_url=resource_url,
+        amount=int(usd_atomic),
+        pay_to=treasury,
+        timeout_seconds=window,
+        network=network,
+    )
+    offer = db_x402.create_offer(
+        config.DB_PATH,
+        client_id=client_id,
+        resource=resource,
+        resource_url=resource_url,
+        price_currency="usd",
+        amount_sats=principal,
+        amount_usd_atomic=int(usd_atomic),
+        pay_to=treasury,
+        requirements=requirements,
+        buyer_ip_hash=None,
+        max_uses=None,
+        access_seconds=None,
+        rate_num=int(snap.rate_num),
+        rate_den=int(snap.rate_den),
+        rate_fetched_at=int(snap.fetched_at),
+        grant_credits=max(1, msat_credit // 2000),
+        enforce=False,
+        now=now,
+        expires_at=now + window,
+    )
+    with db_x402._connect(config.DB_PATH) as conn:
+        conn.execute(
+            "UPDATE payment_offers SET grant_msat = ?, accounting_source = ? WHERE id = ?",
+            (msat_credit, snap.source, offer["id"]),
+        )
+    offer["grant_msat"] = msat_credit
+    _offer_still_ours(offer, treasury)
+    view = {
+        "ok": False,
+        "error": "payment_required",
+        "rail": "x402",
+        "offer_id": offer["id"],
+        "expires_at": offer["expires_at"],
+        "sats": principal,
+        "msat_credit": msat_credit,
+        "bonus_bps": bonus_bps(principal),
+        "price_currency": "usd",
+        "usd_atomic": int(usd_atomic),
+        "payment_required": x402.b64_json(
+            x402.payment_required_document(resource_url=resource_url, accept=requirements)
+        ),
+        "testing": x402.mode_labels(network)["testing"],
+        "x402_mode": x402.mode_labels(network)["x402_mode"],
+        "x402": {
+            "scheme": "exact",
+            "network": network,
+            "asset": x402.usdc_for_network(network),
+            "amount": str(int(usd_atomic)),
+            "payTo": treasury,
+            "expires_at": offer["expires_at"],
+            "testing": x402.mode_labels(network)["testing"],
+            "x402_mode": x402.mode_labels(network)["x402_mode"],
+        },
+        "rate": {
+            "source": snap.source,
+            "rate_num": int(snap.rate_num),
+            "rate_den": int(snap.rate_den),
+            "fetched_at": int(snap.fetched_at),
+        },
+    }
+    return view
+
+
+def settle_amount(*, client_id: int, encoded: str) -> dict:
+    """Settle a free-amount USDC top-up. The credited milisatoshis were locked on the offer."""
+    plan = Plan(id="usdc", title="USDC top-up", price_sats=0, credits=0)
+    result = settle(client_id=client_id, plan=plan, encoded=encoded)
+    result.pop("plan", None)
+    return result
