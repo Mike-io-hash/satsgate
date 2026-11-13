@@ -2104,6 +2104,7 @@ def v1_topup_lightning(
     key cannot top up. The credited milisatoshis include the per-top-up bonus.
     """
     from .pricing import bonus_bps, credit_msat_for_principal
+    from .signup import SignupLimited
 
     resource = "v1/topup/lightning"
     if int(body.sats) < int(config.TOPUP_MIN_SATS):
@@ -2130,21 +2131,6 @@ def v1_topup_lightning(
     blocked = _geoblock_quote(request)
     if blocked is not None:
         return blocked
-    signup_ip = _peer_ip(request) or None
-    signup_at = int(time.time())
-    reserved_signup = False
-    if client is None:
-        from .signup import SignupLimited, reserve_signup_slot
-
-        try:
-            reserve_signup_slot(config.DB_PATH, ip=signup_ip, now=signup_at)
-            reserved_signup = True
-        except SignupLimited as exc:
-            return JSONResponse(
-                status_code=429,
-                headers={"Retry-After": str(exc.retry_after)},
-                content={"ok": False, "error": exc.code, "retry_after_seconds": exc.retry_after},
-            )
     msat_credit = credit_msat_for_principal(int(body.sats))
     try:
         inv = WALLET.create_invoice(
@@ -2153,10 +2139,6 @@ def v1_topup_lightning(
             min_expiry_seconds=config.TOKEN_TTL_SECONDS,
         )
     except (ssrf.SSRFError, InvoiceValidationError, LnurlError, ValueError) as exc:
-        if reserved_signup:
-            from .signup import release_signup_slot
-
-            release_signup_slot(config.DB_PATH, ip=signup_ip, now=signup_at)
         return _upstream_error(exc)
     created_at = int(time.time())
     invoice_expires_at = getattr(inv, "expires_at", None)
@@ -2178,13 +2160,15 @@ def v1_topup_lightning(
             claim_cap_seconds=config.TOPUP_TOKEN_TTL_CAP_SECONDS,
         )
     except ValueError as exc:
-        if reserved_signup:
-            from .signup import release_signup_slot
-
-            release_signup_slot(config.DB_PATH, ip=signup_ip, now=signup_at)
         if str(exc) == "too_many_pending_topups":
             return JSONResponse(status_code=429, content={"ok": False, "error": "too_many_pending_topups"})
         return JSONResponse(status_code=500, content={"ok": False, "error": "db_error"})
+    except SignupLimited as exc:
+        return JSONResponse(
+            status_code=429,
+            headers={"Retry-After": str(exc.retry_after)},
+            content={"ok": False, "error": exc.code, "retry_after_seconds": exc.retry_after},
+        )
     with db._connect(config.DB_PATH) as conn:
         conn.execute(
             """

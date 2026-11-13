@@ -84,24 +84,49 @@ def release_signup(conn, *, ip: str | None, now: int) -> None:
     )
 
 
-def reserve_signup_slot(db_path: str, *, ip: str | None, now: int | None = None) -> None:
-    """Take one signup slot before an invoice is minted. Rolls back when the cap is full."""
-    now = current_time() if now is None else int(now)
-    with _connect(db_path) as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            consume_signup(conn, ip=ip, now=now)
-        except SignupLimited:
-            conn.execute("ROLLBACK")
-            raise
-        conn.execute("COMMIT")
+def release_expired_anonymous(conn, *, now: int, claim_grace_seconds: int, claim_cap_seconds: int) -> None:
+    """Return slots for unpaid unauthenticated invoices past the claim window, then delete them.
 
-
-def release_signup_slot(db_path: str, *, ip: str | None, now: int) -> None:
-    with _connect(db_path) as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        release_signup(conn, ip=ip, now=int(now))
-        conn.execute("COMMIT")
+    The SELECT runs before the DELETE. ``release_signup`` uses each row's
+    ``created_at``, which is the UTC day the slot was taken.
+    """
+    invoice_cutoff = int(now) - int(claim_grace_seconds)
+    cap_cutoff = int(now) - int(claim_cap_seconds)
+    aged = int(now) - 86_400
+    doomed = conn.execute(
+        """
+        SELECT requester_ip, created_at FROM topups
+        WHERE status = 'pending' AND client_id IS NULL
+          AND (
+            (
+              expires_at IS NOT NULL
+              AND (expires_at < ? OR created_at < ?)
+            )
+            OR (expires_at IS NULL AND created_at < ?)
+          )
+        """,
+        (invoice_cutoff, cap_cutoff, aged),
+    ).fetchall()
+    for old in doomed:
+        release_signup(
+            conn,
+            ip=str(old["requester_ip"] or "") or None,
+            now=int(old["created_at"]),
+        )
+    conn.execute(
+        """
+        DELETE FROM topups
+        WHERE status = 'pending'
+          AND (
+            (
+              expires_at IS NOT NULL
+              AND (expires_at < ? OR created_at < ?)
+            )
+            OR (expires_at IS NULL AND created_at < ?)
+          )
+        """,
+        (invoice_cutoff, cap_cutoff, aged),
+    )
 
 
 def consume_signup(conn, *, ip: str | None, now: int) -> None:
@@ -122,6 +147,12 @@ def create_account(db_path: str, *, ip: str | None, now: int | None = None) -> t
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
+            release_expired_anonymous(
+                conn,
+                now=now,
+                claim_grace_seconds=config.TOPUP_CLAIM_GRACE_SECONDS,
+                claim_cap_seconds=config.TOPUP_TOKEN_TTL_CAP_SECONDS,
+            )
             consume_signup(conn, ip=ip, now=now)
             api_key, client_id = _insert_client(conn, now)
         except SignupLimited:

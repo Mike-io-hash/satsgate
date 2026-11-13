@@ -84,6 +84,53 @@ def test_t_5_4_9_parallel_mints_stop_at_three_invoices(tmp_path, monkeypatch):
         assert all("invoice" not in item.json() for item in refused)
 
 
+def test_t_5_4_9_expired_unpaid_invoices_return_the_signup_slot(tmp_path, monkeypatch):
+    """An abandoned invoice must not lock the IP for the rest of the UTC day."""
+    module = _load_app(tmp_path)
+    _patch_dns(monkeypatch, module)
+    _caps(monkeypatch, module)
+    with TestClient(module.app) as http:
+        issued = []
+        for _ in range(3):
+            response = http.post("/v1/topup/lightning", json={"sats": 1000})
+            assert response.status_code == 402, response.text
+            assert response.json()["invoice"]
+            issued.append(response.json())
+        hashes = [item["payment_hash"] for item in issued]
+        with sqlite3.connect(module.config.DB_PATH) as conn:
+            conn.execute(
+                f"UPDATE topups SET expires_at = 1 WHERE payment_hash IN ({','.join('?' for _ in hashes)})",
+                hashes,
+            )
+            ip = conn.execute(
+                "SELECT requester_ip FROM topups WHERE payment_hash = ?",
+                (hashes[0],),
+            ).fetchone()[0]
+            day = conn.execute(
+                "SELECT day_utc FROM signup_daily WHERE scope = ?",
+                (f"ip:{ip}",),
+            ).fetchone()[0]
+        recovered = http.post("/v1/topup/lightning", json={"sats": 1000})
+        assert recovered.status_code == 402, recovered.text
+        assert recovered.json()["invoice"]
+        assert recovered.json()["payment_hash"] not in hashes
+        account = http.post("/v1/accounts", json={})
+        assert account.status_code == 201, account.text
+        assert account.json()["api_key"].startswith("sg_")
+        with sqlite3.connect(module.config.DB_PATH) as conn:
+            held = conn.execute(
+                "SELECT n FROM signup_daily WHERE scope = ? AND day_utc = ?",
+                (f"ip:{ip}", day),
+            ).fetchone()[0]
+        assert held == 2
+        another = http.post("/v1/topup/lightning", json={"sats": 1000})
+        assert another.status_code == 402, another.text
+        blocked = http.post("/v1/topup/lightning", json={"sats": 1000})
+        assert blocked.status_code == 429, blocked.text
+        assert blocked.json()["error"] == "signup_ip_limit"
+        assert "invoice" not in blocked.json()
+
+
 def test_forwarded_for_does_not_mint_extra_accounts_without_a_trusted_proxy(tmp_path, monkeypatch):
     module = _load_app(tmp_path, SATSGATE_TRUSTED_PROXIES="")
     _patch_dns(monkeypatch, module)

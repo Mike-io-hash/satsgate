@@ -776,46 +776,22 @@ def add_topup(
     many unpaid top-ups. That caps anonymous invoice spam.
     """
     now = int(time.time()) if now is None else int(now)
-    invoice_cutoff = now - int(claim_grace_seconds)
-    cap_cutoff = now - int(claim_cap_seconds)
+    from .signup import SignupLimited, consume_signup, release_expired_anonymous
+
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        conn.execute(
-            """
-            DELETE FROM topups
-            WHERE status = 'pending'
-              AND (
-                (
-                  expires_at IS NOT NULL
-                  AND (expires_at < ? OR created_at < ?)
-                )
-                OR (expires_at IS NULL AND created_at < ?)
-              )
-            """,
-            (invoice_cutoff, cap_cutoff, now - 86_400),
-        )
-        from .signup import release_signup
-
-        doomed = conn.execute(
-            """
-            SELECT requester_ip, created_at FROM topups
-            WHERE status = 'pending' AND client_id IS NULL
-              AND (
-                (
-                  expires_at IS NOT NULL
-                  AND (expires_at < ? OR created_at < ?)
-                )
-                OR (expires_at IS NULL AND created_at < ?)
-              )
-            """,
-            (invoice_cutoff, cap_cutoff, now - 86_400),
-        ).fetchall()
-        for old in doomed:
-            release_signup(
+        try:
+            release_expired_anonymous(
                 conn,
-                ip=str(old["requester_ip"] or "") or None,
-                now=int(old["created_at"]),
+                now=now,
+                claim_grace_seconds=int(claim_grace_seconds),
+                claim_cap_seconds=int(claim_cap_seconds),
             )
+            if client_id is None:
+                consume_signup(conn, ip=str(requester_ip or "") or None, now=now)
+        except SignupLimited:
+            conn.execute("ROLLBACK")
+            raise
         if requester_ip:
             pending = conn.execute(
                 "SELECT COUNT(*) FROM topups WHERE status = 'pending' AND requester_ip = ?",
