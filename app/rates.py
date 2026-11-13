@@ -149,14 +149,14 @@ def _read_source(source: _Source, now: int) -> int | None:
                 timeout=config.RATES_SOURCE_TIMEOUT_SECONDS,
             )
     except Exception:
-        log.warning("btc/usd source %s failed", source.name)
+        log.warning("btc/usd source failed")
         return None
     if not isinstance(payload, dict):
         return None
     try:
         text = source.parse(payload, now)
     except Exception:
-        log.warning("btc/usd source %s was unreadable", source.name)
+        log.warning("btc/usd source was unreadable")
         return None
     if text is None:
         return None
@@ -225,7 +225,7 @@ def refresh(now: int | None = None) -> dict:
         with _lock:
             global _state
             _state = state
-        log.info("btc/usd status=ok sources=%s", ",".join(state.sources))
+        log.info("btc/usd status=ok fallback_sources=%s", len(state.sources))
     else:
         log.info("btc/usd status=unavailable sources=%s", len(samples))
     return snapshot(now)
@@ -290,10 +290,9 @@ def describe_derived(
     now: int | None = None,
 ) -> dict:
     """A live quote for the merchant view. It is not the locked challenge price."""
-    view = snapshot(now)
-    if view["status"] != "ok":
-        return {"status": view["status"]}
-    rate = quote_rate(now)
+    from .accounting_rate import effective_rate
+
+    rate = effective_rate(now)
     if rate is None:
         return {"status": "unavailable"}
     if price_currency == "sats" and price_sats:

@@ -739,7 +739,7 @@ def test_migration_adds_the_hash_column_and_leaves_old_rows_unlimited(tmp_path):
         conn.execute("UPDATE clients SET balance_msat = credits * 2000")
         conn.commit()
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.20.0"
+        assert http.get("/health").json()["version"] == "0.20.1"
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})
         assert balance.status_code == 200
         assert balance.json()["balance_msat"] == 14_000

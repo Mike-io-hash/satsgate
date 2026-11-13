@@ -121,7 +121,10 @@ def test_usdc_pack_verifies_settles_once_and_rejects_replays(tmp_path, monkeypat
         assert anonymous.json()["error"] == "packs_retired"
 
         module.rates._state = None
-        module.accounting_rate.fetcher = lambda _url: None
+        module.chainlink.poster = lambda *_args, **_kwargs: (
+            200,
+            {"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "down"}},
+        )
         module.accounting_rate.reset_for_tests()
         stale = http.post("/v1/topup/usdc", headers={"X-Api-Key": key}, json={"usd": "1.00"})
         assert stale.status_code == 503, stale.text
@@ -129,7 +132,9 @@ def test_usdc_pack_verifies_settles_once_and_rejects_replays(tmp_path, monkeypat
         assert "PAYMENT-REQUIRED" not in stale.headers
         lightning = http.post("/v1/topup/lightning", json={"sats": 1000}, headers={"X-Api-Key": key})
         assert lightning.status_code == 402 and "invoice" in lightning.json()
-        module.accounting_rate.fetcher = lambda _url: {"bitcoin": {"usd": 80070}}
+        from test_chainlink import oracle_poster
+
+        module.chainlink.poster = oracle_poster(80070)
         module.accounting_rate.reset_for_tests()
         offered = http.post("/v1/topup/usdc", headers={"X-Api-Key": key}, json={"usd": "1.00"})
         assert offered.status_code == 402, offered.text
@@ -139,6 +144,8 @@ def test_usdc_pack_verifies_settles_once_and_rejects_replays(tmp_path, monkeypat
         assert body["x402"]["payTo"] == treasury.address
         assert body["x402"]["amount"] == "1000000"
         required = _header(offered, "PAYMENT-REQUIRED")
+        module.chainlink.poster = oracle_poster(96_084)
+        module.accounting_rate.reset_for_tests()
         calls, post = _poster(payer)
         _install_poster(post)
         encoded = _payload(required, payer, body["expires_at"])

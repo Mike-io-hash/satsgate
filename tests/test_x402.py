@@ -8,6 +8,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 from eth_account import Account
@@ -56,11 +57,34 @@ def _load_app(tmp_path: Path, **env: str):
         if name == "app" or name.startswith("app."):
             sys.modules.pop(name, None)
     module = importlib.import_module("app.main")
-    rates = importlib.import_module("app.accounting_rate")
-    rates.fetcher = lambda _url: {"bitcoin": {"usd": 80070}}
-    rates.reset_for_tests()
-    module.accounting_rate = rates
+    accounting = importlib.import_module("app.accounting_rate")
+    link = importlib.import_module("app.chainlink")
+    # A fixed on-chain quote, so USDC fees have a rate and unit tests do not
+    # call Base. A median more than 5% away still wins, which is the backup.
+    link.poster = _oracle_poster(link, 80_070)
+    accounting.reset_for_tests()
+    module.accounting_rate = accounting
+    module.chainlink = link
     return module
+
+
+def _oracle_poster(link, usd: int, *, updated_at: int | None = None):
+    updated = int(time.time()) if updated_at is None else int(updated_at)
+    answer = int(usd) * 10**8
+
+    def poster(_url, payload, _headers, _timeout):
+        method = payload["method"]
+        if method == "eth_chainId":
+            return 200, {"jsonrpc": "2.0", "id": 1, "result": "0x2105"}
+        data = payload["params"][0]["data"]
+        if data == link.DECIMALS_SELECTOR:
+            return 200, {"jsonrpc": "2.0", "id": 1, "result": "0x" + f"{8:064x}"}
+        if data == link.LATEST_ROUND_SELECTOR:
+            body = "".join(f"{part:064x}" for part in (7, answer, updated, updated, 7))
+            return 200, {"jsonrpc": "2.0", "id": 1, "result": "0x" + body}
+        return 200, {"jsonrpc": "2.0", "id": 1, "error": {"code": 3, "message": "execution reverted"}}
+
+    return poster
 
 
 def _patch_dns(monkeypatch, module):
@@ -283,7 +307,17 @@ def test_payee_signature_and_usd_route_offer_only_when_priced(tmp_path, monkeypa
         )
         assert saved.status_code == 200, saved.text
         _site(http, key, path="/blog/post", body={"price_sats": 21})
-        http.patch("/v1/sites/my-shop", headers={"X-Api-Key": key}, json={"rail_x402": True})
+        http.patch(
+            "/v1/sites/my-shop",
+            headers={"X-Api-Key": key},
+            json={"rail_x402": True, "x402_mode": "test"},
+        )
+        module.chainlink.poster = lambda *_args, **_kwargs: (
+            200,
+            {"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "down"}},
+        )
+        module.accounting_rate.reset_for_tests()
+        module.rates._state = None
         sats_only = _gate(http, "POST", "/internal/gate/challenge", json={"slug": "my-shop", "path": "/blog/post"})
         assert sats_only.status_code == 200, sats_only.text
         assert "invoice" in sats_only.json()
@@ -604,7 +638,7 @@ def test_old_site_routes_keep_their_sats_price(tmp_path):
     assert row == (21, "sats", None)
     price = next(column for column in notnull if column[1] == "price_sats")
     assert price[3] == 0
-    assert module.config.APP_VERSION == "0.20.0"
+    assert module.config.APP_VERSION == "0.20.1"
 
 
 def test_address_change_clears_the_x402_rail(tmp_path, monkeypatch):

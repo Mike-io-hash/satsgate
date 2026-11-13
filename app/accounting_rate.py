@@ -1,7 +1,7 @@
-"""Role B: the BTC price Satsgate uses to convert its own USDC amounts.
+"""The BTC price used for Satsgate's own USDC math and for buyer quotes.
 
-CoinGecko is primary. The D-23 median is the backup when it is still younger
-than an hour. Buyer-facing 402 quotes do not read this module.
+One effective rate: the on-chain read when it is usable, otherwise the internal
+median when that median is still fresh. Neither name is a public source label.
 """
 
 from __future__ import annotations
@@ -10,14 +10,11 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable
 
-from . import config, rates, ssrf
+from . import chainlink, config, rates
 
-log = logging.getLogger("satsgate.accounting_rate")
+log = logging.getLogger("satsgate.rates")
 
-_URL = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
-fetcher: Callable[[str], dict | None] | None = None
 _lock = threading.Lock()
 
 
@@ -26,8 +23,9 @@ class AccountingRate:
     rate_num: int
     rate_den: int
     fetched_at: int
-    source: str  # coingecko | d23_median
+    source: str  # oracle | fallback
     value: str
+    cached_at: int
 
 
 _cache: AccountingRate | None = None
@@ -45,89 +43,71 @@ def call_count() -> int:
     return _calls
 
 
-def _parse_usd(payload: dict) -> str | None:
-    bitcoin = payload.get("bitcoin") if isinstance(payload, dict) else None
-    if not isinstance(bitcoin, dict):
-        return None
-    usd = bitcoin.get("usd")
-    if isinstance(usd, bool) or usd is None:
-        return None
-    text = str(usd).strip()
-    return text or None
-
-
-def _fetch_coingecko(now: int) -> AccountingRate | None:
-    global _calls
-    _calls += 1
-    payload = None
-    if fetcher is not None:
-        payload = fetcher(_URL)
-    else:
-        params = None
-        if config.COINGECKO_API_KEY:
-            # Query form of the optional demo key. The value is not logged.
-            params = {"x_cg_demo_api_key": config.COINGECKO_API_KEY}
-        try:
-            payload = ssrf.safe_get_json(
-                _URL,
-                params=params,
-                timeout=float(config.ACCOUNTING_RATE_TIMEOUT_S),
-            )
-        except Exception:
-            log.info("accounting rate coingecko unavailable")
-            return None
-    text = _parse_usd(payload or {})
-    if text is None:
-        return None
-    scaled = rates._scaled(text)
-    if scaled is None:
-        return None
-    return AccountingRate(
-        rate_num=int(scaled),
-        rate_den=rates.RATE_DEN,
-        fetched_at=int(now),
-        source="coingecko",
-        value=text,
-    )
-
-
-def _median_backup(now: int) -> AccountingRate | None:
-    view = rates.snapshot(now)
-    fetched = view.get("fetched_at")
-    if not isinstance(fetched, int):
-        return None
-    if int(now) - fetched > int(config.ACCOUNTING_RATE_STALE_S):
-        return None
-    if not view.get("rate_num") or not view.get("rate_den"):
-        return None
-    return AccountingRate(
-        rate_num=int(view["rate_num"]),
-        rate_den=int(view["rate_den"]),
-        fetched_at=int(fetched),
-        source="d23_median",
-        value=str(view.get("value") or ""),
-    )
-
-
 def accounting_rate(now: int | None = None) -> AccountingRate | None:
-    """A rate young enough to price a USDC top-up or a USDC Satsgate fee."""
-    global _cache
+    """Drop-in name for callers. This is the effective rate, not a second feed."""
+    return effective_rate(now)
+
+
+def effective_rate(now: int | None = None) -> AccountingRate | None:
+    """The spot to use right now, or None when neither feed is usable."""
     now = int(time.time()) if now is None else int(now)
     with _lock:
         cached = _cache
-    if cached is not None and now - int(cached.fetched_at) < int(config.ACCOUNTING_RATE_CACHE_S):
-        if now - int(cached.fetched_at) <= int(config.ACCOUNTING_RATE_STALE_S):
+    if cached is not None and now - int(cached.cached_at) < int(config.ACCOUNTING_RATE_CACHE_S):
+        if _still_fresh(cached, now):
             return cached
-    fresh = _fetch_coingecko(now)
-    if fresh is not None:
-        with _lock:
-            _cache = fresh
-        log.info("accounting rate source=coingecko as_of=%s", fresh.fetched_at)
-        return fresh
-    if cached is not None and now - int(cached.fetched_at) <= int(config.ACCOUNTING_RATE_STALE_S):
-        return cached
-    backup = _median_backup(now)
-    if backup is not None:
-        log.info("accounting rate source=d23_median as_of=%s", backup.fetched_at)
-        return backup
-    return None
+    return _fetch(now)
+
+
+def refresh_effective(now: int | None = None) -> AccountingRate | None:
+    """Background refresh. Bypasses the cache so the loop actually reads again."""
+    now = int(time.time()) if now is None else int(now)
+    return _fetch(now)
+
+
+def _fetch(now: int) -> AccountingRate | None:
+    global _calls
+    _calls += 1
+    median = rates.quote_rate(now)
+    median_num = None if median is None else int(median.rate_num)
+    median_den = None if median is None else int(median.rate_den)
+    quote = chainlink.read_btc_usd(now, median_rate_num=median_num, median_rate_den=median_den)
+    if quote is not None:
+        rate = AccountingRate(
+            rate_num=int(quote.rate_num),
+            rate_den=int(quote.rate_den),
+            fetched_at=int(quote.fetched_at),
+            source="oracle",
+            value=str(quote.value),
+            cached_at=int(now),
+        )
+        _store(rate)
+        log.info("btc/usd rate primary as_of=%s", rate.fetched_at)
+        return rate
+    if median is None:
+        return None
+    rate = AccountingRate(
+        rate_num=int(median.rate_num),
+        rate_den=int(median.rate_den),
+        fetched_at=int(median.fetched_at),
+        source="fallback",
+        value=str(median.value),
+        cached_at=int(now),
+    )
+    _store(rate)
+    log.info("btc/usd rate fallback as_of=%s", rate.fetched_at)
+    return rate
+
+
+def _store(rate: AccountingRate) -> None:
+    global _cache
+    with _lock:
+        _cache = rate
+
+
+def _still_fresh(rate: AccountingRate, now: int) -> bool:
+    if rate.source == "oracle":
+        if int(rate.fetched_at) > int(now) + chainlink.FUTURE_GRACE_S:
+            return False
+        return int(now) - int(rate.fetched_at) <= int(config.ACCOUNTING_RATE_STALE_S)
+    return int(now) - int(rate.fetched_at) <= int(config.RATES_STALE_SECONDS)

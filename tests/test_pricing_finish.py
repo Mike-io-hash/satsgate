@@ -221,7 +221,10 @@ def test_usdc_fee_is_refused_on_the_challenge_when_the_rate_is_missing(tmp_path,
     module = _load_app(tmp_path)
     _patch_dns(monkeypatch, module)
     _quote(module)
-    module.accounting_rate.fetcher = lambda _url: None
+    module.chainlink.poster = lambda *_args, **_kwargs: (
+        200,
+        {"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "down"}},
+    )
     module.accounting_rate.reset_for_tests()
     module.rates._state = None
     with TestClient(module.app) as http:
@@ -267,7 +270,9 @@ def test_usdc_fee_is_refused_on_the_challenge_when_the_rate_is_missing(tmp_path,
             json={"resource": "still/lightning", "amount_sats": 21},
         )
         assert still.status_code == 200, still.text
-        module.accounting_rate.fetcher = lambda _url: {"bitcoin": {"usd": 80070}}
+        from test_chainlink import oracle_poster
+
+        module.chainlink.poster = oracle_poster(80070)
         module.accounting_rate.reset_for_tests()
         _quote(module)
         priced = _gate(http, "POST", "/internal/gate/challenge", json={"slug": "usd-shop", "path": "/paid"})

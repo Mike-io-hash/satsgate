@@ -285,7 +285,7 @@ Caddy (`Caddyfile`) strips `X-Satsgate-Buyer-Ip` and must keep doing that. It mu
 
 A route has one main price, chosen by the merchant, stored on `site_routes`. The other rail, if enabled, is a quote.
 
-Core refreshes a median about once a minute from two or three public BTC/USD sources. Proposed sources, all unauthenticated GETs: Coinbase spot `BTC-USD`, Kraken `XBTUSD`, and Bitstamp `btcusd`. Each source has its own timeout (2 seconds). The median of the sources that answered is the rate. One source is not enough. Two or three are required. The refresh task lives in the core process, next to the existing startup in `app/main.py`. It does not run in the gate.
+Core keeps one effective BTC/USD quote. The primary read is an on-chain price through the Base RPC already configured for the payee check. An internal backup is used only when that read is missing or unusable, and the public API does not name either one. The refresh task lives in the core process, next to the existing startup in `app/main.py`. It does not run in the gate.
 
 The rate is stale at 3 minutes. Stale, empty, or non-numeric means the derived rail is omitted. The main currency is still offered. A 402 never includes a guessed price. The offer row stores the numerator and denominator actually used (`rate_num` / `rate_den` as integers of USD per BTC scaled by 10^8) and `rate_fetched_at`. Settle checks the locked amount, not a new fetch.
 

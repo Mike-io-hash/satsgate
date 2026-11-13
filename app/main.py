@@ -59,12 +59,23 @@ from .wallet_lnaddr import LightningAddressWallet, LnurlError
 _log = logging.getLogger("satsgate")
 
 
+def refresh_rates(now: int | None = None) -> None:
+    """Refresh the internal median and the on-chain read. One failure does not skip the other."""
+    try:
+        rates.refresh(now)
+    except Exception:
+        _log.warning("btc/usd refresh failed")
+    try:
+        from .accounting_rate import refresh_effective
+
+        refresh_effective(now)
+    except Exception:
+        _log.warning("btc/usd primary refresh failed")
+
+
 def _rates_loop(stop: threading.Event) -> None:
     while not stop.is_set():
-        try:
-            rates.refresh()
-        except Exception:
-            _log.warning("btc/usd refresh failed")
+        refresh_rates()
         stop.wait(config.RATES_REFRESH_SECONDS)
 
 
@@ -365,15 +376,25 @@ def _upstream_error(exc: Exception) -> JSONResponse:
 
 @app.get("/v1/rates")
 def v1_rates():
-    """BTC/USD median. A quote for merchants. Not a price Satsgate converts at."""
-    view = rates.snapshot()
+    """Effective BTC/USD quote. It does not name where the number came from."""
+    from .accounting_rate import effective_rate
+
+    rate = effective_rate()
+    if rate is None:
+        return {
+            "ok": True,
+            "pair": "BTC-USD",
+            "value": None,
+            "fetched_at": None,
+            "status": "unavailable",
+        }
     return {
         "ok": True,
         "pair": "BTC-USD",
-        "value": view["value"],
-        "sources": view["sources"],
-        "fetched_at": view["fetched_at"],
-        "status": view["status"],
+        "value": rate.value,
+        "fetched_at": rate.fetched_at,
+        "status": "ok",
+        "source": rate.source,
     }
 
 
@@ -533,7 +554,9 @@ def _site_lightning_advice(client: db.Client, site: dict) -> dict | None:
     """add_lightning when a route is under US$0.01 and no Lightning Address is set."""
     from .advice import add_lightning_for_price
 
-    rate = rates.quote_rate()
+    from .accounting_rate import effective_rate
+
+    rate = effective_rate()
     has = bool(client.payee_lightning_address)
     for route in site.get("routes") or []:
         currency = route.get("price_currency") or "sats"

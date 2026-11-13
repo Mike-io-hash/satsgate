@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # Load env vars from .env if present. Existing process env wins.
 load_dotenv()
 
-APP_VERSION = "0.20.0"
+APP_VERSION = "0.20.1"
 
 # production is the safe default. Local mock/dev only runs when this is explicit.
 SATSGATE_ENV = os.environ.get("SATSGATE_ENV", "production").strip().lower() or "production"
@@ -436,6 +436,29 @@ def _base_rpc_url() -> str:
     return raw.rstrip("/")
 
 
+def _base_rpc_fallback_url() -> str:
+    """Optional second Base RPC. Empty means the primary URL is the only one.
+
+    Originally proposed by Mike as P-A3, approved by Ia on 2026-11-13.
+    """
+    raw = os.environ.get("SATSGATE_BASE_RPC_FALLBACK_URL", "").strip()
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError(
+            "SATSGATE_BASE_RPC_FALLBACK_URL must be an https URL without userinfo, a query, or a fragment"
+        )
+    return raw.rstrip("/")
+
+
 EMAIL_FROM = _email_from()
 SUPPORT_EMAIL = _support_email()
 
@@ -479,6 +502,7 @@ EMAIL_ENABLED = os.environ.get("SATSGATE_EMAIL_ENABLED", "1").strip() != "0"
 # API writes and outbox inserts still succeed. No webhook row means nothing is queued.
 WEBHOOKS_ENABLED = os.environ.get("SATSGATE_WEBHOOKS", "1").strip() != "0"
 BASE_RPC_URL = _base_rpc_url()
+BASE_RPC_FALLBACK_URL = _base_rpc_fallback_url()
 SMART_WALLETS = os.environ.get("SATSGATE_SMART_WALLETS", "1").strip() != "0"
 
 from .cdp_auth import install_redactor  # noqa: E402
@@ -542,10 +566,9 @@ ADVICE_TZ = os.environ.get("SATSGATE_ADVICE_TZ", "America/Argentina/Buenos_Aires
 LOW_BALANCE_MSAT = _optional_int("SATSGATE_LOW_BALANCE_MSAT", 200_000, minimum=0, maximum=10**15)
 SIGNUP_MAX_PER_IP_PER_DAY = _optional_int("SATSGATE_SIGNUP_MAX_PER_IP_PER_DAY", 3, minimum=0, maximum=1_000_000)
 SIGNUP_MAX_GLOBAL_PER_DAY = _optional_int("SATSGATE_SIGNUP_MAX_GLOBAL_PER_DAY", 100, minimum=0, maximum=10_000_000)
-ACCOUNTING_RATE_CACHE_S = _optional_int("SATSGATE_ACCOUNTING_RATE_CACHE_S", 300, minimum=0, maximum=86_400)
+ACCOUNTING_RATE_CACHE_S = _optional_int("SATSGATE_ACCOUNTING_RATE_CACHE_S", 60, minimum=0, maximum=86_400)
 ACCOUNTING_RATE_STALE_S = _optional_int("SATSGATE_ACCOUNTING_RATE_STALE_S", 3600, minimum=1, maximum=86_400)
 ACCOUNTING_RATE_TIMEOUT_S = _optional_int("SATSGATE_ACCOUNTING_RATE_TIMEOUT_S", 3, minimum=1, maximum=30)
-COINGECKO_API_KEY = os.environ.get("SATSGATE_COINGECKO_API_KEY", "").strip()
 TOPUP_MIN_SATS = _optional_int("SATSGATE_TOPUP_MIN_SATS", 1000, minimum=1, maximum=10_000_000)
 TOPUP_MIN_USD_ATOMIC = _optional_int("SATSGATE_TOPUP_MIN_USD_ATOMIC", 1_000_000, minimum=1, maximum=10**15)
 # Positive. 0 is rejected so the unlock estimate never divides by zero.

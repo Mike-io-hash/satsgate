@@ -364,21 +364,26 @@ A route has one price. `{"path":"/blog/post","price_sats":21}` stays Lightning. 
 
 Deployment of 0.12.0: stop the process, copy the sqlite file, then start. That migration adds six `payee_evm_*` columns on `clients` (existing rows stay empty), `rail_lightning` (default on) and `rail_x402` (default off) on `sites`, rebuilds `site_routes` so an existing row keeps its sats price, and creates `payment_offers` and `x402_authorizations`. You do not need a new secret. Leave the three x402 variables unset unless you are pointing at another testnet facilitator. The current gate ignores USD routes, so a mixed site's Lightning routes keep working and a USD path is not served until a later gate release.
 
-### Rates (0.13.0)
+### Rates
 
-`GET /v1/rates` is public. It returns the BTC/USD median, the sources that agreed, `fetched_at`, and `status` (`ok`, `stale`, or `unavailable`). Core reads Coinbase `BTC-USD`, Kraken `XBTUSD`, and Bitstamp `btcusd` about once a minute. Two sources are required. A source more than 2% from the median is dropped. The median is stale after 3 minutes.
+`GET /v1/rates` is public. It returns the effective BTC/USD quote: `pair`, `value`, `fetched_at`, `status` (`ok` or `unavailable`), and `source` (`oracle` or `fallback`) when a quote is usable. It does not list where the number came from.
 
-The median is a quote. Satsgate does not convert, hold, or forward funds. The merchant is paid whatever the buyer sends on the rail they use.
+The quote is an on-chain BTC/USD price, with an internal backup when that price is missing or unusable. Satsgate does not convert, hold, or forward funds. The merchant is paid whatever the buyer sends on the rail they use.
 
-When both rails are on and the median is fresh, the challenge locks the other currency on the offer. Derived sats round up to the next sat. Derived USDC rounds up to the next 0.000001 USDC, and a result below $0.001 is left off. A stale or missing median offers only the main currency. `GET /v1/sites/mine` shows that live quote as `derived`. The public directory does not, because it moves.
+When both rails are on and the quote is fresh, the challenge locks the other currency on the offer. Derived sats round up to the next sat. Derived USDC rounds up to the next 0.000001 USDC, and a result below $0.001 is left off. A missing quote offers only the main currency. `GET /v1/sites/mine` shows that live quote as `derived`. The public directory does not, because it moves.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SATSGATE_RATES_ENABLED` | on | `0` skips the background refresh. |
-| `SATSGATE_RATES_REFRESH_SECONDS` | 60 | How often the three sources are read (15 to 600). |
+| `SATSGATE_RATES_REFRESH_SECONDS` | 60 | How often the quote is refreshed (15 to 600). |
 | `SATSGATE_RATES_STALE_SECONDS` | 180 | After this, the last median is not used to price a challenge. |
 | `SATSGATE_RATES_SOURCE_TIMEOUT_SECONDS` | 2 | Timeout for one source (0.5 to 5). |
-| `SATSGATE_RATES_OUTLIER_BPS` | 200 | Drop a source this far from the median. 200 is 2%. |
+| `SATSGATE_RATES_OUTLIER_BPS` | 200 | Drop a backup sample this far from the others. 200 is 2%. |
+| `SATSGATE_BASE_RPC_URL` | `https://mainnet.base.org` | Primary Base RPC for the on-chain quote and for smart-wallet checks. |
+| `SATSGATE_BASE_RPC_FALLBACK_URL` | empty | Optional second Base RPC. Same https rules. Used only when the primary does not answer. |
+| `SATSGATE_ACCOUNTING_RATE_CACHE_S` | 60 | How long a quote is reused. |
+| `SATSGATE_ACCOUNTING_RATE_STALE_S` | 3600 | How old the primary read may be. |
+| `SATSGATE_ACCOUNTING_RATE_TIMEOUT_S` | 3 | Timeout for one primary read. |
 
 No new table. Copy `satsgate.sqlite3` before restarting onto 0.13.0 anyway. Lightning is unchanged when the quote is not used.
 

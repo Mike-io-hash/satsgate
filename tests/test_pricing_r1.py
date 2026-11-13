@@ -425,7 +425,9 @@ def test_boot_has_no_new_mandatory_secret(tmp_path, monkeypatch):
 def test_t_5_2_11_locked_fee_ignores_a_later_accounting_rate(tmp_path, monkeypatch):
     module = _load_app(tmp_path)
     _patch_dns(monkeypatch, module)
-    module.accounting_rate.fetcher = lambda _url: {"bitcoin": {"usd": 80070}}
+    from test_chainlink import oracle_poster
+
+    module.chainlink.poster = oracle_poster(80070)
     module.accounting_rate.reset_for_tests()
     with TestClient(module.app) as http:
         key = _buy(http)
@@ -458,7 +460,7 @@ def test_t_5_2_11_locked_fee_ignores_a_later_accounting_rate(tmp_path, monkeypat
             (offer["offer_id"],),
         ).fetchone()[0]
     assert locked and locked > 0
-    module.accounting_rate.fetcher = lambda _url: {"bitcoin": {"usd": 96084}}
+    module.chainlink.poster = oracle_poster(96084)
     module.accounting_rate.reset_for_tests()
     from app.charging import fee_from_offer
 
