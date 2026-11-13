@@ -522,3 +522,41 @@ def test_remainder_below_the_fee_is_refused_and_free_quota_still_issues(tmp_path
         )
         assert issued.status_code == 200, issued.text
         assert "invoice" in issued.json()
+
+
+def test_test_mode_issues_with_no_balance_and_no_quota(tmp_path, monkeypatch):
+    module = _load_app(tmp_path)
+    _patch_dns(monkeypatch, module)
+    with TestClient(module.app) as http:
+        key = _buy(http)
+        http.post(
+            "/v1/client/payee",
+            headers={"X-Api-Key": key},
+            json={"payee_lightning_address": "seller@pay.example"},
+        )
+        created = http.post(
+            "/v1/sites",
+            headers={"X-Api-Key": key},
+            json={"slug": "trial-shop", "display_name": "Trial", "origin_url": "https://origin.example"},
+        )
+        assert created.status_code == 200, created.text
+        route = http.post(
+            "/v1/sites/trial-shop/routes",
+            headers={"X-Api-Key": key},
+            json={"path": "/post", "price_sats": 21},
+        )
+        assert route.status_code == 200, route.text
+        approved = http.post(
+            "/v1/admin/sites/trial-shop/approve",
+            headers={"X-Admin-Token": "test-admin-token"},
+        )
+        assert approved.status_code == 200, approved.text
+        with sqlite3.connect(module.config.DB_PATH) as conn:
+            conn.execute("UPDATE clients SET balance_msat = 0")
+            conn.execute("UPDATE sites SET x402_mode = 'test' WHERE slug = 'trial-shop'")
+        before = http.get("/v1/balance", headers={"X-Api-Key": key}).json()["balance_msat"]
+        issued = _gate(http, "POST", "/internal/gate/challenge", json={"slug": "trial-shop", "path": "/post"})
+        assert issued.status_code == 200, issued.text
+        assert issued.json().get("invoice") or issued.json().get("macaroon")
+        after = http.get("/v1/balance", headers={"X-Api-Key": key}).json()["balance_msat"]
+        assert after == before == 0
