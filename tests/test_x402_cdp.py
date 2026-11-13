@@ -359,7 +359,9 @@ def test_topup_is_mainnet_only_while_the_switch_is_on(tmp_path, monkeypatch) -> 
     with TestClient(module.app) as http:
         key = _buy(http)
         quoted = http.get("/v1/topup/trial/x402", headers={"X-Api-Key": key})
-        assert quoted.status_code == 402, quoted.text
+        assert quoted.status_code == 410, quoted.text
+        assert quoted.json()["error"] == "packs_retired"
+        return
         document = json.loads(base64.b64decode(quoted.headers["payment-required"]))
         assert [item["network"] for item in document["accepts"]] == ["eip155:8453"]
         assert document["accepts"][0]["asset"] == _BASE_USDC
@@ -387,7 +389,7 @@ def test_topup_is_mainnet_only_while_the_switch_is_on(tmp_path, monkeypatch) -> 
         assert fresh_doc["accepts"][0]["extra"]["name"] == "USDC"
         assert fresh.json()["testing"] is True
         assert fresh.json()["x402_mode"] == "test"
-        started = http.get("/v1/topup/trial", headers={"X-Api-Key": key})
+        started = http.post("/v1/topup/lightning", json={"sats": 1000}, headers={"X-Api-Key": key})
         assert started.status_code == 402
         assert started.json()["invoice"]
 

@@ -135,11 +135,11 @@ def _auth(macaroon: str, preimage_hex: str) -> str:
 
 
 def _buy_client(client: TestClient) -> str:
-    started = client.get("/v1/topup/trial")
+    started = client.post("/v1/topup/lightning", json={"sats": 1000})
     assert started.status_code == 402, started.text
     body = started.json()
     preimage = client.get(f"/dev/mock/pay/{body['payment_hash']}").json()["preimage"]
-    settled = client.get("/v1/topup/trial", headers={"Authorization": _auth(body["macaroon"], preimage)})
+    settled = client.post("/v1/topup/lightning", json={"sats": 1000}, headers={"Authorization": _auth(body["macaroon"], preimage)})
     assert settled.status_code == 200, settled.text
     return settled.json()["api_key"]
 
@@ -232,7 +232,7 @@ def test_no_policy_still_replays_for_free_and_consume_does_not_count(client):
     assert consumed.json()["consumed"] is True
     assert consumed.json()["charged_credits"] == 0
     assert consumed.json()["uses_consumed"] == 0
-    assert _balance(client, api_key) == 199
+    assert _balance(client, api_key) == 499
 
 
 def test_max_uses_one_then_token_used_up_and_a_check_still_works(client):
@@ -271,7 +271,7 @@ def test_max_uses_one_then_token_used_up_and_a_check_still_works(client):
     assert checked.json()["uses_remaining"] == 0
     assert checked.json()["consumed"] is False
     assert checked.json()["charged_credits"] == 0
-    assert _balance(client, api_key) == 199
+    assert _balance(client, api_key) == 499
     assert _uses(challenge["payment_hash"]) == 1
 
 
@@ -299,7 +299,7 @@ def test_bundle_charges_once_across_verify_and_status(client):
     assert denied.status_code == 401
     assert denied.json()["error"] == "token_used_up"
     assert denied.json()["charged_credits"] == 0
-    assert _balance(client, api_key) == 199
+    assert _balance(client, api_key) == 499
 
 
 def test_access_seconds_expires_and_expiry_wins_when_uses_are_also_gone(client):
@@ -351,7 +351,7 @@ def test_access_seconds_expires_and_expiry_wins_when_uses_are_also_gone(client):
     assert still_visible.status_code == 200, still_visible.text
     assert still_visible.json()["uses_remaining"] == 0
     assert still_visible.json()["access_until"] == frozen - 1
-    assert _balance(client, api_key) == 199
+    assert _balance(client, api_key) == 499
 
 
 def test_time_pass_without_a_use_cap_expires(client):
@@ -407,7 +407,7 @@ def test_consume_before_payment_does_not_take_a_use(client):
     assert pending.status_code == 402
     assert pending.json()["error"] == "payment_pending"
     assert _uses(challenge["payment_hash"]) == 0
-    assert _balance(client, api_key) == 200
+    assert _balance(client, api_key) == 500
 
 
 def test_insufficient_balance_takes_no_use(client):
@@ -499,7 +499,7 @@ def test_restricted_key_can_set_a_policy_inside_its_prefix(client):
     assert debits[0]["api_key_id"] == key_id
     assert debits[0]["resource"] == "blog/post"
     assert debits[0]["delta_credits"] == -1
-    assert _balance(client, account) == 199
+    assert _balance(client, account) == 499
 
 
 def test_settled_policy_rows_outlive_invoice_cleanup(client):
@@ -605,7 +605,7 @@ def test_concurrent_consumes_cannot_share_the_last_use(client):
     assert wins[0]["uses_remaining"] == 0
     assert all(loss.code == "token_used_up" and loss.charged == 0 for loss in losses)
     assert sum(item[1]["charged"] if item[0] == "ok" else item[1].charged for item in results) == 1
-    assert _balance(client, api_key) == 199
+    assert _balance(client, api_key) == 499
     assert _uses(challenge["payment_hash"]) == 1
 
     bundle = _challenge(client, api_key, resource="api/race-bundle", max_uses=4)
@@ -624,7 +624,7 @@ def test_concurrent_consumes_cannot_share_the_last_use(client):
     assert sum(item[1]["charged"] if item[0] == "ok" else item[1].charged for item in bundle_results) == 1
     assert all(item[1].code == "token_used_up" for item in bundle_results if item[0] == "deny")
     assert _uses(bundle["payment_hash"]) == 4
-    assert _balance(client, api_key) == 198
+    assert _balance(client, api_key) == 498
     # The helper stays the public race primitive. A direct call agrees with the HTTP counter.
     with pytest.raises(db_verify.UsageDenied) as raised:
         db_verify.settle_and_consume(

@@ -30,7 +30,6 @@ from . import db_verify
 from . import db_x402
 from . import rates
 from . import x402 as x402_mod
-from . import x402_topup
 from . import ssrf
 from . import wallet_lnaddr
 from .admin import router as admin_router
@@ -485,7 +484,9 @@ def well_known_satsgate_head(request: Request) -> dict:
 
 @app.get("/v1/plans")
 def v1_plans() -> dict:
-    return {"ok": True, "plans": list_plans()}
+    from .pricing import plans_document
+
+    return plans_document()
 
 
 @app.get("/v1/balance")
@@ -1983,6 +1984,119 @@ def v1_topup_status(
     return result
 
 
+class LightningTopupIn(BaseModel):
+    sats: int = Field(..., ge=1, le=10_000_000)
+
+
+@app.post("/v1/topup/lightning")
+def v1_topup_lightning(
+    body: LightningTopupIn,
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+):
+    """Top up any amount of sats. Minimum is SATSGATE_TOPUP_MIN_SATS.
+
+    No key: the invoice can create the account when it is paid. A restricted
+    key cannot top up. The credited milisatoshis include the per-top-up bonus.
+    """
+    from .pricing import bonus_bps, credit_msat_for_principal
+
+    resource = "v1/topup/lightning"
+    if int(body.sats) < int(config.TOPUP_MIN_SATS):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "ok": False,
+                "error": "amount_too_small",
+                "min_sats": int(config.TOPUP_MIN_SATS),
+            },
+        )
+    client = _topup_client(x_api_key)
+    if isinstance(client, JSONResponse):
+        return client
+    if client is not None and db.client_is_suspended(config.DB_PATH, client_id=client.id):
+        return JSONResponse(status_code=403, content={"ok": False, "error": "account_suspended"})
+    if authorization:
+        try:
+            return _claim_topup(authorization=authorization, resource=resource, client=client, plan=None)
+        except L402Error as exc:
+            return JSONResponse(status_code=401, content={"ok": False, "error": str(exc)})
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+    blocked = _geoblock_quote(request)
+    if blocked is not None:
+        return blocked
+    msat_credit = credit_msat_for_principal(int(body.sats))
+    try:
+        inv = WALLET.create_invoice(
+            amount_sats=int(body.sats),
+            memo="satsgate topup",
+            min_expiry_seconds=config.TOKEN_TTL_SECONDS,
+        )
+    except (ssrf.SSRFError, InvoiceValidationError, LnurlError, ValueError) as exc:
+        return _upstream_error(exc)
+    created_at = int(time.time())
+    invoice_expires_at = getattr(inv, "expires_at", None)
+    macaroon_exp = _topup_macaroon_exp(expires_at=invoice_expires_at, created_at=created_at)
+    try:
+        db.add_topup(
+            config.DB_PATH,
+            payment_hash=inv.payment_hash,
+            invoice=inv.invoice,
+            sats=int(body.sats),
+            credits=msat_credit // 2000,
+            client_id=client.id if client else None,
+            requester_ip=_peer_ip(request),
+            verify_url=getattr(inv, "verify_url", None),
+            expires_at=invoice_expires_at,
+            max_pending_per_ip=config.MAX_PENDING_TOPUPS_PER_IP,
+            now=created_at,
+            claim_grace_seconds=config.TOPUP_CLAIM_GRACE_SECONDS,
+            claim_cap_seconds=config.TOPUP_TOKEN_TTL_CAP_SECONDS,
+        )
+    except ValueError as exc:
+        if str(exc) == "too_many_pending_topups":
+            return JSONResponse(status_code=429, content={"ok": False, "error": "too_many_pending_topups"})
+        return JSONResponse(status_code=500, content={"ok": False, "error": "db_error"})
+    with db._connect(config.DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE topups
+            SET delta_msat = ?, bonus_bps = ?, rate_source = 'lightning'
+            WHERE payment_hash = ?
+            """,
+            (msat_credit, bonus_bps(int(body.sats)), inv.payment_hash),
+        )
+    macaroon = make_macaroon(
+        secret=config.MACAROON_SECRET,
+        kid=config.MACAROON_KEY_ID,
+        purpose=PURPOSE_TOPUP,
+        payment_hash=inv.payment_hash,
+        resource=resource,
+        amount_sats=int(body.sats),
+        invoice=inv.invoice,
+        ttl_seconds=max(1, macaroon_exp - created_at),
+        exp=macaroon_exp,
+        client_id=client.id if client else None,
+        payee=config.LIGHTNING_ADDRESS or None,
+    )
+    return JSONResponse(
+        status_code=402,
+        headers={"WWW-Authenticate": www_authenticate_header(macaroon=macaroon, invoice=inv.invoice)},
+        content={
+            "ok": False,
+            "error": "payment_required",
+            "sats": int(body.sats),
+            "msat_credit": msat_credit,
+            "macaroon": macaroon,
+            "invoice": inv.invoice,
+            "payment_hash": inv.payment_hash,
+            "expires_at": invoice_expires_at,
+        },
+    )
+
+
 @app.get("/v1/topup/{plan_id}/x402")
 def v1_topup_x402(
     plan_id: str,
@@ -2000,48 +2114,12 @@ def v1_topup_x402(
     With that header: verify, settle, then grant credits. A failed settle grants
     nothing. Credits are not redeemable for USDC. Lightning top-up is separate.
     """
-    try:
-        plan = get_plan(plan_id)
-    except KeyError as exc:
-        return JSONResponse(status_code=404, content={"ok": False, "error": str(exc)})
-    if not x402_topup.enabled():
-        return JSONResponse(status_code=400, content={"ok": False, "error": "x402_topup_disabled"})
-    client = _account_client(x_api_key)
-    if isinstance(client, JSONResponse):
-        return client
-    if db.client_is_suspended(config.DB_PATH, client_id=client.id):
-        return JSONResponse(status_code=403, content={"ok": False, "error": "account_suspended"})
-    if not (payment_signature and payment_signature.strip()):
-        blocked = _geoblock_quote(request)
-        if blocked is not None:
-            return blocked
-    try:
-        presented = payment_signature.strip() if payment_signature else ""
-        if presented:
-            if len(presented) > config.X402_SIGNATURE_MAX_BYTES:
-                return JSONResponse(status_code=400, content={"ok": False, "error": "bad_signature"})
-            result = x402_topup.settle(client_id=client.id, plan=plan, encoded=presented)
-            header = str(result.pop("payment_response"))
-            return JSONResponse(
-                status_code=200,
-                headers={"PAYMENT-RESPONSE": header, "Cache-Control": "no-store"},
-                content=result,
-            )
-        quoted = x402_topup.issue(
-            client_id=client.id,
-            plan=plan,
-            resource_url=f"{str(request.base_url).rstrip('/')}/v1/topup/{plan.id}/x402",
-        )
-        return JSONResponse(
-            status_code=402,
-            headers={"PAYMENT-REQUIRED": quoted["payment_required"], "Cache-Control": "no-store"},
-            content=quoted,
-        )
-    except x402_mod.X402Error as exc:
-        content: dict[str, Any] = {"ok": False, "error": exc.code}
-        if exc.reason:
-            content["reason"] = exc.reason
-        return JSONResponse(status_code=exc.status, content=content)
+    from .pricing import RETIRED_PLAN_IDS, packs_retired_body
+
+    if (plan_id or "").strip().lower() in RETIRED_PLAN_IDS:
+        return JSONResponse(status_code=410, content=packs_retired_body())
+    return JSONResponse(status_code=404, content={"ok": False, "error": "not_found"})
+
 
 
 @app.get("/v1/topup/{plan_id}")
@@ -2061,108 +2139,12 @@ def v1_topup(
     The preimage flow keeps working for providers that do not advertise verify.
     """
 
-    try:
-        plan = get_plan(plan_id)
-    except KeyError as e:
-        return JSONResponse(status_code=404, content={"ok": False, "error": str(e)})
+    from .pricing import RETIRED_PLAN_IDS, packs_retired_body
 
-    resource = f"v1/topup/{plan.id}"
+    if (plan_id or "").strip().lower() in RETIRED_PLAN_IDS:
+        return JSONResponse(status_code=410, content=packs_retired_body())
+    return JSONResponse(status_code=404, content={"ok": False, "error": "not_found"})
 
-    client = _topup_client(x_api_key)
-    if isinstance(client, JSONResponse):
-        return client
-    if client is not None and db.client_is_suspended(config.DB_PATH, client_id=client.id):
-        return JSONResponse(status_code=403, content={"ok": False, "error": "account_suspended"})
-
-    if authorization:
-        try:
-            return _claim_topup(
-                authorization=authorization,
-                resource=resource,
-                client=client,
-                plan=plan.to_dict(),
-            )
-        except L402Error as e:
-            return JSONResponse(status_code=401, content={"ok": False, "error": str(e)})
-        except ValueError as e:
-            return JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
-
-    blocked = _geoblock_quote(request)
-    if blocked is not None:
-        return blocked
-
-    # CREAR CHALLENGE (402)
-    memo = f"satsgate topup {plan.id}"
-    try:
-        inv = WALLET.create_invoice(
-            amount_sats=plan.price_sats,
-            memo=memo,
-            min_expiry_seconds=config.TOKEN_TTL_SECONDS,
-        )
-    except (ssrf.SSRFError, InvoiceValidationError, LnurlError, ValueError) as exc:
-        return _upstream_error(exc)
-
-    # Persist pending topup. The macaroon lives until the invoice expiry plus
-    # grace (capped), not SATSGATE_TOKEN_TTL_SECONDS. min_expiry above only
-    # rejects an invoice that dies before the buyer has had that long to pay.
-    created_at = int(time.time())
-    invoice_expires_at = getattr(inv, "expires_at", None)
-    macaroon_exp = _topup_macaroon_exp(expires_at=invoice_expires_at, created_at=created_at)
-    try:
-        db.add_topup(
-            config.DB_PATH,
-            payment_hash=inv.payment_hash,
-            invoice=inv.invoice,
-            sats=plan.price_sats,
-            credits=plan.credits,
-            client_id=client.id if client else None,
-            requester_ip=_peer_ip(request),
-            verify_url=getattr(inv, "verify_url", None),
-            expires_at=invoice_expires_at,
-            max_pending_per_ip=config.MAX_PENDING_TOPUPS_PER_IP,
-            now=created_at,
-            claim_grace_seconds=config.TOPUP_CLAIM_GRACE_SECONDS,
-            claim_cap_seconds=config.TOPUP_TOKEN_TTL_CAP_SECONDS,
-        )
-    except ValueError as exc:
-        if str(exc) == "too_many_pending_topups":
-            return JSONResponse(
-                status_code=429,
-                content={"ok": False, "error": "too_many_pending_topups"},
-            )
-        return JSONResponse(status_code=500, content={"ok": False, "error": "db_error"})
-    except Exception:  # noqa: BLE001
-        return JSONResponse(status_code=500, content={"ok": False, "error": "db_error"})
-
-    macaroon = make_macaroon(
-        secret=config.MACAROON_SECRET,
-        kid=config.MACAROON_KEY_ID,
-        purpose=PURPOSE_TOPUP,
-        payment_hash=inv.payment_hash,
-        resource=resource,
-        amount_sats=plan.price_sats,
-        invoice=inv.invoice,
-        ttl_seconds=max(1, macaroon_exp - created_at),
-        exp=macaroon_exp,
-        client_id=client.id if client else None,
-        payee=config.LIGHTNING_ADDRESS or None,
-    )
-
-    www_auth = www_authenticate_header(macaroon=macaroon, invoice=inv.invoice)
-
-    return JSONResponse(
-        status_code=402,
-        headers={"WWW-Authenticate": www_auth},
-        content={
-            "ok": False,
-            "error": "payment_required",
-            "plan": plan.to_dict(),
-            "macaroon": macaroon,
-            "invoice": inv.invoice,
-            "payment_hash": inv.payment_hash,
-            "expires_at": getattr(inv, "expires_at", None),
-        },
-    )
 
 
 class PaywallChallengeIn(BaseModel):
@@ -3483,3 +3465,6 @@ def dev_mock_pay(payment_hash: str):
         return JSONResponse(status_code=404, content={"ok": False, "error": "payment_hash_not_found_or_expired"})
 
     return {"ok": True, "payment_hash": payment_hash, "preimage": preimage_hex}
+
+
+

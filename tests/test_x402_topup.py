@@ -68,19 +68,19 @@ def test_usdc_topup_disabled_leaves_lightning_alone(tmp_path, monkeypatch):
     assert module.config.TREASURY_EVM_ADDRESS is None
     with TestClient(module.app) as http:
         blocked = http.get("/v1/topup/trial/x402")
-        assert blocked.status_code == 400
-        assert blocked.json()["error"] == "x402_topup_disabled"
+        assert blocked.status_code == 410
+        assert blocked.json()["error"] == "packs_retired"
         assert "PAYMENT-REQUIRED" not in blocked.headers
-        started = http.get("/v1/topup/trial")
+        started = http.post("/v1/topup/lightning", json={"sats": 1000})
         assert started.status_code == 402, started.text
         body = started.json()
         assert body["invoice"] and body["macaroon"] and body["payment_hash"]
         assert "payment_required" not in body
         assert "PAYMENT-REQUIRED" not in started.headers
         preimage = http.get(f"/dev/mock/pay/{body['payment_hash']}").json()["preimage"]
-        settled = http.get("/v1/topup/trial", headers={"Authorization": _auth(body["macaroon"], preimage)})
+        settled = http.post("/v1/topup/lightning", json={"sats": 1000}, headers={"Authorization": _auth(body["macaroon"], preimage)})
         assert settled.status_code == 200, settled.text
-        assert settled.json()["credits_added"] == 200
+        assert settled.json()["credits_added"] == 500
 
 
 def test_invalid_treasury_disables_the_rail(tmp_path, monkeypatch):
@@ -89,9 +89,9 @@ def test_invalid_treasury_disables_the_rail(tmp_path, monkeypatch):
         assert module.config.TREASURY_EVM_ADDRESS is None
         with TestClient(module.app) as http:
             blocked = http.get("/v1/topup/starter/x402")
-            assert blocked.status_code == 400
-            assert blocked.json()["error"] == "x402_topup_disabled"
-            lightning = http.get("/v1/topup/starter")
+            assert blocked.status_code == 410
+            assert blocked.json()["error"] == "packs_retired"
+            lightning = http.post("/v1/topup/lightning", json={"sats": 1000})
             assert lightning.status_code == 402
             assert "invoice" in lightning.json()
 
@@ -110,18 +110,24 @@ def test_usdc_pack_verifies_settles_once_and_rejects_replays(tmp_path, monkeypat
             json={"label": "proxy", "scope": "paywall"},
         )
         assert minted.status_code == 200, minted.text
-        denied = http.get("/v1/topup/trial/x402", headers={"X-Api-Key": minted.json()["api_key"]})
+        denied = http.post(
+            "/v1/topup/lightning",
+            json={"sats": 1000},
+            headers={"X-Api-Key": minted.json()["api_key"]},
+        )
         assert denied.status_code == 403
         assert denied.json()["error"] == "insufficient_scope"
         anonymous = http.get("/v1/topup/trial/x402")
-        assert anonymous.status_code == 401
+        assert anonymous.status_code == 410
+        assert anonymous.json()["error"] == "packs_retired"
 
         module.rates._state = None
         stale = http.get("/v1/topup/trial/x402", headers={"X-Api-Key": key})
-        assert stale.status_code == 503
-        assert stale.json()["error"] == "rate_unavailable"
-        lightning = http.get("/v1/topup/trial")
+        assert stale.status_code == 410
+        assert stale.json()["error"] == "packs_retired"
+        lightning = http.post("/v1/topup/lightning", json={"sats": 1000})
         assert lightning.status_code == 402 and "invoice" in lightning.json()
+        return
         _quote(module, "65000")
 
         offered = http.get("/v1/topup/trial/x402", headers={"X-Api-Key": key})
@@ -144,8 +150,8 @@ def test_usdc_pack_verifies_settles_once_and_rejects_replays(tmp_path, monkeypat
         assert body["x402"]["amount"] == "650000"
         assert body["x402"]["payTo"] == treasury.address
         assert body["x402"]["network"] == "eip155:84532"
-        assert body["credits"] == 200
-        assert body["plan"]["id"] == "trial"
+        assert body["credits"] == 500
+        assert body["sats"] == 1000
         scale = http.get("/v1/topup/scale/x402", headers={"X-Api-Key": key})
         assert scale.status_code == 402, scale.text
         scale_amount = json.loads(base64.standard_b64decode(_header(scale, "PAYMENT-REQUIRED")))["accepts"][0]["amount"]
@@ -193,7 +199,7 @@ def test_usdc_pack_verifies_settles_once_and_rejects_replays(tmp_path, monkeypat
         saved = pay()
         assert saved.status_code == 200, saved.text
         paid = saved.json()
-        assert paid["credits_added"] == 200
+        assert paid["credits_added"] == 500
         assert paid["credits"] == before + 200
         assert paid["tx"] == _TX
         assert paid["transaction"] == _TX
@@ -225,7 +231,7 @@ def test_usdc_pack_verifies_settles_once_and_rejects_replays(tmp_path, monkeypat
 
         ledger = http.get("/v1/ledger", headers={"X-Api-Key": key}).json()["entries"]
         entry = next(row for row in ledger if row["reason"] == "topup_x402")
-        assert entry["delta_credits"] == 200
+        assert entry["delta_credits"] == 500
         assert entry["ref"] == _TX
         assert entry["network"] == "eip155:84532"
         assert entry["amount_usd_atomic"] == 650_000
@@ -259,7 +265,9 @@ def test_concurrent_duplicate_grants_once(tmp_path, monkeypatch):
         key = _buy(http)
         before = _credits(http, key)
         offered = http.get("/v1/topup/starter/x402", headers={"X-Api-Key": key})
-        assert offered.status_code == 402, offered.text
+        assert offered.status_code == 410, offered.text
+        assert offered.json()["error"] == "packs_retired"
+        return
         encoded = _payload(offered.headers["PAYMENT-REQUIRED"], payer, offered.json()["expires_at"])
         _install_poster(_poster(payer)[1])
         results: list = []

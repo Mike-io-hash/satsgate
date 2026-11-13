@@ -1519,7 +1519,7 @@ def test_suspension_disables_sites_and_blocks_new_work(tmp_path, monkeypatch):
         )
         assert created.status_code == 403, created.text
         assert created.json()["error"] == "account_suspended"
-        topup = http.get("/v1/topup/trial", headers={"X-Api-Key": key})
+        topup = http.post("/v1/topup/lightning", json={"sats": 1000}, headers={"X-Api-Key": key})
         assert topup.status_code == 403, topup.text
         link = http.post("/v1/client/payee/evm/connect", headers={"X-Api-Key": key})
         assert link.status_code == 403, link.text
@@ -1587,22 +1587,22 @@ def test_geoblock_and_ofac_screens(tmp_path, monkeypatch):
             return None
 
     with TestClient(blocked.app) as http:
-        missing = http.get("/v1/topup/trial", headers={"X-Forwarded-For": "203.0.113.10"})
+        missing = http.post("/v1/topup/lightning", json={"sats": 1000}, headers={"X-Forwarded-For": "203.0.113.10"})
     assert missing.status_code == 503, missing.text
     assert missing.json()["error"] == "geoblock_unavailable"
     db_path.write_text("open", encoding="utf-8")
     os.utime(db_path, (time.time() + 5, time.time() + 5))
     monkeypatch.setattr(_mod("app.geoblock"), "_open", lambda path: _Reader(codes))
     with TestClient(blocked.app) as http:
-        unknown = http.get("/v1/topup/trial", headers={"X-Forwarded-For": "198.51.100.8"})
+        unknown = http.post("/v1/topup/lightning", json={"sats": 1000}, headers={"X-Forwarded-For": "198.51.100.8"})
         assert unknown.status_code == 402, unknown.text
-        allowed = http.get("/v1/topup/trial", headers={"X-Forwarded-For": "203.0.113.10"})
+        allowed = http.post("/v1/topup/lightning", json={"sats": 1000}, headers={"X-Forwarded-For": "203.0.113.10"})
         assert allowed.status_code == 402, allowed.text
         for code, ip in (("CU", "203.0.113.20"), ("IR", "203.0.113.21"), ("KP", "203.0.113.22")):
             codes[ip] = code
         os.utime(db_path, (time.time() + 10, time.time() + 10))
         for ip in ("203.0.113.20", "203.0.113.21", "203.0.113.22"):
-            refused = http.get("/v1/topup/trial", headers={"X-Forwarded-For": ip})
+            refused = http.post("/v1/topup/lightning", json={"sats": 1000}, headers={"X-Forwarded-For": ip})
             assert refused.status_code == 451, refused.text
             assert refused.json()["error"] == "region_unavailable"
 

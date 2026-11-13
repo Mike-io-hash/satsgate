@@ -137,11 +137,11 @@ def _auth(macaroon: str, preimage_hex: str) -> str:
 
 
 def _buy_client(client: TestClient) -> str:
-    started = client.get("/v1/topup/trial")
+    started = client.post("/v1/topup/lightning", json={"sats": 1000})
     assert started.status_code == 402, started.text
     body = started.json()
     preimage = client.get(f"/dev/mock/pay/{body['payment_hash']}").json()["preimage"]
-    settled = client.get("/v1/topup/trial", headers={"Authorization": _auth(body["macaroon"], preimage)})
+    settled = client.post("/v1/topup/lightning", json={"sats": 1000}, headers={"Authorization": _auth(body["macaroon"], preimage)})
     assert settled.status_code == 200, settled.text
     return settled.json()["api_key"]
 

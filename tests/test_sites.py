@@ -174,11 +174,11 @@ def _auth(macaroon: str, preimage_hex: str) -> str:
 
 
 def _buy(http: TestClient) -> str:
-    started = http.get("/v1/topup/trial")
+    started = http.post("/v1/topup/lightning", json={"sats": 1000})
     assert started.status_code == 402, started.text
     body = started.json()
     preimage = http.get(f"/dev/mock/pay/{body['payment_hash']}").json()["preimage"]
-    settled = http.get("/v1/topup/trial", headers={"Authorization": _auth(body["macaroon"], preimage)})
+    settled = http.post("/v1/topup/lightning", json={"sats": 1000}, headers={"Authorization": _auth(body["macaroon"], preimage)})
     assert settled.status_code == 200, settled.text
     return settled.json()["api_key"]
 

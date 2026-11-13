@@ -90,7 +90,7 @@ _ACCOUNT_ONLY = [
     ("get", "/v1/usage/daily", None),
     ("get", "/v1/usage/forecast", None),
     ("get", "/v1/api-keys", None),
-    ("get", "/v1/topup/trial", None),
+    ("post", "/v1/topup/lightning", {"sats": 1000}),
     ("post", "/v1/client/payee", {"payee_lightning_address": "other@pay.example"}),
     ("post", "/v1/client/payee/evm/challenge", {"address": "0x1111111111111111111111111111111111111111"}),
     (
@@ -143,11 +143,11 @@ def _auth(macaroon: str, preimage_hex: str) -> str:
 
 
 def _buy_client(client: TestClient) -> str:
-    started = client.get("/v1/topup/trial")
+    started = client.post("/v1/topup/lightning", json={"sats": 1000})
     assert started.status_code == 402, started.text
     body = started.json()
     preimage = client.get(f"/dev/mock/pay/{body['payment_hash']}").json()["preimage"]
-    settled = client.get("/v1/topup/trial", headers={"Authorization": _auth(body["macaroon"], preimage)})
+    settled = client.post("/v1/topup/lightning", json={"sats": 1000}, headers={"Authorization": _auth(body["macaroon"], preimage)})
     assert settled.status_code == 200, settled.text
     return settled.json()["api_key"]
 
@@ -398,7 +398,7 @@ def test_resource_prefix_limits_challenge_verify_and_status(client):
 
     # The same payment is still this client's. The account key can see the debit.
     balance = client.get("/v1/balance", headers={"X-Api-Key": account}).json()["credits"]
-    assert balance == 200 - 1
+    assert balance == 500 - 1
 
 
 def test_revoke_is_idempotent_and_stops_the_key(client):
@@ -445,11 +445,11 @@ def test_revoke_is_idempotent_and_stops_the_key(client):
 
 def test_unknown_restricted_prefix_is_not_an_anonymous_topup(client):
     before = client.get("/v1/admin/overview", headers={"X-Admin-Token": "test-admin-token"}).json()
-    response = client.get("/v1/topup/trial", headers={"X-Api-Key": "sgr_this-key-does-not-exist"})
+    response = client.post("/v1/topup/lightning", json={"sats": 1000}, headers={"X-Api-Key": "sgr_this-key-does-not-exist"})
     assert response.status_code == 401
     assert response.json()["error"] == "invalid_api_key"
     # An unknown account-key-shaped header still starts an anonymous top-up.
-    legacy = client.get("/v1/topup/trial", headers={"X-Api-Key": "sg_not-a-real-key"})
+    legacy = client.post("/v1/topup/lightning", json={"sats": 1000}, headers={"X-Api-Key": "sg_not-a-real-key"})
     assert legacy.status_code == 402
     assert before["ok"] is True
 
