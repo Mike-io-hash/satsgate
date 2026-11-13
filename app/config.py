@@ -566,7 +566,7 @@ ADVICE_TZ = os.environ.get("SATSGATE_ADVICE_TZ", "America/Argentina/Buenos_Aires
 LOW_BALANCE_MSAT = _optional_int("SATSGATE_LOW_BALANCE_MSAT", 200_000, minimum=0, maximum=10**15)
 SIGNUP_MAX_PER_IP_PER_DAY = _optional_int("SATSGATE_SIGNUP_MAX_PER_IP_PER_DAY", 3, minimum=0, maximum=1_000_000)
 SIGNUP_MAX_GLOBAL_PER_DAY = _optional_int("SATSGATE_SIGNUP_MAX_GLOBAL_PER_DAY", 100, minimum=0, maximum=10_000_000)
-ACCOUNTING_RATE_CACHE_S = _optional_int("SATSGATE_ACCOUNTING_RATE_CACHE_S", 300, minimum=0, maximum=86_400)
+ACCOUNTING_RATE_CACHE_S = _optional_int("SATSGATE_ACCOUNTING_RATE_CACHE_S", 60, minimum=0, maximum=86_400)
 ACCOUNTING_RATE_STALE_S = _optional_int("SATSGATE_ACCOUNTING_RATE_STALE_S", 3600, minimum=1, maximum=86_400)
 ACCOUNTING_RATE_TIMEOUT_S = _optional_int("SATSGATE_ACCOUNTING_RATE_TIMEOUT_S", 3, minimum=1, maximum=30)
 COINGECKO_API_KEY = os.environ.get("SATSGATE_COINGECKO_API_KEY", "").strip()

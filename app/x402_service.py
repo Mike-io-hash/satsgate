@@ -18,9 +18,9 @@ _LOCK_SECONDS = 15
 
 
 def quote_plan(site: dict, route: dict) -> dict:
-    """Which rails to offer, and the derived amount when a fresh median exists.
+    """Which rails to offer, and the derived amount when the effective rate is fresh.
 
-    A missing or stale rate drops the derived rail. The main currency stays.
+    A missing rate drops the derived rail. The main currency stays.
     """
     lightning_on = bool(int(site.get("rail_lightning", 1)))
     requested = bool(int(site.get("rail_x402", 0)))
@@ -32,7 +32,9 @@ def quote_plan(site: dict, route: dict) -> dict:
     currency = route.get("price_currency") or "sats"
     main_sats = int(route["price_sats"]) if currency == "sats" and route.get("price_sats") else None
     main_usd = int(route["price_usd_atomic"]) if currency == "usd" and route.get("price_usd_atomic") else None
-    rate = rates.quote_rate()
+    from .accounting_rate import effective_rate
+
+    rate = effective_rate()
     derived_usd = rates.usd_atomic_from_sats(main_sats, rate) if rate is not None and main_sats and x402_on else None
     derived_sats = rates.sats_from_usd_atomic(main_usd, rate) if rate is not None and main_usd and lightning_on else None
     lightning_sats = main_sats if lightning_on and main_sats else derived_sats if lightning_on else None

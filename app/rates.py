@@ -290,10 +290,9 @@ def describe_derived(
     now: int | None = None,
 ) -> dict:
     """A live quote for the merchant view. It is not the locked challenge price."""
-    view = snapshot(now)
-    if view["status"] != "ok":
-        return {"status": view["status"]}
-    rate = quote_rate(now)
+    from .accounting_rate import effective_rate
+
+    rate = effective_rate(now)
     if rate is None:
         return {"status": "unavailable"}
     if price_currency == "sats" and price_sats:

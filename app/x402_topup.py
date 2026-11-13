@@ -61,7 +61,9 @@ def issue(*, client_id: int, plan: Plan, resource_url: str) -> dict:
     """402 body plus the PAYMENT-REQUIRED header value. The amount is locked."""
     treasury = _treasury()
     now = int(time.time())
-    rate = rates.quote_rate(now)
+    from .accounting_rate import effective_rate
+
+    rate = effective_rate(now)
     if rate is None:
         raise x402.X402Error("rate_unavailable", status=503)
     atomic = rates.usd_atomic_for_pack(plan.price_sats, rate)

@@ -59,12 +59,23 @@ from .wallet_lnaddr import LightningAddressWallet, LnurlError
 _log = logging.getLogger("satsgate")
 
 
+def refresh_rates(now: int | None = None) -> None:
+    """Refresh the internal median and the on-chain read. One failure does not skip the other."""
+    try:
+        rates.refresh(now)
+    except Exception:
+        _log.warning("btc/usd refresh failed")
+    try:
+        from .accounting_rate import refresh_effective
+
+        refresh_effective(now)
+    except Exception:
+        _log.warning("btc/usd primary refresh failed")
+
+
 def _rates_loop(stop: threading.Event) -> None:
     while not stop.is_set():
-        try:
-            rates.refresh()
-        except Exception:
-            _log.warning("btc/usd refresh failed")
+        refresh_rates()
         stop.wait(config.RATES_REFRESH_SECONDS)
 
 
@@ -533,7 +544,9 @@ def _site_lightning_advice(client: db.Client, site: dict) -> dict | None:
     """add_lightning when a route is under US$0.01 and no Lightning Address is set."""
     from .advice import add_lightning_for_price
 
-    rate = rates.quote_rate()
+    from .accounting_rate import effective_rate
+
+    rate = effective_rate()
     has = bool(client.payee_lightning_address)
     for route in site.get("routes") or []:
         currency = route.get("price_currency") or "sats"

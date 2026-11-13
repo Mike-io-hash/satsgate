@@ -120,6 +120,7 @@ def test_rounding_rounds_up_and_drops_a_sub_cent_usdc_quote():
 
 
 def test_derived_rail_locks_and_a_stale_rate_keeps_the_main_price(tmp_path, monkeypatch):
+    """T-5.2.6. A later on-chain read and a later median do not change a locked USDC amount."""
     module = _load_app(tmp_path)
     _patch_dns(monkeypatch, module)
     owner = Account.create()
@@ -129,6 +130,10 @@ def test_derived_rail_locks_and_a_stale_rate_keeps_the_main_price(tmp_path, monk
         _verify_payee(http, key, owner)
         _site(http, key, path="/blog/post", body={"price_sats": 21, "max_uses": 1})
         http.patch("/v1/sites/my-shop", headers={"X-Api-Key": key}, json={"rail_x402": True})
+        from test_chainlink import oracle_poster
+
+        module.chainlink.poster = oracle_poster(65000)
+        module.accounting_rate.reset_for_tests()
         _use(module, {"coinbase": "65000", "kraken": "65000", "bitstamp": "65000"})
 
         issued = _gate(
@@ -147,6 +152,8 @@ def test_derived_rail_locks_and_a_stale_rate_keeps_the_main_price(tmp_path, monk
         assert "paymentFlow" not in issued.headers.get("PAYMENT-REQUIRED", "")
         assert body["rate"]["rate_num"] == 6_500_000_000_000
 
+        module.chainlink.poster = oracle_poster(70000)
+        module.accounting_rate.reset_for_tests()
         _use(module, {"coinbase": "70000", "kraken": "70000", "bitstamp": "70000"})
         again = _gate(
             http,
@@ -174,8 +181,11 @@ def test_derived_rail_locks_and_a_stale_rate_keeps_the_main_price(tmp_path, monk
         assert calls[0][1]["paymentRequirements"]["amount"] == "13650"
         assert _credits(http, key) == before
 
+        stale_at = int(time.time())
+        module.chainlink.poster = oracle_poster(70000, updated_at=stale_at - 3_601)
+        module.accounting_rate.reset_for_tests()
         with module.rates._lock:
-            module.rates._state = dataclasses.replace(module.rates._state, fetched_at=int(time.time()) - 181)
+            module.rates._state = dataclasses.replace(module.rates._state, fetched_at=stale_at - 181)
         http.post(
             "/v1/sites/my-shop/routes",
             headers={"X-Api-Key": key},

@@ -101,6 +101,12 @@ def _rpc(
     return poster
 
 
+def oracle_poster(usd: int, *, updated_at: int | None = None):
+    """Poster for a fresh 8-decimal quote. Tests pass this to ``chainlink.poster``."""
+    stamp = int(time.time()) if updated_at is None else int(updated_at)
+    return _rpc(updated_at=stamp, answer=int(usd) * 10**8)
+
+
 def test_t_5_1_1_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     now = 1_700_000_000
     updated = now - 120

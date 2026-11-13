@@ -131,62 +131,28 @@ def test_t_5_11_and_12_terms_and_headline() -> None:
         assert "spends 1 credit" not in lowered_doc
 
 
-def test_t_5_5_buyer_quote_ignores_coingecko(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app import rates
-    from app.rates import Rate
-
-    buyer = Rate(rate_num=80_070 * rates.RATE_DEN, rate_den=rates.RATE_DEN, fetched_at=1, sources=("bitstamp",), value="80070")
-    monkeypatch.setattr(rates, "quote_rate", lambda now=None: buyer)
-    atomic = rates.usd_atomic_from_sats(1000, buyer)
-    # A different accounting rate must not be an input to this function.
-    assert atomic == rates.usd_atomic_from_sats(1000, buyer)
-
-
-def test_t_5_5_cache_and_backup(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app import accounting_rate, rates
-    from app.rates import Rate
+def test_t_5_2_5_cache_does_not_reread_within_the_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replaces the old CoinGecko cache test. The window is the effective-rate cache."""
+    from app import accounting_rate, chainlink
+    from test_chainlink import oracle_poster
 
     accounting_rate.reset_for_tests()
     calls = {"n": 0}
+    inner = oracle_poster(80_070, updated_at=1_000)
 
-    def _fetch(_url: str):
-        calls["n"] += 1
-        return {"bitcoin": {"usd": 80070}}
+    def poster(url, payload, headers, timeout):
+        if payload.get("method") == "eth_chainId":
+            calls["n"] += 1
+        return inner(url, payload, headers, timeout)
 
-    monkeypatch.setattr(accounting_rate, "fetcher", _fetch)
-    monkeypatch.setattr(accounting_rate.config, "ACCOUNTING_RATE_CACHE_S", 300)
-    monkeypatch.setattr(accounting_rate.config, "ACCOUNTING_RATE_STALE_S", 3600)
-    first = accounting_rate.accounting_rate(now=1_000)
-    second = accounting_rate.accounting_rate(now=1_100)
-    assert first is not None and first.source == "coingecko"
-    assert second.source == "coingecko"
+    monkeypatch.setattr(chainlink, "poster", poster)
+    monkeypatch.setattr(accounting_rate.rates, "quote_rate", lambda now=None: None)
+    monkeypatch.setattr(accounting_rate.config, "ACCOUNTING_RATE_CACHE_S", 60)
+    first = accounting_rate.effective_rate(now=1_000)
+    second = accounting_rate.effective_rate(now=1_050)
+    assert first is not None and first.source == "oracle"
+    assert second.rate_num == first.rate_num
     assert calls["n"] == 1
-    third = accounting_rate.accounting_rate(now=1_000 + 301)
+    third = accounting_rate.effective_rate(now=1_000 + 60)
     assert calls["n"] == 2
-    assert third.source == "coingecko"
-
-    accounting_rate.reset_for_tests()
-
-    def _down(_url: str):
-        return None
-
-    monkeypatch.setattr(accounting_rate, "fetcher", _down)
-    backup = Rate(
-        rate_num=90_000 * rates.RATE_DEN,
-        rate_den=rates.RATE_DEN,
-        fetched_at=5_000,
-        sources=("kraken",),
-        value="90000",
-    )
-    monkeypatch.setattr(rates, "snapshot", lambda now=None: {
-        "status": "stale",
-        "value": "90000",
-        "sources": ["kraken"],
-        "fetched_at": 5_000,
-        "rate_num": backup.rate_num,
-        "rate_den": backup.rate_den,
-    })
-    used = accounting_rate.accounting_rate(now=5_100)
-    assert used is not None and used.source == "d23_median"
-    missing = accounting_rate.accounting_rate(now=5_000 + 3601)
-    assert missing is None
+    assert third is not None and third.source == "oracle"
