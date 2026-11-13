@@ -378,7 +378,12 @@ When both rails are on and the quote is fresh, the challenge locks the other cur
 | `SATSGATE_RATES_REFRESH_SECONDS` | 60 | How often the quote is refreshed (15 to 600). |
 | `SATSGATE_RATES_STALE_SECONDS` | 180 | After this, the last median is not used to price a challenge. |
 | `SATSGATE_RATES_SOURCE_TIMEOUT_SECONDS` | 2 | Timeout for one source (0.5 to 5). |
-| `SATSGATE_RATES_OUTLIER_BPS` | 200 | Drop a source this far from the median. 200 is 2%. |
+| `SATSGATE_RATES_OUTLIER_BPS` | 200 | Drop a backup sample this far from the others. 200 is 2%. |
+| `SATSGATE_BASE_RPC_URL` | `https://mainnet.base.org` | Primary Base RPC for the on-chain quote and for smart-wallet checks. |
+| `SATSGATE_BASE_RPC_FALLBACK_URL` | empty | Optional second Base RPC. Same https rules. Used only when the primary does not answer. |
+| `SATSGATE_ACCOUNTING_RATE_CACHE_S` | 60 | How long a quote is reused. |
+| `SATSGATE_ACCOUNTING_RATE_STALE_S` | 3600 | How old the primary read may be. |
+| `SATSGATE_ACCOUNTING_RATE_TIMEOUT_S` | 3 | Timeout for one primary read. |
 
 No new table. Copy `satsgate.sqlite3` before restarting onto 0.13.0 anyway. Lightning is unchanged when the quote is not used.
 

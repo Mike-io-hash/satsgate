@@ -5,7 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.20.1] - 2026-11-13
+
+Core **0.20.1**. Hosted gate stays **0.15.2**. Python SDK **0.8.0**, self-hosted proxy **0.14.0**, satsgate-mcp **0.13.0**, and the connect page **0.17.0** are unchanged. Packages were not published.
+
+### Changed
+- One effective BTC/USD quote for Satsgate's own USDC math and for buyer 402s. The primary read is an on-chain price. An internal backup is used only when that read is missing or unusable. The quote cache default is 60 seconds. The primary read is fresh for 3,600 seconds. The backup stays fresh for 180 seconds.
+- `SATSGATE_ACCOUNTING_RATE_STALE_S` is the primary-read freshness window. `SATSGATE_ACCOUNTING_RATE_TIMEOUT_S` is the RPC timeout.
+
+### Breaking
+- `GET /v1/rates` no longer has `sources`. A usable quote returns `pair`, `value`, `fetched_at`, `status`, and `source` (`oracle` or `fallback`).
+- A USDC top-up 402 `rate.source` is `oracle` or `fallback`. It no longer names the previous accounting vendor or the backup.
+- Buyer quotes follow the same effective rate as accounting. An offer that was already issued still keeps the amount and the fee that were locked on it.
+
+### Removed
+- CoinGecko, and `SATSGATE_COINGECKO_API_KEY`. Core 0.20.0 had used CoinGecko for its own USDC math.
+
+### Added
+- Optional `SATSGATE_BASE_RPC_FALLBACK_URL`, empty by default. Same https rules as `SATSGATE_BASE_RPC_URL`. It is tried once when the primary Base RPC does not answer.
+
+## [0.20.0] - 2026-11-13
 
 Core **0.20.0**, hosted gate **0.15.2**, Python SDK **0.8.0**, self-hosted proxy **0.14.0**, satsgate-mcp **0.13.0**. The connect page stays **0.17.0**.
 

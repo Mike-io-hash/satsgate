@@ -144,6 +144,8 @@ def test_usdc_pack_verifies_settles_once_and_rejects_replays(tmp_path, monkeypat
         assert body["x402"]["payTo"] == treasury.address
         assert body["x402"]["amount"] == "1000000"
         required = _header(offered, "PAYMENT-REQUIRED")
+        module.chainlink.poster = oracle_poster(96_084)
+        module.accounting_rate.reset_for_tests()
         calls, post = _poster(payer)
         _install_poster(post)
         encoded = _payload(required, payer, body["expires_at"])
