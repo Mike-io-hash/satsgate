@@ -494,6 +494,29 @@ def test_low_balance_webhook_fires_once(tmp_path, monkeypatch):
                 "SELECT COUNT(*) FROM email_outbox WHERE kind = 'balance.low'"
             ).fetchone()[0]
         assert lows == 2
+        assert mailed == 0
+        with sqlite3.connect(module.config.DB_PATH) as conn:
+            conn.execute(
+                """
+                UPDATE clients
+                SET alert_email_confirmed_at = 1, balance_msat = 250000, low_rearm = 1
+                WHERE id = ?
+                """,
+                (client_id,),
+            )
+            conn.commit()
+        apply(
+            module.config.DB_PATH,
+            client_id=client_id,
+            delta_msat=-50_000,
+            reason="paywall_verify",
+            ref="edge-5",
+            now=24,
+        )
+        with sqlite3.connect(module.config.DB_PATH) as conn:
+            mailed = conn.execute(
+                "SELECT COUNT(*) FROM email_outbox WHERE kind = 'balance.low'"
+            ).fetchone()[0]
         assert mailed == 1
 
 
@@ -560,3 +583,8 @@ def test_test_mode_issues_with_no_balance_and_no_quota(tmp_path, monkeypatch):
         assert issued.json().get("invoice") or issued.json().get("macaroon")
         after = http.get("/v1/balance", headers={"X-Api-Key": key}).json()["balance_msat"]
         assert after == before == 0
+        with sqlite3.connect(module.config.DB_PATH) as conn:
+            held = conn.execute("SELECT COUNT(*) FROM quota_reservations").fetchone()[0]
+            used = conn.execute("SELECT COALESCE(SUM(used_unlocks), 0) FROM quota_buckets").fetchone()[0]
+        assert held == 0
+        assert used == 0

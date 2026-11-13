@@ -87,10 +87,18 @@ def _bucket_used(conn: sqlite3.Connection, bucket_id: str, period: str) -> int:
     return 0 if row is None else int(row["used_unlocks"])
 
 
-def _reserved_count(conn: sqlite3.Connection, bucket_id: str, period: str) -> int:
+def _reserved_count(conn: sqlite3.Connection, bucket_id: str, period: str, now: int) -> int:
+    """Open unpaid invoices only. Expired, settled, and test-mode rows do not hold a slot."""
     row = conn.execute(
-        "SELECT COUNT(*) FROM quota_reservations WHERE bucket_id = ? AND period_utc = ?",
-        (bucket_id, period),
+        """
+        SELECT COUNT(*) FROM quota_reservations r
+        JOIN paywall_challenges c ON c.payment_hash = r.payment_hash
+        WHERE r.bucket_id = ? AND r.period_utc = ?
+          AND c.settled_at IS NULL
+          AND c.expires_at >= ?
+          AND COALESCE(c.test_mode, 0) = 0
+        """,
+        (bucket_id, period, int(now)),
     ).fetchone()
     return int(row[0]) if row else 0
 
@@ -183,7 +191,7 @@ def authorize_issue(
     period = period_utc(now)
     limit = int(config.FREE_QUOTA) if quota is None else int(quota)
     used = _bucket_used(conn, bucket, period)
-    reserved = _reserved_count(conn, bucket, period)
+    reserved = _reserved_count(conn, bucket, period, now)
     if used + reserved < limit:
         return IssueDecision(ok=True, reserved=True, fee_msat=fee_msat)
     row = conn.execute("SELECT balance_msat FROM clients WHERE id = ?", (int(client_id),)).fetchone()

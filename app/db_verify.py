@@ -71,6 +71,9 @@ def verify_once_and_spend(
         ).fetchone()
 
         if row:
+            from .quota import release_reservation
+
+            release_reservation(conn, payment_hash)
             bal = conn.execute("SELECT credits FROM clients WHERE id = ?", (int(client_id),)).fetchone()
             conn.execute("COMMIT")
             return {"charged": 0, "charged_msat": 0, "new_balance": int(bal[0]) if bal else 0}
@@ -390,6 +393,11 @@ def confirm_payment(
             if not can_fund(conn, client_id=int(client_id), fee_msat=fee, now=now, test_mode=test_mode):
                 conn.execute("ROLLBACK")
                 raise ValueError("insufficient balance")
+        from .quota import release_reservation
+
+        # Payment is in. The free slot is committed only if delivery is charged.
+        # An origin that is not 2xx never charges, so the reservation ends here.
+        release_reservation(conn, payment_hash)
         _stamp_confirmed(conn, challenge, payment_hash, now, access_cap_seconds)
         challenge = conn.execute(
             "SELECT * FROM paywall_challenges WHERE payment_hash = ?",

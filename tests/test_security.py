@@ -1222,7 +1222,7 @@ def test_topup_claim_without_preimage_is_idempotent_and_bound(client):
     assert settled.status_code == 200, settled.text
     first = settled.json()
     assert first["settled"] is True
-    assert first["credits_added"] == body["msat_credit"] // 2000
+    assert first["msat_added"] == body["msat_credit"]
     assert first["api_key"].startswith("sg_")
 
     again = client.get(
@@ -1231,7 +1231,7 @@ def test_topup_claim_without_preimage_is_idempotent_and_bound(client):
     )
     assert again.status_code == 200, again.text
     replay = again.json()
-    assert replay["credits_added"] == 0
+    assert replay["msat_added"] == 0
     assert "api_key" not in replay
     assert replay["new_balance"] == first["new_balance"]
 
@@ -1290,7 +1290,7 @@ def test_topup_claim_does_not_double_credit(client):
         thread.join(timeout=5)
 
     assert errors == []
-    assert sum(item["credits_added"] for item in results) == body["msat_credit"] // 2000
+    assert sum(item["msat_added"] for item in results) == body["msat_credit"]
     assert sum(1 for item in results if item["api_key"]) == 1
     assert results[0]["client_id"] == results[1]["client_id"]
     balance = db.get_balance(config.DB_PATH, client_id=results[0]["client_id"])
@@ -1416,7 +1416,7 @@ def test_topup_paid_after_ten_minutes_still_claims(client):
     finally:
         mainmod.time.time = original_time
     assert paid_late.status_code == 200, paid_late.text
-    assert paid_late.json()["credits_added"] == body["msat_credit"] // 2000
+    assert paid_late.json()["msat_added"] == body["msat_credit"]
     assert paid_late.json()["api_key"].startswith("sg_")
 
     # Tokens already issued with the 600s TTL: the caveat is in the past, the
@@ -1448,14 +1448,14 @@ def test_topup_paid_after_ten_minutes_still_claims(client):
         headers={"Authorization": _auth(legacy_mac, legacy_preimage)},
     )
     assert legacy_paid.status_code == 200, legacy_paid.text
-    assert legacy_paid.json()["credits_added"] == legacy_body["msat_credit"] // 2000
+    assert legacy_paid.json()["msat_added"] == legacy_body["msat_credit"]
     again = client.post(
         "/v1/topup/lightning",
         json={"sats": 1000},
         headers={"Authorization": _auth(legacy_mac, legacy_preimage)},
     )
     assert again.status_code == 200, again.text
-    assert again.json()["credits_added"] == 0
+    assert again.json()["msat_added"] == 0
     assert "api_key" not in again.json()
 
     # No payment proof: the expired macaroon does not mint credits.
@@ -1506,7 +1506,7 @@ def test_topup_paid_after_ten_minutes_still_claims(client):
 
     assert settled.status_code == 200, settled.text
     assert settled.json()["settled"] is True
-    assert settled.json()["credits_added"] == poll_body["msat_credit"] // 2000
+    assert settled.json()["msat_added"] == poll_body["msat_credit"]
     assert settled.json()["api_key"].startswith("sg_")
     assert calls["n"] == 2
 
@@ -1553,7 +1553,7 @@ def test_topup_rejects_expired_invoice_even_with_payment_proof(client):
         headers={"Authorization": _auth(grace_body["macaroon"], grace_preimage)},
     )
     assert finished.status_code == 200, finished.text
-    assert finished.json()["credits_added"] == grace_body["msat_credit"] // 2000
+    assert finished.json()["msat_added"] == grace_body["msat_credit"]
 
     # Past the window, a settled LUD-21 response is not consulted and does not credit.
     late = client.post("/v1/topup/lightning", json={"sats": 1000})

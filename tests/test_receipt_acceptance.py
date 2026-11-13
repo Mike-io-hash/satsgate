@@ -254,7 +254,7 @@ def test_live_x402_receipt_debits_once_and_settles_once(tmp_path, monkeypatch):
         )
         assert paid.status_code == 200, paid.text
         assert paid.json()["receipt"]
-        assert _credits(http, key) == before - 2000
+        assert _credits(http, key) == before - 1248
         assert sum(1 for url in calls if url.endswith("/settle")) == 1
         replay = _gate(
             http,
@@ -265,7 +265,7 @@ def test_live_x402_receipt_debits_once_and_settles_once(tmp_path, monkeypatch):
         assert replay.status_code == 200, replay.text
         assert replay.json()["receipt"] == paid.json()["receipt"]
         assert sum(1 for url in calls if url.endswith("/settle")) == 1
-        assert _credits(http, key) == before - 2000
+        assert _credits(http, key) == before - 1248
 
 
 def _ledger_count(db_path: str, client_id: int) -> int:
@@ -342,7 +342,7 @@ def test_x402_receipt_survives_an_expired_offer(tmp_path, monkeypatch):
         paid_body = paid.json()
         first = verify_receipt(paid_body["receipt"], secret=origin_secret, site="my-shop", path="/paid")
         credits_after = _credits(http, key)
-        assert credits_after == before - 2000
+        assert credits_after == before - 1248
         settles = _settle_count(calls)
         verifies = _verify_count(calls)
         ledger = _ledger_count(module.config.DB_PATH, client_id)

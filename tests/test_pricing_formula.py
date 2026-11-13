@@ -168,13 +168,15 @@ def test_t_5_2_15_each_live_debit_path_uses_the_formula(tmp_path: Path, monkeypa
     assert _deltas(path, client_id) == [-1_000, -1_000, -1_000]
 
 
-def test_t_5_2_17_missing_rate_refuses_a_usdc_fee_when_the_quota_is_gone() -> None:
-    from app.charging import strict_usdc_issue
+def test_t_5_2_17_is_the_http_challenge_not_a_helper() -> None:
+    """T-5.2.17 is test_usdc_fee_is_refused_on_the_challenge_when_the_rate_is_missing."""
+    from pathlib import Path
 
-    with pytest.raises(ValueError, match="rate_unavailable"):
-        strict_usdc_issue(rate=None, quota_remaining=0)
-    assert strict_usdc_issue(rate=None, quota_remaining=3) == 0
-    assert strict_usdc_issue(rate=object(), quota_remaining=0) == "priced"
+    root = Path(__file__).resolve().parents[1]
+    body = (root / "tests" / "test_pricing_finish.py").read_text(encoding="utf-8")
+    assert "rate_unavailable" in body
+    charging = (root / "app" / "charging.py").read_text(encoding="utf-8")
+    assert "def strict_usdc_issue" not in charging
 
 
 def test_t_5_3_1_free_then_paid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

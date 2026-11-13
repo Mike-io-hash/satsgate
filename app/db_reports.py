@@ -19,7 +19,7 @@ def list_ledger(
     limit = max(1, min(int(limit), 200))
 
     sql = (
-        "SELECT l.id, l.delta_credits, l.reason, l.ref, l.created_at, "
+        "SELECT l.id, l.delta_credits, l.delta_msat, l.reason, l.ref, l.created_at, "
         "l.api_key_id, l.resource, l.network, l.amount_usd_atomic, "
         "k.label AS api_key_label, k.key_prefix AS api_key_prefix "
         "FROM ledger l "
@@ -46,6 +46,7 @@ def list_ledger(
             {
                 "id": int(r["id"]),
                 "delta_credits": int(r["delta_credits"]),
+                "delta_msat": int(r["delta_msat"] or 0),
                 "reason": r["reason"],
                 "ref": r["ref"],
                 "created_at": ts,
@@ -260,20 +261,21 @@ def usage_forecast(
     db_path: str,
     *,
     client_id: int,
-    current_balance_credits: int,
+    current_balance_msat: int | None = None,
+    current_balance_credits: int | None = None,
     lookback_hours: int = 24,
     now_ts: int | None = None,
 ) -> dict:
-    """Simple forecast: when will you run out of credits if you keep the same pace?
+    """Runway in milisatoshis. The same unit is on both sides of the rate.
 
-    - Based on consumption over the `lookback_hours` window.
-    - Primarily uses `paywall_verify` (represents real product usage).
-
-    Returns `estimated_depletion_ts` when there is enough data.
+    ``current_balance_credits`` is accepted only so an old caller does not crash.
+    It is not returned and it is not used as the balance.
     """
 
     lookback_hours = max(1, min(int(lookback_hours), 24 * 30))
-    current_balance_credits = max(0, int(current_balance_credits))
+    if current_balance_msat is None:
+        current_balance_msat = 0 if current_balance_credits is None else int(current_balance_credits)
+    current_balance_msat = max(0, int(current_balance_msat))
 
     if now_ts is None:
         now_dt = datetime.now(timezone.utc)
@@ -288,10 +290,10 @@ def usage_forecast(
         row = conn.execute(
             """
             SELECT
-              COALESCE(SUM(CASE WHEN reason = 'paywall_verify' AND delta_credits < 0 THEN -delta_credits ELSE 0 END), 0) AS verify_credits_out,
-              COALESCE(SUM(CASE WHEN delta_credits < 0 THEN -delta_credits ELSE 0 END), 0) AS total_credits_out,
+              COALESCE(SUM(CASE WHEN reason = 'paywall_verify' AND delta_msat < 0 THEN -delta_msat ELSE 0 END), 0) AS verify_msat_out,
+              COALESCE(SUM(CASE WHEN delta_msat < 0 THEN -delta_msat ELSE 0 END), 0) AS total_msat_out,
               COALESCE(SUM(CASE WHEN reason = 'paywall_verify' THEN 1 ELSE 0 END), 0) AS verify_events,
-              COALESCE(SUM(CASE WHEN delta_credits < 0 THEN 1 ELSE 0 END), 0) AS spend_events,
+              COALESCE(SUM(CASE WHEN delta_msat < 0 THEN 1 ELSE 0 END), 0) AS spend_events,
               MAX(CASE WHEN reason = 'paywall_verify' THEN created_at ELSE NULL END) AS last_verify_at
             FROM ledger
             WHERE client_id = ? AND created_at >= ?
@@ -299,27 +301,26 @@ def usage_forecast(
             (int(client_id), since_ts),
         ).fetchone()
 
-    verify_credits_out = int(row["verify_credits_out"])
-    total_credits_out = int(row["total_credits_out"])
+    verify_msat_out = int(row["verify_msat_out"])
+    total_msat_out = int(row["total_msat_out"])
     verify_events = int(row["verify_events"])
     spend_events = int(row["spend_events"])
 
     last_verify_at = row["last_verify_at"]
     last_verify_ts = int(last_verify_at) if last_verify_at is not None else None
 
-    # rates
-    verify_rate_credits_per_hour = verify_credits_out / float(lookback_hours)
+    verify_rate_msat_per_hour = verify_msat_out / float(lookback_hours)
     verify_rate_verifies_per_hour = verify_events / float(lookback_hours)
 
-    avg_credits_per_verify: float | None = None
+    avg_msat_per_verify: float | None = None
     if verify_events > 0:
-        avg_credits_per_verify = verify_credits_out / float(verify_events)
+        avg_msat_per_verify = verify_msat_out / float(verify_events)
 
     estimated_hours_remaining: float | None = None
     estimated_depletion_ts: int | None = None
 
-    if verify_rate_credits_per_hour > 0:
-        estimated_hours_remaining = current_balance_credits / verify_rate_credits_per_hour
+    if verify_rate_msat_per_hour > 0:
+        estimated_hours_remaining = current_balance_msat / verify_rate_msat_per_hour
         estimated_depletion_ts = int(now_ts + (estimated_hours_remaining * 3600))
 
     if verify_events == 0:
@@ -329,7 +330,7 @@ def usage_forecast(
     else:
         status = "ok"
 
-    verify_rate_credits_per_day = verify_rate_credits_per_hour * 24.0
+    verify_rate_msat_per_day = verify_rate_msat_per_hour * 24.0
     verify_rate_verifies_per_day = verify_rate_verifies_per_hour * 24.0
 
     estimated_days_remaining: float | None = None
@@ -344,14 +345,14 @@ def usage_forecast(
         "since_ts": since_ts,
         "since_iso": _iso(since_ts),
         "lookback_hours": lookback_hours,
-        "current_balance_credits": current_balance_credits,
+        "current_balance_msat": current_balance_msat,
         "verify_events": verify_events,
-        "verify_credits_out": verify_credits_out,
-        "total_credits_out": total_credits_out,
+        "verify_msat_out": verify_msat_out,
+        "total_msat_out": total_msat_out,
         "spend_events": spend_events,
-        "avg_credits_per_verify": avg_credits_per_verify,
-        "verify_rate_credits_per_hour": verify_rate_credits_per_hour,
-        "verify_rate_credits_per_day": verify_rate_credits_per_day,
+        "avg_msat_per_verify": avg_msat_per_verify,
+        "verify_rate_msat_per_hour": verify_rate_msat_per_hour,
+        "verify_rate_msat_per_day": verify_rate_msat_per_day,
         "verify_rate_verifies_per_hour": verify_rate_verifies_per_hour,
         "verify_rate_verifies_per_day": verify_rate_verifies_per_day,
         "estimated_hours_remaining": estimated_hours_remaining,

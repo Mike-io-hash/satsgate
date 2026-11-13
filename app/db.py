@@ -794,6 +794,28 @@ def add_topup(
             """,
             (invoice_cutoff, cap_cutoff, now - 86_400),
         )
+        from .signup import release_signup
+
+        doomed = conn.execute(
+            """
+            SELECT requester_ip, created_at FROM topups
+            WHERE status = 'pending' AND client_id IS NULL
+              AND (
+                (
+                  expires_at IS NOT NULL
+                  AND (expires_at < ? OR created_at < ?)
+                )
+                OR (expires_at IS NULL AND created_at < ?)
+              )
+            """,
+            (invoice_cutoff, cap_cutoff, now - 86_400),
+        ).fetchall()
+        for old in doomed:
+            release_signup(
+                conn,
+                ip=str(old["requester_ip"] or "") or None,
+                now=int(old["created_at"]),
+            )
         if requester_ip:
             pending = conn.execute(
                 "SELECT COUNT(*) FROM topups WHERE status = 'pending' AND requester_ip = ?",
@@ -902,9 +924,8 @@ def settle_topup_and_credit(
         elif client_id is not None:
             target_id = int(client_id)
         else:
-            from .signup import consume_signup
-
-            consume_signup(conn, ip=str(topup["requester_ip"] or "") or None, now=now)
+            # The slot was reserved when the invoice was inserted. A paid invoice
+            # always opens the account. It is not refused here.
             api_key, target_id = _insert_client(conn, now)
 
         conn.execute(
@@ -1498,6 +1519,12 @@ def add_paywall_challenge(
               )
             """,
             (invoice_cutoff, cap_cutoff, retain_after),
+        )
+        conn.execute(
+            """
+            DELETE FROM quota_reservations
+            WHERE payment_hash NOT IN (SELECT payment_hash FROM paywall_challenges)
+            """
         )
         try:
             enforce_challenge_capacity(

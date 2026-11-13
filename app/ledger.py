@@ -27,9 +27,12 @@ def _notify(conn: sqlite3.Connection, *, client_id: int, kind: str, balance_msat
     from . import quota
     from .security_events import queue
 
-    row = conn.execute("SELECT alert_email FROM clients WHERE id = ?", (int(client_id),)).fetchone()
+    row = conn.execute(
+        "SELECT alert_email, alert_email_confirmed_at FROM clients WHERE id = ?",
+        (int(client_id),),
+    ).fetchone()
     email = None
-    if row is not None and row["alert_email"]:
+    if row is not None and row["alert_email"] and row["alert_email_confirmed_at"]:
         email = str(row["alert_email"])
     remaining = quota.free_remaining(conn, client_id, now)
     data = {

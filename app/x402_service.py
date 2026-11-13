@@ -198,9 +198,32 @@ def issue_offer(
             **_store_kwargs(plan, pay_to=pay_to, requirements=requirements),
         )
         reused = False
+        _lock_usdc_fee(existing, now=now)
     else:
         reused = True
     return x402_view(existing, resource_url=url, reused=reused, resource=resource, description=description)
+
+
+def _lock_usdc_fee(offer: dict, *, now: int) -> None:
+    """Store the USDC Satsgate fee from the accounting rate at issue. Settle debits this."""
+    atomic = offer.get("amount_usd_atomic")
+    if not atomic:
+        return
+    from .accounting_rate import accounting_rate
+    from .charging import usdc_item_fee
+    from .pricing import item_msat_from_usd
+
+    snap = accounting_rate(now=now)
+    if snap is None:
+        return
+    item = item_msat_from_usd(int(atomic), int(snap.rate_num), int(snap.rate_den))
+    fee = usdc_item_fee(item, rate_num=int(snap.rate_num), rate_den=int(snap.rate_den))
+    with db_x402._connect(config.DB_PATH) as conn:
+        conn.execute(
+            "UPDATE payment_offers SET satsgate_fee_msat = ? WHERE id = ?",
+            (int(fee), offer["id"]),
+        )
+    offer["satsgate_fee_msat"] = int(fee)
 
 
 def _bind(encoded: str, *, client_id: int, resource: str, resource_url: str) -> tuple[dict, dict, dict]:

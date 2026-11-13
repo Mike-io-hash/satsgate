@@ -232,14 +232,14 @@ def internal_challenge(
     test_mode = str(site.get("x402_mode") or "") == "test"
     if not test_mode and plan.get("price_currency") == "usd":
         from .accounting_rate import accounting_rate
-        from .charging import strict_usdc_issue
         from .quota import free_remaining
 
         now = int(time.time())
         with core.db._connect(config.DB_PATH) as conn:
             free = free_remaining(conn, client.id, now)
         try:
-            strict_usdc_issue(rate=accounting_rate(now=now), quota_remaining=free)
+            if free <= 0 and accounting_rate(now=now) is None:
+                raise ValueError("rate_unavailable")
         except ValueError as exc:
             if str(exc) == "rate_unavailable":
                 return JSONResponse(

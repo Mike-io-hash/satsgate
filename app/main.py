@@ -500,6 +500,13 @@ def _balance_fields(client: db.Client) -> dict:
         free = quota.free_remaining(conn, client.id, now)
         resets, local = quota.reset_displays(now)
     estimate = estimate_unlocks(int(client.balance_msat), free)
+    from . import db_reports
+
+    forecast = db_reports.usage_forecast(
+        config.DB_PATH,
+        client_id=client.id,
+        current_balance_msat=int(client.balance_msat),
+    )
     fields = {
         "balance_msat": int(client.balance_msat),
         "balance_sats": balance_sats_text(int(client.balance_msat)),
@@ -515,6 +522,7 @@ def _balance_fields(client: db.Client) -> dict:
         free_remaining=free,
         resets_at=resets,
         resets_local=local,
+        forecast=forecast,
     )
     if tip is not None:
         fields["advice"] = tip
@@ -675,7 +683,7 @@ def v1_usage_forecast(
     forecast = db_reports.usage_forecast(
         config.DB_PATH,
         client_id=client.id,
-        current_balance_credits=int(client.balance_msat),
+        current_balance_msat=int(client.balance_msat),
         lookback_hours=lookback_hours,
     )
     public = dict(forecast)
@@ -1710,13 +1718,19 @@ def _lud21_state(*, verify_url: str, payment_hash: str, preimage_hex: str | None
 
 
 def _topup_success_body(*, plan: dict | None, payment_hash: str, res: dict) -> dict:
+    from .pricing import balance_sats_text
+
+    balance = int(res.get("balance_msat") if res.get("balance_msat") is not None else res["new_balance"])
+    # new_balance is an alias of balance_msat. credits_added is not a balance field.
     out = {
         "ok": True,
         "status": "settled",
         "settled": True,
         "payment_hash": payment_hash,
-        "credits_added": res["credits_added"],
-        "new_balance": res["new_balance"],
+        "msat_added": int(res.get("msat_added") or 0),
+        "balance_msat": balance,
+        "balance_sats": balance_sats_text(balance),
+        "new_balance": balance,
         "client_id": res["client_id"],
     }
     if plan is not None:
@@ -1898,20 +1912,11 @@ def _claim_topup(
         # Created inside the settlement transaction so two claims cannot mint two keys.
         credit_client_id = None
 
-    from .signup import SignupLimited
-
-    try:
-        res = db.settle_topup_and_credit(
-            config.DB_PATH,
-            payment_hash=payment_hash,
-            client_id=credit_client_id,
-        )
-    except SignupLimited as exc:
-        return JSONResponse(
-            status_code=429,
-            headers={"Retry-After": str(exc.retry_after)},
-            content={"ok": False, "error": exc.code, "retry_after_seconds": exc.retry_after},
-        )
+    res = db.settle_topup_and_credit(
+        config.DB_PATH,
+        payment_hash=payment_hash,
+        client_id=credit_client_id,
+    )
     return _topup_success_body(plan=plan, payment_hash=payment_hash, res=res)
 
 
@@ -2125,12 +2130,15 @@ def v1_topup_lightning(
     blocked = _geoblock_quote(request)
     if blocked is not None:
         return blocked
+    signup_ip = _peer_ip(request) or None
+    signup_at = int(time.time())
+    reserved_signup = False
     if client is None:
-        from .signup import SignupLimited, room_for_signup
+        from .signup import SignupLimited, reserve_signup_slot
 
         try:
-            with db._connect(config.DB_PATH) as conn:
-                room_for_signup(conn, ip=_peer_ip(request) or None, now=int(time.time()))
+            reserve_signup_slot(config.DB_PATH, ip=signup_ip, now=signup_at)
+            reserved_signup = True
         except SignupLimited as exc:
             return JSONResponse(
                 status_code=429,
@@ -2145,6 +2153,10 @@ def v1_topup_lightning(
             min_expiry_seconds=config.TOKEN_TTL_SECONDS,
         )
     except (ssrf.SSRFError, InvoiceValidationError, LnurlError, ValueError) as exc:
+        if reserved_signup:
+            from .signup import release_signup_slot
+
+            release_signup_slot(config.DB_PATH, ip=signup_ip, now=signup_at)
         return _upstream_error(exc)
     created_at = int(time.time())
     invoice_expires_at = getattr(inv, "expires_at", None)
@@ -2166,6 +2178,10 @@ def v1_topup_lightning(
             claim_cap_seconds=config.TOPUP_TOKEN_TTL_CAP_SECONDS,
         )
     except ValueError as exc:
+        if reserved_signup:
+            from .signup import release_signup_slot
+
+            release_signup_slot(config.DB_PATH, ip=signup_ip, now=signup_at)
         if str(exc) == "too_many_pending_topups":
             return JSONResponse(status_code=429, content={"ok": False, "error": "too_many_pending_topups"})
         return JSONResponse(status_code=500, content={"ok": False, "error": "db_error"})

@@ -119,6 +119,16 @@ def test_t_5_11_and_12_terms_and_headline() -> None:
     readme = (root / "README.md").read_text(encoding="utf-8")
     assert "Cobrale a agentes de IA en Lightning y USDC, en el mismo 402. La plata va directo a tu billetera. 500 cobros gratis por mes." in readme
     assert "anónimo" not in readme.lower()
+    quick = (root / "CUSTOMER_QUICKSTART.md").read_text(encoding="utf-8")
+    import re
+
+    banned = re.compile(r"\b(trial|starter|growth|scale|hyper|mega)\b", re.I)
+    for label, text in (("README", readme), ("CUSTOMER_QUICKSTART", quick)):
+        assert banned.search(text) is None, label
+        lowered_doc = text.lower()
+        assert "1 credit = 1 unlock" not in lowered_doc
+        assert "spends **1 credit**" not in lowered_doc
+        assert "spends 1 credit" not in lowered_doc
 
 
 def test_t_5_5_buyer_quote_ignores_coingecko(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -78,7 +78,8 @@ def test_usdc_topup_disabled_leaves_lightning_alone(tmp_path, monkeypatch):
         preimage = http.get(f"/dev/mock/pay/{body['payment_hash']}").json()["preimage"]
         settled = http.post("/v1/topup/lightning", json={"sats": 1000}, headers={"Authorization": _auth(body["macaroon"], preimage)})
         assert settled.status_code == 200, settled.text
-        assert settled.json()["credits_added"] == 500
+        assert settled.json()["msat_added"] == 1_000_000
+        assert "credits_added" not in settled.json()
 
 
 def test_invalid_treasury_disables_the_rail(tmp_path, monkeypatch):

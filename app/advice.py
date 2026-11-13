@@ -56,6 +56,7 @@ def balance_advice(
     resets_at: str,
     resets_local: str,
     cannot_cover_fee: bool = False,
+    forecast: dict | None = None,
 ) -> dict | None:
     """Low or zero status. Repeats on responses; it is not the edge event."""
     balance_msat = int(balance_msat)
@@ -96,7 +97,7 @@ def balance_advice(
         "quota_resets_at": resets_at,
         "quota_resets_at_local": resets_local,
         **estimate,
-        "forecast": {"status": "insufficient_data"},
+        "forecast": forecast if forecast is not None else {"status": "insufficient_data"},
         "actions": [
             {"action": "topup_lightning", "url": "/v1/topup/lightning"},
             {"action": "topup_usdc", "url": "/v1/topup/usdc"},

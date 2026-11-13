@@ -85,19 +85,5 @@ def fee_from_offer(offer) -> tuple[int, bool]:
     return int(config.FEE_MSAT), False
 
 
-def strict_usdc_issue(*, rate: object | None, quota_remaining: int) -> int | str:
-    """Refuse a new USDC fee when the quota is gone and no accounting rate is locked.
-
-    A remaining free slot does not need the rate (the unlock is free). A present
-    rate means the caller can price the fee. The return is only a signal for tests;
-    callers that need the milisat amount compute it themselves.
-    """
-    if quota_remaining <= 0 and rate is None:
-        raise ValueError("rate_unavailable")
-    if rate is None:
-        return 0
-    return "priced"
-
-
 def standard_fee() -> int:
     return int(config.FEE_MSAT)

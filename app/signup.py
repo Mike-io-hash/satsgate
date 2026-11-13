@@ -64,6 +64,46 @@ def room_for_signup(conn, *, ip: str | None, now: int) -> None:
         raise SignupLimited("signup_global_limit", retry)
 
 
+def release_signup(conn, *, ip: str | None, now: int) -> None:
+    """Give back a slot reserved for an invoice that was never settled."""
+    day = utc_day(int(now))
+    if ip:
+        conn.execute(
+            """
+            UPDATE signup_daily SET n = CASE WHEN n > 0 THEN n - 1 ELSE 0 END
+            WHERE scope = ? AND day_utc = ?
+            """,
+            (f"ip:{ip}", day),
+        )
+    conn.execute(
+        """
+        UPDATE signup_daily SET n = CASE WHEN n > 0 THEN n - 1 ELSE 0 END
+        WHERE scope = 'global' AND day_utc = ?
+        """,
+        (day,),
+    )
+
+
+def reserve_signup_slot(db_path: str, *, ip: str | None, now: int | None = None) -> None:
+    """Take one signup slot before an invoice is minted. Rolls back when the cap is full."""
+    now = current_time() if now is None else int(now)
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            consume_signup(conn, ip=ip, now=now)
+        except SignupLimited:
+            conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
+
+
+def release_signup_slot(db_path: str, *, ip: str | None, now: int) -> None:
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        release_signup(conn, ip=ip, now=int(now))
+        conn.execute("COMMIT")
+
+
 def consume_signup(conn, *, ip: str | None, now: int) -> None:
     """Count one new account. Caller holds the write transaction and rolls it back on error."""
     day = utc_day(now)
