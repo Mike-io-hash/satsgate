@@ -547,6 +547,143 @@ def _migrate_webhooks(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_webhook_outbox_client ON webhook_outbox(client_id, generation, id)"
     )
+    _migrate_pricing(conn)
+
+
+def _add_column(conn: sqlite3.Connection, table: str, name: str, ddl: str) -> None:
+    cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if name not in cols:
+        conn.execute(ddl)
+
+
+def _migrate_pricing(conn: sqlite3.Connection) -> None:
+    """Milisat balance, quota, and the conversion meta row. Existing credits stay put.
+
+    Startup does not convert credits. ``migrate_credits_to_msat`` does that, on
+    a copy first, and only against the database path it is given. New writes
+    use ``balance_msat`` / ``delta_msat``. ``credits`` remains so an unconverted
+    database can still be read by the tool.
+    """
+    _add_column(
+        conn,
+        "clients",
+        "balance_msat",
+        "ALTER TABLE clients ADD COLUMN balance_msat INTEGER NOT NULL DEFAULT 0 CHECK (balance_msat >= 0)",
+    )
+    _add_column(conn, "clients", "low_notified_at", "ALTER TABLE clients ADD COLUMN low_notified_at INTEGER")
+    _add_column(conn, "clients", "zero_notified_at", "ALTER TABLE clients ADD COLUMN zero_notified_at INTEGER")
+    _add_column(
+        conn,
+        "clients",
+        "low_rearm",
+        "ALTER TABLE clients ADD COLUMN low_rearm INTEGER NOT NULL DEFAULT 1",
+    )
+    _add_column(
+        conn,
+        "clients",
+        "zero_rearm",
+        "ALTER TABLE clients ADD COLUMN zero_rearm INTEGER NOT NULL DEFAULT 1",
+    )
+    _add_column(
+        conn,
+        "ledger",
+        "delta_msat",
+        "ALTER TABLE ledger ADD COLUMN delta_msat INTEGER NOT NULL DEFAULT 0",
+    )
+    for name, ddl in (
+        ("bonus_bps", "ALTER TABLE topups ADD COLUMN bonus_bps INTEGER"),
+        ("rate_source", "ALTER TABLE topups ADD COLUMN rate_source TEXT"),
+        ("rate_value", "ALTER TABLE topups ADD COLUMN rate_value TEXT"),
+        ("rate_as_of", "ALTER TABLE topups ADD COLUMN rate_as_of INTEGER"),
+        ("delta_msat", "ALTER TABLE topups ADD COLUMN delta_msat INTEGER"),
+        ("rate_num", "ALTER TABLE topups ADD COLUMN rate_num INTEGER"),
+        ("rate_den", "ALTER TABLE topups ADD COLUMN rate_den INTEGER"),
+    ):
+        _add_column(conn, "topups", name, ddl)
+    for name, ddl in (
+        ("satsgate_fee_msat", "ALTER TABLE paywall_challenges ADD COLUMN satsgate_fee_msat INTEGER"),
+        ("fee_rail", "ALTER TABLE paywall_challenges ADD COLUMN fee_rail TEXT"),
+        ("accounting_source", "ALTER TABLE paywall_challenges ADD COLUMN accounting_source TEXT"),
+        ("accounting_rate_num", "ALTER TABLE paywall_challenges ADD COLUMN accounting_rate_num INTEGER"),
+        ("accounting_rate_den", "ALTER TABLE paywall_challenges ADD COLUMN accounting_rate_den INTEGER"),
+        ("accounting_as_of", "ALTER TABLE paywall_challenges ADD COLUMN accounting_as_of INTEGER"),
+        (
+            "quota_reserved",
+            "ALTER TABLE paywall_challenges ADD COLUMN quota_reserved INTEGER NOT NULL DEFAULT 0",
+        ),
+        ("test_mode", "ALTER TABLE paywall_challenges ADD COLUMN test_mode INTEGER NOT NULL DEFAULT 0"),
+    ):
+        _add_column(conn, "paywall_challenges", name, ddl)
+    offer_cols = {row["name"] for row in conn.execute("PRAGMA table_info(payment_offers)").fetchall()}
+    if offer_cols:
+        for name, ddl in (
+            ("satsgate_fee_msat", "ALTER TABLE payment_offers ADD COLUMN satsgate_fee_msat INTEGER"),
+            ("grant_msat", "ALTER TABLE payment_offers ADD COLUMN grant_msat INTEGER"),
+            ("accounting_source", "ALTER TABLE payment_offers ADD COLUMN accounting_source TEXT"),
+        ):
+            _add_column(conn, "payment_offers", name, ddl)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS quota_buckets (
+          bucket_id TEXT NOT NULL,
+          period_utc TEXT NOT NULL,
+          used_unlocks INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (bucket_id, period_utc)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS client_quota (
+          client_id INTEGER NOT NULL,
+          period_utc TEXT NOT NULL,
+          bucket_id TEXT NOT NULL,
+          used_unlocks INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (client_id, period_utc)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS quota_reservations (
+          payment_hash TEXT PRIMARY KEY,
+          client_id INTEGER NOT NULL,
+          bucket_id TEXT NOT NULL,
+          period_utc TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS signup_daily (
+          scope TEXT NOT NULL,
+          day_utc TEXT NOT NULL,
+          n INTEGER NOT NULL,
+          PRIMARY KEY (scope, day_utc)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS credit_migration (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          factor INTEGER NOT NULL,
+          ran_at INTEGER,
+          checksum TEXT,
+          completed INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          name TEXT PRIMARY KEY,
+          applied_at INTEGER NOT NULL,
+          detail_json TEXT
+        )
+        """
+    )
 
 
 def hash_api_key(api_key: str) -> str:

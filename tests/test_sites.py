@@ -284,11 +284,38 @@ def test_migration_adds_tables_and_leaves_a_realistic_database(tmp_path, monkeyp
         "suspended_at",
         "suspend_reason",
         "payee_flagged_at",
+        "balance_msat",
+        "low_notified_at",
+        "zero_notified_at",
+        "low_rearm",
+        "zero_rearm",
     ]
     expected = dict(before)
     expected["clients"] = before["clients"] + payee_columns
-    expected["ledger"] = before["ledger"] + ["network", "amount_usd_atomic"]
-    expected["topups"] = before["topups"] + ["rail", "tx_hash", "amount_usd_atomic", "network"]
+    expected["ledger"] = before["ledger"] + ["network", "amount_usd_atomic", "delta_msat"]
+    expected["topups"] = before["topups"] + [
+        "rail",
+        "tx_hash",
+        "amount_usd_atomic",
+        "network",
+        "bonus_bps",
+        "rate_source",
+        "rate_value",
+        "rate_as_of",
+        "delta_msat",
+        "rate_num",
+        "rate_den",
+    ]
+    expected["paywall_challenges"] = before["paywall_challenges"] + [
+        "satsgate_fee_msat",
+        "fee_rail",
+        "accounting_source",
+        "accounting_rate_num",
+        "accounting_rate_den",
+        "accounting_as_of",
+        "quota_reserved",
+        "test_mode",
+    ]
     assert after == expected
     assert {"sites", "site_routes", "payment_offers", "x402_authorizations"} <= tables
     assert credits == 42
