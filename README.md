@@ -2,7 +2,9 @@
 
 [![CI](https://github.com/Mike-io-hash/satsgate/actions/workflows/ci.yml/badge.svg)](https://github.com/Mike-io-hash/satsgate/actions/workflows/ci.yml)
 
-`satsgate` lets you **charge sats** for AI agents, APIs, and web apps — without building a payment stack.
+**Cobrale a agentes de IA en Lightning y USDC, en el mismo 402. La plata va directo a tu billetera. 500 cobros gratis por mes.**
+
+`satsgate` lets you charge AI agents, APIs, and web apps in Lightning and USDC on the same 402. Open an account without paying. Test mode is free. Live use includes 500 free unlocks per UTC month, then 2 sats per unlock with a 10% cap.
 
 The merchant flow from a cold start:
 

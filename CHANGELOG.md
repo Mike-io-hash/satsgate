@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Core **0.20.0**, hosted gate **0.15.2**, Python SDK **0.7.0**, self-hosted proxy **0.14.0**, satsgate-mcp **0.12.0**. The connect page stays **0.17.0**.
+
+### Breaking
+- Prepaid balance moves from credits to milisatoshis. `GET /v1/balance` and `GET /v1/client` add `balance_msat`, `balance_sats`, and `estimated_unlocks_remaining` (with `free_unlocks_remaining` and `paid_unlocks_estimate`). The legacy `credits` integer is still present in this draft and is not the source of truth.
+- Credit packs are retired. `GET /v1/topup/{trial,starter,growth,scale,hyper,mega}` and the matching `/x402` URLs return `410` `packs_retired`. Top up with `POST /v1/topup/lightning` and an amount of sats.
+- `GET /v1/plans` describes model B. It is no longer a Trial–Mega catalogue.
+- `cost_credits`, if sent, is accepted and ignored. The live debit is the formula (2 sats, 10% cap, USDC floor), after the monthly free quota. A caller that sent a value other than 1 no longer buys that many unlocks.
+
+### Added
+- 500 free successful live unlocks per UTC month, shared by accounts that pay out to the same Lightning Address or the same verified EVM address. Prepaid is charged only after that quota. The fee is locked when the challenge is issued.
+- A conversion tool, `python -m app.migrate_credits_to_msat`, turns existing credits into 2,000 msat each. It does not open a database it was not given. Production apply is a later step and needs a separate OK.
+- Accounting BTC rate (CoinGecko, with the buyer median as backup) for Satsgate's own USDC math. Buyer 402 quotes still use the Bitstamp, Coinbase, and Kraken median only.
+- Webhook kinds `balance.low` and `balance.zero`.
+
+### Changed
+- Hosted gate stays **0.15.2**. A buyer who cannot be offered a challenge still receives `502` `paywall_unavailable`. The gate did not need a new error string.
+- SDK stays **0.7.0**. It still sends `cost_credits`, which core ignores, and still reads `charged_credits` (1 when a prepaid debit happened, 0 otherwise).
+- MCP stays **0.12.0** in this draft. The public tool schema has not yet been switched off the old `credits` field.
+- Terms text in `docs/hosted-gate-terms.md` is model B, without a draft banner. `SATSGATE_TERMS_VERSION` is still set at deploy.
+
+The paragraphs below are the 0.19.1 notes.
+
 Core **0.19.1**, hosted gate **0.15.2**, Python SDK **0.7.0**, self-hosted proxy **0.14.0**, satsgate-mcp **0.12.0**. The connect page stays **0.17.0**.
 
 ### Added

@@ -13,6 +13,7 @@ class Client:
     id: int
     credits: int
     payee_lightning_address: str | None = None
+    balance_msat: int = 0
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -717,7 +718,7 @@ def create_client(db_path: str) -> tuple[str, Client]:
 def get_client_by_id(db_path: str, client_id: int) -> Client | None:
     with _connect(db_path) as conn:
         row = conn.execute(
-            "SELECT id, credits, payee_lightning_address FROM clients WHERE id = ?",
+            "SELECT id, credits, balance_msat, payee_lightning_address FROM clients WHERE id = ?",
             (int(client_id),),
         ).fetchone()
         if not row:
@@ -726,6 +727,7 @@ def get_client_by_id(db_path: str, client_id: int) -> Client | None:
             id=int(row["id"]),
             credits=int(row["credits"]),
             payee_lightning_address=row["payee_lightning_address"],
+            balance_msat=int(row["balance_msat"] or 0),
         )
 
 
@@ -735,7 +737,7 @@ def get_client_by_api_key(db_path: str, api_key: str) -> Client | None:
     h = hash_api_key(api_key)
     with _connect(db_path) as conn:
         row = conn.execute(
-            "SELECT id, credits, payee_lightning_address FROM clients WHERE api_key_hash = ?",
+            "SELECT id, credits, balance_msat, payee_lightning_address FROM clients WHERE api_key_hash = ?",
             (h,),
         ).fetchone()
         if not row:
@@ -744,6 +746,7 @@ def get_client_by_api_key(db_path: str, api_key: str) -> Client | None:
             id=int(row["id"]),
             credits=int(row["credits"]),
             payee_lightning_address=row["payee_lightning_address"],
+            balance_msat=int(row["balance_msat"] or 0),
         )
 
 

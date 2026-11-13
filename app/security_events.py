@@ -19,6 +19,8 @@ WEBHOOK_KINDS = frozenset(
         "alert_email_removed",
         "account_key_rotated",
         "webhook_test",
+        "balance.low",
+        "balance.zero",
     }
 )
 

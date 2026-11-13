@@ -96,6 +96,31 @@ def test_t_5_4_3_bonus_boundaries() -> None:
     assert credit_msat_for_principal(50_000) == 50_000_000
 
 
+def test_t_5_11_and_12_terms_and_headline() -> None:
+    root = Path(__file__).resolve().parents[1]
+    terms = (root / "docs" / "hosted-gate-terms.md").read_text(encoding="utf-8")
+    lowered = terms.lower()
+    assert "draft" not in lowered
+    for phrase in (
+        "not money",
+        "not redeemable",
+        "credit to the prepaid balance",
+        "500 free",
+        "does not expire",
+        "00:00:00 utc",
+        "does not take custody",
+        "cuba",
+        "iran",
+        "north korea",
+        "24 hours",
+        "origin failed after a receipt",
+    ):
+        assert phrase in lowered, phrase
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    assert "Cobrale a agentes de IA en Lightning y USDC, en el mismo 402. La plata va directo a tu billetera. 500 cobros gratis por mes." in readme
+    assert "anónimo" not in readme.lower()
+
+
 def test_t_5_5_buyer_quote_ignores_coingecko(monkeypatch: pytest.MonkeyPatch) -> None:
     from app import rates
     from app.rates import Rate

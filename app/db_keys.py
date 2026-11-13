@@ -117,6 +117,7 @@ def _principal_from_restricted(row) -> Principal:
             id=int(row["client_id"]),
             credits=int(row["credits"]),
             payee_lightning_address=row["payee_lightning_address"],
+            balance_msat=int(row["balance_msat"] or 0),
         ),
         api_key_id=int(row["id"]),
         scope=str(row["scope"]),
@@ -130,7 +131,7 @@ def _lookup_restricted(conn, key_hash: str):
         """
         SELECT
           k.id, k.client_id, k.label, k.scope, k.resource_prefix, k.revoked_at, k.last_used_at,
-          c.credits, c.payee_lightning_address
+          c.credits, c.balance_msat, c.payee_lightning_address
         FROM api_keys k
         JOIN clients c ON c.id = k.client_id
         WHERE k.key_hash = ?
@@ -158,7 +159,7 @@ def client_for_rate_limit(db_path: str, api_key: str) -> Client | None:
     with _connect(db_path) as conn:
         if kind == "account":
             row = conn.execute(
-                "SELECT id, credits, payee_lightning_address FROM clients WHERE api_key_hash = ?",
+                "SELECT id, credits, balance_msat, payee_lightning_address FROM clients WHERE api_key_hash = ?",
                 (key_hash,),
             ).fetchone()
             if not row:
@@ -167,6 +168,7 @@ def client_for_rate_limit(db_path: str, api_key: str) -> Client | None:
                 id=int(row["id"]),
                 credits=int(row["credits"]),
                 payee_lightning_address=row["payee_lightning_address"],
+                balance_msat=int(row["balance_msat"] or 0),
             )
         if kind == "restricted":
             row = _lookup_restricted(conn, key_hash)
@@ -186,7 +188,7 @@ def authenticate(db_path: str, api_key: str) -> Principal:
     with _connect(db_path) as conn:
         if kind == "account":
             row = conn.execute(
-                "SELECT id, credits, payee_lightning_address FROM clients WHERE api_key_hash = ?",
+                "SELECT id, credits, balance_msat, payee_lightning_address FROM clients WHERE api_key_hash = ?",
                 (key_hash,),
             ).fetchone()
             if not row:
@@ -196,6 +198,7 @@ def authenticate(db_path: str, api_key: str) -> Principal:
                     id=int(row["id"]),
                     credits=int(row["credits"]),
                     payee_lightning_address=row["payee_lightning_address"],
+                    balance_msat=int(row["balance_msat"] or 0),
                 ),
                 api_key_id=None,
                 scope=SCOPE_ACCOUNT,

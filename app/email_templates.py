@@ -96,11 +96,38 @@ def render(kind: str, *, client_id: int, params: dict) -> tuple[str, str, str]:
         "alert_email_confirmed": _confirmed,
         "account_key_rotated": _account_key_rotated,
         "webhook_disabled": _webhook_disabled,
+        "balance.low": _balance_low,
+        "balance.zero": _balance_zero,
     }
     builder = builders.get(kind)
     if builder is None:
         raise ValueError("unknown_email_kind")
     return builder(client_id=client_id, params=params)
+
+
+def _balance_low(*, client_id: int, params: dict) -> tuple[str, str, str]:
+    estimate = params.get("estimated_unlocks_remaining", "")
+    text = "\n\n".join(
+        [
+            f"Account #{int(client_id)}",
+            f"Your prepaid balance is low ({params.get('balance_msat', '')} msat).",
+            f"About {estimate} unlocks remaining at the standard 2-sat rate. This is an estimate.",
+            "Top up with POST /v1/topup/lightning or POST /v1/topup/usdc.",
+        ]
+    )
+    return "Satsgate: prepaid balance is low", text, _html_of(text)
+
+
+def _balance_zero(*, client_id: int, params: dict) -> tuple[str, str, str]:
+    text = "\n\n".join(
+        [
+            f"Account #{int(client_id)}",
+            "Your prepaid balance is 0 msat.",
+            "About 0 unlocks remaining at the standard 2-sat rate. This is an estimate.",
+            "Top up with POST /v1/topup/lightning or POST /v1/topup/usdc. Free monthly unlocks still apply until they reset.",
+        ]
+    )
+    return "Satsgate: prepaid balance is zero", text, _html_of(text)
 
 
 def _esc(value: object) -> str:

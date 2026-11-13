@@ -482,6 +482,26 @@ def well_known_satsgate_head(request: Request) -> dict:
     return well_known_satsgate(request)
 
 
+def _balance_fields(client: db.Client) -> dict:
+    """Seller-facing milisat balance and the standard-rate unlock estimate."""
+    from . import quota
+    from .pricing import balance_sats_text, estimate_unlocks
+
+    now = int(time.time())
+    with db._connect(config.DB_PATH) as conn:
+        free = quota.free_remaining(conn, client.id, now)
+        resets, local = quota.reset_displays(now)
+    estimate = estimate_unlocks(int(client.balance_msat), free)
+    return {
+        "balance_msat": int(client.balance_msat),
+        "balance_sats": balance_sats_text(int(client.balance_msat)),
+        "quota_remaining": free,
+        "quota_resets_at": resets,
+        "quota_resets_at_local": local,
+        **estimate,
+    }
+
+
 @app.get("/v1/plans")
 def v1_plans() -> dict:
     from .pricing import plans_document
@@ -494,7 +514,7 @@ def v1_balance(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
     client = _account_client(x_api_key)
     if isinstance(client, JSONResponse):
         return client
-    return {"ok": True, "client_id": client.id, "credits": client.credits}
+    return {"ok": True, "client_id": client.id, "credits": client.credits, **_balance_fields(client)}
 
 
 @app.get("/v1/client")
@@ -509,6 +529,7 @@ def v1_client(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
         "ok": True,
         "client_id": client.id,
         "credits": client.credits,
+        **_balance_fields(client),
         "payee_lightning_address": client.payee_lightning_address,
         "payee_evm_address": evm["address"] if evm else None,
         "payee_evm_verified": bool(evm and evm["verified_at"]),
