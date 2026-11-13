@@ -436,6 +436,29 @@ def _base_rpc_url() -> str:
     return raw.rstrip("/")
 
 
+def _base_rpc_fallback_url() -> str:
+    """Optional second Base RPC. Empty means the primary URL is the only one.
+
+    Originally proposed by Mike as P-A3, approved by Ia on 2026-11-13.
+    """
+    raw = os.environ.get("SATSGATE_BASE_RPC_FALLBACK_URL", "").strip()
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError(
+            "SATSGATE_BASE_RPC_FALLBACK_URL must be an https URL without userinfo, a query, or a fragment"
+        )
+    return raw.rstrip("/")
+
+
 EMAIL_FROM = _email_from()
 SUPPORT_EMAIL = _support_email()
 
@@ -479,6 +502,7 @@ EMAIL_ENABLED = os.environ.get("SATSGATE_EMAIL_ENABLED", "1").strip() != "0"
 # API writes and outbox inserts still succeed. No webhook row means nothing is queued.
 WEBHOOKS_ENABLED = os.environ.get("SATSGATE_WEBHOOKS", "1").strip() != "0"
 BASE_RPC_URL = _base_rpc_url()
+BASE_RPC_FALLBACK_URL = _base_rpc_fallback_url()
 SMART_WALLETS = os.environ.get("SATSGATE_SMART_WALLETS", "1").strip() != "0"
 
 from .cdp_auth import install_redactor  # noqa: E402
