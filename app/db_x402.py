@@ -853,7 +853,16 @@ def mark_settled_and_charge(
                 before_commit(conn)
             conn.execute("COMMIT")
             return {"charged": 0, "credits": current, "tx_hash": tx_hash}
-        if current < int(cost):
+        from .charging import can_fund, fee_from_offer
+        from .ledger import take_live_fee
+
+        offer = conn.execute("SELECT * FROM payment_offers WHERE id = ?", (row["offer_id"],)).fetchone()
+        try:
+            fee_msat, _test = fee_from_offer(offer)
+        except ValueError:
+            conn.execute("ROLLBACK")
+            raise
+        if not can_fund(conn, client_id=int(client_id), fee_msat=fee_msat, now=now, test_mode=False):
             conn.execute(
                 """
                 UPDATE x402_authorizations
@@ -870,28 +879,20 @@ def mark_settled_and_charge(
         elif max_uses is not None:
             window = int(config.PAYWALL_ACCESS_CAP_SECONDS)
         access_until = None if window is None else now + window
-        conn.execute(
-            "UPDATE clients SET credits = credits - ? WHERE id = ?",
-            (int(cost), int(client_id)),
+        spent = take_live_fee(
+            conn,
+            client_id=int(client_id),
+            payment_hash=str(tx_hash),
+            fee_msat=fee_msat,
+            reason="paywall_verify",
+            resource=resource,
+            api_key_id=api_key_id,
+            now=now,
+            test_mode=False,
+            network=network,
+            amount_usd_atomic=int(amount_usd_atomic),
         )
-        conn.execute(
-            """
-            INSERT INTO ledger(
-              client_id, delta_credits, reason, ref, created_at, api_key_id, resource,
-              network, amount_usd_atomic
-            ) VALUES(?, ?, 'paywall_verify', ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                int(client_id),
-                -int(cost),
-                tx_hash,
-                now,
-                int(api_key_id) if api_key_id is not None else None,
-                resource,
-                network,
-                int(amount_usd_atomic),
-            ),
-        )
+        charged_flag = 0 if int(spent["charged_msat"]) == 0 else 1
         conn.execute(
             """
             UPDATE x402_authorizations
@@ -905,7 +906,12 @@ def mark_settled_and_charge(
         if before_commit is not None:
             before_commit(conn)
         conn.execute("COMMIT")
-    return {"charged": int(cost), "credits": int(new_balance[0]), "tx_hash": tx_hash}
+    return {
+        "charged": charged_flag,
+        "charged_msat": int(spent["charged_msat"]),
+        "credits": int(new_balance[0]),
+        "tx_hash": tx_hash,
+    }
 
 
 def find_topup_offer(
@@ -991,19 +997,21 @@ def grant_topup_credits(
         if bal is None:
             conn.execute("ROLLBACK")
             raise ValueError("client does not exist")
+        msat_added = int(credits) * 2000
         conn.execute(
-            "UPDATE clients SET credits = credits + ? WHERE id = ?",
-            (int(credits), int(client_id)),
+            "UPDATE clients SET credits = credits + ?, balance_msat = balance_msat + ? WHERE id = ?",
+            (int(credits), msat_added, int(client_id)),
         )
         conn.execute(
             """
             INSERT INTO ledger(
-              client_id, delta_credits, reason, ref, created_at, resource, network, amount_usd_atomic
-            ) VALUES(?, ?, 'topup_x402', ?, ?, ?, ?, ?)
+              client_id, delta_credits, delta_msat, reason, ref, created_at, resource, network, amount_usd_atomic
+            ) VALUES(?, ?, ?, 'topup_x402', ?, ?, ?, ?, ?)
             """,
             (
                 int(client_id),
                 int(credits),
+                msat_added,
                 tx_hash,
                 now,
                 f"v1/topup/{plan_id}",

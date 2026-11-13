@@ -35,6 +35,24 @@ def period_utc(now: int) -> str:
     return f"{moment.year:04d}-{moment.month:02d}"
 
 
+def next_reset_utc(now: int) -> datetime:
+    moment = datetime.fromtimestamp(int(now), tz=timezone.utc)
+    if moment.month == 12:
+        return datetime(moment.year + 1, 1, 1, tzinfo=timezone.utc)
+    return datetime(moment.year, moment.month + 1, 1, tzinfo=timezone.utc)
+
+
+def reset_displays(now: int, tz_name: str | None = None) -> tuple[str, str]:
+    """UTC instant of the next day-1 reset, and the same instant in the display zone."""
+    from zoneinfo import ZoneInfo
+
+    reset = next_reset_utc(now)
+    utc = reset.strftime("%Y-%m-%dT%H:%M:%SZ")
+    zone = ZoneInfo(tz_name or config.ADVICE_TZ)
+    local = reset.astimezone(zone).isoformat()
+    return utc, local
+
+
 def bucket_id_for(conn: sqlite3.Connection, client_id: int) -> str:
     """One bucket. Verified EVM payee, else Lightning Address, else the client id.
 

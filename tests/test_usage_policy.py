@@ -417,14 +417,14 @@ def test_insufficient_balance_takes_no_use(client):
     challenge = _challenge(client, api_key, resource="api/broke", max_uses=2)
     authorization = _pay(client, challenge)
     with db._connect(config.DB_PATH) as conn:
-        conn.execute("UPDATE clients SET credits = 0")
+        conn.execute("UPDATE clients SET credits = 0, balance_msat = 0")
     denied = _verify(client, api_key, authorization, "api/broke", consume=True)
     assert denied.status_code == 402
     assert denied.json()["error"] == "insufficient balance"
     assert _uses(challenge["payment_hash"]) == 0
 
     with db._connect(config.DB_PATH) as conn:
-        conn.execute("UPDATE clients SET credits = 3")
+        conn.execute("UPDATE clients SET credits = 3, balance_msat = 6000")
     opened = _verify(client, api_key, authorization, "api/broke", consume=True)
     assert opened.status_code == 200, opened.text
     assert opened.json()["charged_credits"] == 1
@@ -675,6 +675,10 @@ def test_migration_from_a_v05_database_keeps_unlimited_grants(tmp_path):
 
     module = _load_app(tmp_path)
     from app import config, db_verify
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE clients SET balance_msat = credits * 2000")
+        conn.commit()
 
     with sqlite3.connect(db_path) as conn:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(paywall_challenges)")}

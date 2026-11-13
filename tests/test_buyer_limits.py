@@ -735,6 +735,9 @@ def test_migration_adds_the_hash_column_and_leaves_old_rows_unlimited(tmp_path):
     assert stored == ("old/resource", None, None)
     assert "idx_challenges_buyer" in indexes
 
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE clients SET balance_msat = credits * 2000")
+        conn.commit()
     with TestClient(module.app) as http:
         assert http.get("/health").json()["version"] == "0.19.1"
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})

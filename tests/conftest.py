@@ -7,6 +7,11 @@ import os
 import pytest
 
 os.environ["SATSGATE_RATES_ENABLED"] = "0"
+# Existing debit tests prove a prepaid charge. The production default is 500
+# free unlocks; those tests opt into "pay from the first unlock" here.
+# Pricing tests that need the real quota set SATSGATE_FREE_QUOTA themselves
+# and reload, or monkeypatch config.FREE_QUOTA.
+os.environ.setdefault("SATSGATE_FREE_QUOTA", "0")
 os.environ.setdefault("SATSGATE_X402_CDP", "0")
 os.environ.setdefault("SATSGATE_X402_CDP_KEY_ID", "")
 os.environ.setdefault("SATSGATE_X402_CDP_KEY_SECRET", "")

@@ -54,6 +54,7 @@ from .l402 import (
 )
 from .mock_wallet import MockWallet
 from .plans import get_plan, list_plans, recommend_purchase
+from .quota import FundsRefused
 from .rate_limit import RateLimiter
 from .wallet_lnaddr import LightningAddressWallet, LnurlError
 
@@ -2602,6 +2603,7 @@ def _issue_paywall_challenge(
     request: Request,
     auth: db_keys.Principal,
     x_satsgate_buyer_ip: str | None,
+    test_mode: bool = False,
 ):
     """Create a challenge for a principal the caller already authenticated.
 
@@ -2793,9 +2795,19 @@ def _issue_paywall_challenge(
             now=created_at,
             claim_grace_seconds=config.PAYWALL_CLAIM_GRACE_SECONDS,
             claim_cap_seconds=config.PAYWALL_TOKEN_TTL_CAP_SECONDS,
+            test_mode=bool(test_mode),
         )
     except db.ChallengeLimit as exc:
         return _challenge_limited(exc)
+    except FundsRefused:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "ok": False,
+                "error": "insufficient_balance",
+                "hint": "Top up with POST /v1/topup/lightning or POST /v1/topup/usdc.",
+            },
+        )
     except Exception:  # noqa: BLE001
         return JSONResponse(status_code=500, content={"ok": False, "error": "db_error"})
 
@@ -3004,6 +3016,7 @@ def _unlock_paywall(
                     payment_hash=token_hash,
                     amount_sats=int(row["amount_sats"]),
                     now=now,
+                    test_mode=str(receipt_site.get("x402_mode") or "") == "test",
                 )
             except ReceiptIssueError as exc:
                 return JSONResponse(status_code=exc.status, content={"ok": False, "error": exc.code, **exc.extra})

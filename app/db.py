@@ -902,14 +902,22 @@ def settle_topup_and_credit(
             (target_id, now, payment_hash),
         )
 
+        msat_added = int(credits_added) * 2000
+        stored_msat = topup["delta_msat"] if "delta_msat" in topup.keys() else None
+        if stored_msat is not None:
+            msat_added = int(stored_msat)
         conn.execute(
-            "UPDATE clients SET credits = credits + ? WHERE id = ?",
-            (credits_added, target_id),
+            "UPDATE clients SET credits = credits + ?, balance_msat = balance_msat + ? WHERE id = ?",
+            (credits_added, msat_added, target_id),
         )
 
         conn.execute(
-            "INSERT INTO ledger(client_id, delta_credits, reason, ref, created_at) VALUES(?, ?, ?, ?, ?)",
-            (target_id, credits_added, "topup_settled", payment_hash, now),
+            """
+            INSERT INTO ledger(
+              client_id, delta_credits, delta_msat, reason, ref, created_at
+            ) VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            (target_id, credits_added, msat_added, "topup_settled", payment_hash, now),
         )
 
         bal_row = conn.execute("SELECT credits FROM clients WHERE id = ?", (target_id,)).fetchone()
@@ -1446,6 +1454,8 @@ def add_paywall_challenge(
     now: int | None = None,
     claim_grace_seconds: int = 0,
     claim_cap_seconds: int = 86_400,
+    satsgate_fee_msat: int | None = None,
+    test_mode: bool = False,
 ) -> None:
     """Remember a challenge so verify can bind the token to the invoice we issued.
 
@@ -1495,13 +1505,30 @@ def add_paywall_challenge(
         except ChallengeLimit:
             conn.execute("ROLLBACK")
             raise
+        from .charging import lightning_item_fee
+        from .quota import FundsRefused, authorize_issue, hold_reservation
+
+        fee = 0 if test_mode else (
+            int(satsgate_fee_msat) if satsgate_fee_msat is not None else lightning_item_fee(int(amount_sats))
+        )
+        decision = authorize_issue(
+            conn,
+            client_id=int(client_id),
+            fee_msat=fee,
+            now=now,
+            test_mode=bool(test_mode),
+        )
+        if not decision.ok:
+            conn.execute("ROLLBACK")
+            raise FundsRefused(decision.code or "insufficient_balance")
         conn.execute(
             """
             INSERT INTO paywall_challenges(
               payment_hash, client_id, invoice, amount_sats, payee, resource, verify_url, created_at, expires_at,
-              api_key_id, max_uses, access_seconds, uses_consumed, buyer_ip_hash
+              api_key_id, max_uses, access_seconds, uses_consumed, buyer_ip_hash,
+              satsgate_fee_msat, fee_rail, quota_reserved, test_mode
             )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'lightning', ?, ?)
             """,
             (
                 payment_hash,
@@ -1517,8 +1544,13 @@ def add_paywall_challenge(
                 int(max_uses) if max_uses is not None else None,
                 int(access_seconds) if access_seconds is not None else None,
                 buyer_ip_hash,
+                fee,
+                1 if decision.reserved else 0,
+                1 if test_mode else 0,
             ),
         )
+        if decision.reserved:
+            hold_reservation(conn, payment_hash=payment_hash, client_id=int(client_id), now=now)
         conn.execute("COMMIT")
 
 

@@ -277,6 +277,7 @@ def internal_challenge(
             request,
             _owner_principal(client),
             x_satsgate_buyer_ip,
+            test_mode=str(site.get("x402_mode") or "") == "test",
         )
         if isinstance(issued, JSONResponse):
             # A limit applies to the whole request. A failed derived invoice
