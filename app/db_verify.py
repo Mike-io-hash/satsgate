@@ -3,7 +3,32 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
+from .charging import resolve_fee
 from .db import _connect
+from .ledger import take_live_fee
+
+
+def _spend_locked(conn, *, client_id: int, payment_hash: str, cost: int, resource, api_key_id, now: int) -> dict:
+    """Debit the locked formula fee, or nothing in test mode. ``charged`` is 0 or 1."""
+    fee, test_mode = resolve_fee(conn, payment_hash, int(cost))
+    spent = take_live_fee(
+        conn,
+        client_id=int(client_id),
+        payment_hash=payment_hash,
+        fee_msat=fee,
+        reason="paywall_verify",
+        resource=resource,
+        api_key_id=api_key_id,
+        now=int(now),
+        test_mode=test_mode,
+    )
+    charged_msat = int(spent["charged_msat"])
+    return {
+        "charged": 0 if charged_msat == 0 else 1,
+        "charged_msat": charged_msat,
+        "balance_msat": int(spent["balance_msat"]),
+        "free": bool(spent["free"]),
+    }
 
 
 def has_verification(db_path: str, *, client_id: int, payment_hash: str) -> bool:
@@ -46,43 +71,27 @@ def verify_once_and_spend(
         ).fetchone()
 
         if row:
+            from .quota import release_reservation
+
+            release_reservation(conn, payment_hash)
             bal = conn.execute("SELECT credits FROM clients WHERE id = ?", (int(client_id),)).fetchone()
             conn.execute("COMMIT")
-            return {"charged": 0, "new_balance": int(bal[0]) if bal else 0}
+            return {"charged": 0, "charged_msat": 0, "new_balance": int(bal[0]) if bal else 0}
 
-        # sufficient balance
-        bal_row = conn.execute("SELECT credits FROM clients WHERE id = ?", (int(client_id),)).fetchone()
-        if not bal_row:
-            conn.execute("ROLLBACK")
-            raise ValueError("client does not exist")
-
-        current = int(bal_row[0])
-        if current < cost:
-            conn.execute("ROLLBACK")
-            raise ValueError("insufficient balance")
-
-        # charge
-        conn.execute(
-            "UPDATE clients SET credits = credits - ? WHERE id = ?",
-            (cost, int(client_id)),
-        )
-        conn.execute(
-            """
-            INSERT INTO ledger(
-              client_id, delta_credits, reason, ref, created_at, api_key_id, resource
+        try:
+            spent = _spend_locked(
+                conn,
+                client_id=int(client_id),
+                payment_hash=payment_hash,
+                cost=cost,
+                resource=resource,
+                api_key_id=api_key_id,
+                now=now,
             )
-            VALUES(?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                int(client_id),
-                -cost,
-                "paywall_verify",
-                payment_hash,
-                now,
-                int(api_key_id) if api_key_id is not None else None,
-                resource,
-            ),
-        )
+        except ValueError:
+            conn.execute("ROLLBACK")
+            raise
+        charged = spent["charged"]
         conn.execute(
             "INSERT INTO verifications(client_id, payment_hash, resource, created_at) VALUES(?, ?, ?, ?)",
             (int(client_id), payment_hash, resource, now),
@@ -93,7 +102,7 @@ def verify_once_and_spend(
 
         conn.execute("COMMIT")
 
-    return {"charged": cost, "new_balance": new_balance}
+    return {"charged": charged, "charged_msat": spent["charged_msat"], "new_balance": new_balance}
 
 
 class UsageDenied(Exception):
@@ -196,40 +205,24 @@ def settle_and_consume(
 
         charged = 0
         if not verified:
-            bal_row = conn.execute("SELECT credits FROM clients WHERE id = ?", (int(client_id),)).fetchone()
-            if not bal_row:
-                conn.execute("ROLLBACK")
-                raise ValueError("client does not exist")
-            current = int(bal_row[0])
-            if current < cost:
-                conn.execute("ROLLBACK")
-                raise ValueError("insufficient balance")
-            conn.execute(
-                "UPDATE clients SET credits = credits - ? WHERE id = ?",
-                (cost, int(client_id)),
-            )
-            conn.execute(
-                """
-                INSERT INTO ledger(
-                  client_id, delta_credits, reason, ref, created_at, api_key_id, resource
+            try:
+                spent = _spend_locked(
+                    conn,
+                    client_id=int(client_id),
+                    payment_hash=payment_hash,
+                    cost=cost,
+                    resource=resource,
+                    api_key_id=api_key_id,
+                    now=now,
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    int(client_id),
-                    -cost,
-                    "paywall_verify",
-                    payment_hash,
-                    now,
-                    int(api_key_id) if api_key_id is not None else None,
-                    resource,
-                ),
-            )
+            except ValueError:
+                conn.execute("ROLLBACK")
+                raise
             conn.execute(
                 "INSERT INTO verifications(client_id, payment_hash, resource, created_at) VALUES(?, ?, ?, ?)",
                 (int(client_id), payment_hash, resource, now),
             )
-            charged = cost
+            charged = spent["charged"]
 
             window: int | None = None
             if challenge["access_seconds"] is not None:
@@ -393,9 +386,18 @@ def confirm_payment(
             "SELECT 1 FROM verifications WHERE client_id = ? AND payment_hash = ?",
             (int(client_id), payment_hash),
         ).fetchone()
-        if not verified and new_balance < cost:
-            conn.execute("ROLLBACK")
-            raise ValueError("insufficient balance")
+        if not verified:
+            fee, test_mode = resolve_fee(conn, payment_hash, cost)
+            from .charging import can_fund
+
+            if not can_fund(conn, client_id=int(client_id), fee_msat=fee, now=now, test_mode=test_mode):
+                conn.execute("ROLLBACK")
+                raise ValueError("insufficient balance")
+        from .quota import release_reservation
+
+        # Payment is in. The free slot is committed only if delivery is charged.
+        # An origin that is not 2xx never charges, so the reservation ends here.
+        release_reservation(conn, payment_hash)
         _stamp_confirmed(conn, challenge, payment_hash, now, access_cap_seconds)
         challenge = conn.execute(
             "SELECT * FROM paywall_challenges WHERE payment_hash = ?",
@@ -474,32 +476,22 @@ def charge_after_delivery(
             wrote = int(conn.execute("SELECT changes()").fetchone()[0])
         charged = 0
         if wrote == 1:
-            if new_balance < cost:
-                conn.execute("ROLLBACK")
-                raise ValueError("insufficient balance")
-            conn.execute(
-                "UPDATE clients SET credits = credits - ? WHERE id = ?",
-                (cost, int(client_id)),
-            )
-            conn.execute(
-                """
-                INSERT INTO ledger(
-                  client_id, delta_credits, reason, ref, created_at, api_key_id, resource
+            try:
+                spent = _spend_locked(
+                    conn,
+                    client_id=int(client_id),
+                    payment_hash=payment_hash,
+                    cost=cost,
+                    resource=resource,
+                    api_key_id=api_key_id,
+                    now=now,
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    int(client_id),
-                    -cost,
-                    "paywall_verify",
-                    payment_hash,
-                    now,
-                    int(api_key_id) if api_key_id is not None else None,
-                    resource,
-                ),
-            )
-            charged = cost
-            new_balance -= cost
+            except ValueError:
+                conn.execute("ROLLBACK")
+                raise
+            charged = spent["charged"]
+            bal_after = conn.execute("SELECT credits FROM clients WHERE id = ?", (int(client_id),)).fetchone()
+            new_balance = int(bal_after[0]) if bal_after else 0
         consumed = took_use or not _policy_set(challenge)
         usage = usage_view(challenge, consumed=consumed)
         conn.execute("COMMIT")

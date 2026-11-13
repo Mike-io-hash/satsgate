@@ -96,11 +96,11 @@ def _auth(macaroon: str, preimage: str | None = None) -> dict[str, str]:
 
 
 def _buy(http: TestClient) -> str:
-    started = http.get("/v1/topup/trial")
+    started = http.post("/v1/topup/lightning", json={"sats": 1000})
     assert started.status_code == 402, started.text
     body = started.json()
     preimage = http.get(f"/dev/mock/pay/{body['payment_hash']}").json()["preimage"]
-    settled = http.get("/v1/topup/trial", headers=_auth(body["macaroon"], preimage))
+    settled = http.post("/v1/topup/lightning", json={"sats": 1000}, headers=_auth(body["macaroon"], preimage))
     assert settled.status_code == 200, settled.text
     return settled.json()["api_key"]
 
@@ -374,7 +374,7 @@ def test_lightning_receipt_is_idempotent_and_debits_once(tmp_path, monkeypatch):
     _patch_dns(monkeypatch, module)
     with TestClient(module.app) as core:
         key, secret = _prepare(core)
-        before = core.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"]
+        before = core.get("/v1/balance", headers={"X-Api-Key": key}).json()["balance_msat"]
         gate, core_client, _origin = _open_gate(module.app, _settings())
         try:
             with gate as http:
@@ -394,8 +394,8 @@ def test_lightning_receipt_is_idempotent_and_debits_once(tmp_path, monkeypatch):
                 again = http.get("/my-shop/blog/post", headers=_auth(offered["macaroon"], preimage))
                 assert again.status_code == 200, again.text
                 assert again.json()["receipt"] == body["receipt"]
-                after = core.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"]
-                assert after == before - 1
+                after = core.get("/v1/balance", headers={"X-Api-Key": key}).json()["balance_msat"]
+                assert after == before - 2000
                 from satsgate_sdk.receipts import verify_receipt
 
                 verified = verify_receipt(body["receipt"], secret=secret, site="my-shop", path="/blog/post")

@@ -205,9 +205,19 @@ class Buyer:
                 "ok": False,
                 "error": "insufficient_scope",
                 "detail": (
-                    "This restricted key cannot read the credit balance. "
-                    "Core allows GET /v1/balance for the account key only. No write was attempted."
+                    "This key cannot read the balance. "
+                    "An sgr_ key can read GET /v1/balance. No write was attempted."
                 ),
+            }
+        if response.status == 200 and isinstance(body.get("balance_msat"), int):
+            return {
+                "ok": True,
+                "balance_msat": body["balance_msat"],
+                "balance_sats": body.get("balance_sats"),
+                "estimated_unlocks_remaining": body.get("estimated_unlocks_remaining"),
+                "quota_remaining": body.get("quota_remaining"),
+                "advice": body.get("advice"),
+                "core_url": self.settings.core_url,
             }
         if response.status == 200 and isinstance(body.get("credits"), int):
             return {"ok": True, "credits": body["credits"], "core_url": self.settings.core_url}

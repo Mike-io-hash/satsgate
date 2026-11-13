@@ -92,7 +92,7 @@ def test_proxy_lightning_charges_once_after_a_successful_origin(tmp_path, monkey
         account = _buy(core)
         monkeypatch.setenv("SATSGATE_API_KEY", _restricted(core, account))
         settings = _settings(tmp_path, monkeypatch, x402=False)
-        before = core.get("/v1/balance", headers={"X-Api-Key": account}).json()["credits"]
+        before = core.get("/v1/balance", headers={"X-Api-Key": account}).json()["balance_msat"]
         with TestClient(build_app(settings, transport=CoreBridge(module.app, origin))) as proxy:
             challenge = proxy.get("/blog/a")
             assert challenge.status_code == 402, challenge.text
@@ -104,7 +104,7 @@ def test_proxy_lightning_charges_once_after_a_successful_origin(tmp_path, monkey
             assert failed.status_code == 500, failed.text
             assert failed.content == b"origin-down"
             assert "use_spent" not in failed.json() if failed.headers.get("content-type", "").startswith("application/json") else True
-            assert core.get("/v1/balance", headers={"X-Api-Key": account}).json()["credits"] == before
+            assert core.get("/v1/balance", headers={"X-Api-Key": account}).json()["balance_msat"] == before
             state["status"] = 404
             state["body"] = b"missing"
             missing = proxy.get("/blog/a", headers=headers)
@@ -116,12 +116,12 @@ def test_proxy_lightning_charges_once_after_a_successful_origin(tmp_path, monkey
             served = proxy.get("/blog/a", headers=headers)
             assert served.status_code == 200, served.text
             assert served.content == b"origin-ok"
-            assert core.get("/v1/balance", headers={"X-Api-Key": account}).json()["credits"] == before - 1
+            assert core.get("/v1/balance", headers={"X-Api-Key": account}).json()["balance_msat"] == before - 2000
             assert _debits() == (1, -1)
             again = proxy.get("/blog/a", headers=headers)
             assert again.status_code == 402, again.text
             assert again.json()["reason"] == "token_used_up"
-            assert core.get("/v1/balance", headers={"X-Api-Key": account}).json()["credits"] == before - 1
+            assert core.get("/v1/balance", headers={"X-Api-Key": account}).json()["balance_msat"] == before - 2000
             assert len(origin.requests) == 3
             assert origin.requests[0].headers["x-satsgate-paid-sats"] == "100"
 
@@ -141,7 +141,7 @@ def test_proxy_x402_charges_once_and_records_the_ledger(tmp_path, monkeypatch):
         _verify_payee(core, account, owner)
         monkeypatch.setenv("SATSGATE_API_KEY", _restricted(core, account))
         settings = _settings(tmp_path, monkeypatch, x402=True)
-        before = core.get("/v1/balance", headers={"X-Api-Key": account}).json()["credits"]
+        before = core.get("/v1/balance", headers={"X-Api-Key": account}).json()["balance_msat"]
         with TestClient(build_app(settings, transport=CoreBridge(module.app, origin))) as proxy:
             challenge = proxy.get("/blog/a", headers={"Authorization": "Bearer buyer"})
             assert challenge.status_code == 402, challenge.text
@@ -172,7 +172,7 @@ def test_proxy_x402_charges_once_and_records_the_ledger(tmp_path, monkeypatch):
             assert failed.status_code == 500, failed.text
             assert failed.content == b"origin-down"
             assert "payment-response" not in failed.headers
-            assert core.get("/v1/balance", headers={"X-Api-Key": account}).json()["credits"] == before
+            assert core.get("/v1/balance", headers={"X-Api-Key": account}).json()["balance_msat"] == before
             assert not any(url.endswith("/settle") for url, _body in calls)
             names = {name.lower() for name in origin.requests[0].headers}
             assert "payment-signature" not in names
@@ -193,7 +193,7 @@ def test_proxy_x402_charges_once_and_records_the_ledger(tmp_path, monkeypatch):
             assert settled["tx"] == settled["transaction"]
             assert settled["network"] == "eip155:84532"
             assert settled["payer"] == buyer.address
-            assert core.get("/v1/balance", headers={"X-Api-Key": account}).json()["credits"] == before - 1
+            assert core.get("/v1/balance", headers={"X-Api-Key": account}).json()["balance_msat"] == before - 2000
             keys = core.get("/v1/api-keys", headers={"X-Api-Key": account}).json()["keys"]
             assert len(keys) == 1
             with sqlite3.connect(os.environ["SATSGATE_DB_PATH"]) as conn:

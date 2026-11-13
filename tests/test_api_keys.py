@@ -83,14 +83,13 @@ CREATE TABLE ticket_challenges (
 """
 
 _ACCOUNT_ONLY = [
-    ("get", "/v1/balance", None),
-    ("get", "/v1/client", None),
     ("get", "/v1/ledger", None),
     ("get", "/v1/usage/summary", None),
     ("get", "/v1/usage/daily", None),
-    ("get", "/v1/usage/forecast", None),
     ("get", "/v1/api-keys", None),
-    ("get", "/v1/topup/trial", None),
+    ("post", "/v1/accounts", {}),
+    ("post", "/v1/topup/lightning", {"sats": 1000}),
+    ("post", "/v1/topup/usdc", {"usd": "1.00"}),
     ("post", "/v1/client/payee", {"payee_lightning_address": "other@pay.example"}),
     ("post", "/v1/client/payee/evm/challenge", {"address": "0x1111111111111111111111111111111111111111"}),
     (
@@ -143,11 +142,11 @@ def _auth(macaroon: str, preimage_hex: str) -> str:
 
 
 def _buy_client(client: TestClient) -> str:
-    started = client.get("/v1/topup/trial")
+    started = client.post("/v1/topup/lightning", json={"sats": 1000})
     assert started.status_code == 402, started.text
     body = started.json()
     preimage = client.get(f"/dev/mock/pay/{body['payment_hash']}").json()["preimage"]
-    settled = client.get("/v1/topup/trial", headers={"Authorization": _auth(body["macaroon"], preimage)})
+    settled = client.post("/v1/topup/lightning", json={"sats": 1000}, headers={"Authorization": _auth(body["macaroon"], preimage)})
     assert settled.status_code == 200, settled.text
     return settled.json()["api_key"]
 
@@ -288,7 +287,7 @@ def test_restricted_key_can_challenge_verify_and_status_and_debits_name_the_key(
 def test_restricted_key_cannot_touch_account_routes(client, method, path, payload):
     account = _buy_client(client)
     restricted = _mint(client, account)["api_key"]
-    before = client.get("/v1/balance", headers={"X-Api-Key": account}).json()["credits"]
+    before = client.get("/v1/balance", headers={"X-Api-Key": account}).json()["balance_msat"]
     kwargs = {"headers": {"X-Api-Key": restricted}}
     if payload is not None:
         kwargs["json"] = payload
@@ -297,7 +296,7 @@ def test_restricted_key_cannot_touch_account_routes(client, method, path, payloa
     body = response.json()
     assert body["error"] == "insufficient_scope"
     assert body["scope"] == "paywall"
-    assert client.get("/v1/balance", headers={"X-Api-Key": account}).json()["credits"] == before
+    assert client.get("/v1/balance", headers={"X-Api-Key": account}).json()["balance_msat"] == before
 
 
 def test_restricted_key_cannot_save_or_change_the_payee(client):
@@ -397,8 +396,8 @@ def test_resource_prefix_limits_challenge_verify_and_status(client):
     assert unlocked.json()["charged_credits"] == 1
 
     # The same payment is still this client's. The account key can see the debit.
-    balance = client.get("/v1/balance", headers={"X-Api-Key": account}).json()["credits"]
-    assert balance == 200 - 1
+    balance = client.get("/v1/balance", headers={"X-Api-Key": account}).json()["balance_msat"]
+    assert balance == 1_000_000 - 100
 
 
 def test_revoke_is_idempotent_and_stops_the_key(client):
@@ -445,11 +444,11 @@ def test_revoke_is_idempotent_and_stops_the_key(client):
 
 def test_unknown_restricted_prefix_is_not_an_anonymous_topup(client):
     before = client.get("/v1/admin/overview", headers={"X-Admin-Token": "test-admin-token"}).json()
-    response = client.get("/v1/topup/trial", headers={"X-Api-Key": "sgr_this-key-does-not-exist"})
+    response = client.post("/v1/topup/lightning", json={"sats": 1000}, headers={"X-Api-Key": "sgr_this-key-does-not-exist"})
     assert response.status_code == 401
     assert response.json()["error"] == "invalid_api_key"
     # An unknown account-key-shaped header still starts an anonymous top-up.
-    legacy = client.get("/v1/topup/trial", headers={"X-Api-Key": "sg_not-a-real-key"})
+    legacy = client.post("/v1/topup/lightning", json={"sats": 1000}, headers={"X-Api-Key": "sg_not-a-real-key"})
     assert legacy.status_code == 402
     assert before["ok"] is True
 
@@ -540,10 +539,10 @@ def test_migration_on_an_existing_database(tmp_path):
     assert old_challenge == ("old/resource", None)
 
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.19.1"
+        assert http.get("/health").json()["version"] == "0.20.0"
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})
         assert balance.status_code == 200
-        assert balance.json()["credits"] == 42
+        assert balance.json()["balance_msat"] == 0
         info = http.get("/v1/client", headers={"X-Api-Key": legacy_key})
         assert info.json()["payee_lightning_address"] == "kept@pay.example"
         created = _mint(http, legacy_key, label="after-upgrade", resource_prefix="old/")
@@ -576,9 +575,9 @@ def test_sdk_creates_lists_and_revokes(tmp_path):
     sdk_root = REPO_ROOT / "sdk" / "python" / "src"
     if str(sdk_root) not in sys.path:
         sys.path.insert(0, str(sdk_root))
-    from satsgate_sdk import SatsgateClient, SatsgateError, __version__
+    from satsgate_sdk import SatsgateClient, __version__
 
-    assert __version__ == "0.7.0"
+    assert __version__ == "0.8.0"
     with TestClient(module.app) as http:
         account = _buy_client(http)
         sg = SatsgateClient(base_url="http://testserver", api_key=account)
@@ -594,10 +593,15 @@ def test_sdk_creates_lists_and_revokes(tmp_path):
             blocked._http.close()
             blocked._http = httpx.Client(transport=_TestClientTransport(http), base_url="http://testserver")
             try:
-                with pytest.raises(SatsgateError) as raised:
-                    blocked.balance()
-                assert raised.value.status_code == 403
-                assert raised.value.data["error"] == "insufficient_scope"
+                seen = blocked.balance()
+                assert isinstance(seen["balance_msat"], int)
+                denied = blocked._http.post(
+                    "/v1/topup/lightning",
+                    headers={"X-Api-Key": created["api_key"]},
+                    json={"sats": 1000},
+                )
+                assert denied.status_code == 403
+                assert denied.json()["error"] == "insufficient_scope"
             finally:
                 blocked.close()
             revoked = sg.revoke_api_key(created["key"]["id"])

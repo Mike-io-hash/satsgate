@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # Load env vars from .env if present. Existing process env wins.
 load_dotenv()
 
-APP_VERSION = "0.19.1"
+APP_VERSION = "0.20.0"
 
 # production is the safe default. Local mock/dev only runs when this is explicit.
 SATSGATE_ENV = os.environ.get("SATSGATE_ENV", "production").strip().lower() or "production"
@@ -532,6 +532,35 @@ def _rates_timeout() -> float:
 
 
 RATES_SOURCE_TIMEOUT_SECONDS = _rates_timeout()
+
+# Model B. Defaults are the production defaults. Tests override them.
+# Handlers read these names; they do not hard-code 100, 500, 200000, or a timezone.
+FREE_QUOTA = _optional_int("SATSGATE_FREE_QUOTA", 500, minimum=0, maximum=1_000_000)
+ADVICE_TZ = os.environ.get("SATSGATE_ADVICE_TZ", "America/Argentina/Buenos_Aires").strip() or (
+    "America/Argentina/Buenos_Aires"
+)
+LOW_BALANCE_MSAT = _optional_int("SATSGATE_LOW_BALANCE_MSAT", 200_000, minimum=0, maximum=10**15)
+SIGNUP_MAX_PER_IP_PER_DAY = _optional_int("SATSGATE_SIGNUP_MAX_PER_IP_PER_DAY", 3, minimum=0, maximum=1_000_000)
+SIGNUP_MAX_GLOBAL_PER_DAY = _optional_int("SATSGATE_SIGNUP_MAX_GLOBAL_PER_DAY", 100, minimum=0, maximum=10_000_000)
+ACCOUNTING_RATE_CACHE_S = _optional_int("SATSGATE_ACCOUNTING_RATE_CACHE_S", 300, minimum=0, maximum=86_400)
+ACCOUNTING_RATE_STALE_S = _optional_int("SATSGATE_ACCOUNTING_RATE_STALE_S", 3600, minimum=1, maximum=86_400)
+ACCOUNTING_RATE_TIMEOUT_S = _optional_int("SATSGATE_ACCOUNTING_RATE_TIMEOUT_S", 3, minimum=1, maximum=30)
+COINGECKO_API_KEY = os.environ.get("SATSGATE_COINGECKO_API_KEY", "").strip()
+TOPUP_MIN_SATS = _optional_int("SATSGATE_TOPUP_MIN_SATS", 1000, minimum=1, maximum=10_000_000)
+TOPUP_MIN_USD_ATOMIC = _optional_int("SATSGATE_TOPUP_MIN_USD_ATOMIC", 1_000_000, minimum=1, maximum=10**15)
+# Positive. 0 is rejected so the unlock estimate never divides by zero.
+FEE_MSAT = _optional_int("SATSGATE_FEE_MSAT", 2000, minimum=1, maximum=10**12)
+FEE_CAP_BPS = _optional_int("SATSGATE_FEE_CAP_BPS", 1000, minimum=0, maximum=10_000)
+USDC_FEE_FLOOR_USD_ATOMIC = _optional_int("SATSGATE_USDC_FEE_FLOOR_USD_ATOMIC", 1000, minimum=0, maximum=10**12)
+ADMIN_REFUND_MAX_MSAT = _optional_int("SATSGATE_ADMIN_REFUND_MAX_MSAT", 10_000_000_000, minimum=1, maximum=10**18)
+
+if ADVICE_TZ:
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        ZoneInfo(ADVICE_TZ)
+    except ZoneInfoNotFoundError as exc:
+        raise RuntimeError(f"SATSGATE_ADVICE_TZ is not a known timezone: {ADVICE_TZ}") from exc
 
 
 def site_secret_key() -> bytes | None:

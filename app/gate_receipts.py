@@ -93,6 +93,7 @@ def mint_lightning(
     payment_hash: str,
     amount_sats: int,
     now: int,
+    test_mode: bool = False,
 ) -> dict:
     _suspended(client_id)
     secret = db_sites.load_origin_secret(config.DB_PATH, site_id=int(site["id"]))
@@ -114,7 +115,7 @@ def mint_lightning(
         "iat": iat,
         "exp": exp,
         "kid": receipts.kid_for(secret),
-        "charged": 1,
+        "charged": 0 if test_mode else 1,
     }
 
     def _insert(conn) -> None:
@@ -126,7 +127,7 @@ def mint_lightning(
         config.DB_PATH,
         client_id=int(client_id),
         payment_hash=payment_hash,
-        cost=x402_service._COST,
+        cost=0 if test_mode else x402_service._COST,
         resource=f"gate:{site['slug']}:{route['path']}",
         api_key_id=None,
         consume=False,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -88,11 +89,11 @@ def test_admin_overview_requires_token(client):
 
 def test_topup_flow_creates_api_key_and_credits(client):
     # Start topup
-    r1 = client.get("/v1/topup/trial")
+    r1 = client.post("/v1/topup/lightning", json={"sats": 1000})
     assert r1.status_code == 402
     d1 = r1.json()
     assert d1["error"] == "payment_required"
-    assert d1["plan"]["id"] == "trial"
+    assert d1["sats"] == 1000
 
     payment_hash = d1["payment_hash"]
     macaroon = d1["macaroon"]
@@ -103,8 +104,9 @@ def test_topup_flow_creates_api_key_and_credits(client):
     preimage = r2.json()["preimage"]
 
     # Finalize topup
-    r3 = client.get(
-        "/v1/topup/trial",
+    r3 = client.post(
+        "/v1/topup/lightning",
+        json={"sats": 1000},
         headers={"Authorization": _auth(macaroon, preimage)},
     )
     assert r3.status_code == 200
@@ -117,21 +119,21 @@ def test_topup_flow_creates_api_key_and_credits(client):
     r4 = client.get("/v1/balance", headers={"X-Api-Key": api_key})
     assert r4.status_code == 200
     d4 = r4.json()
-    assert d4["credits"] == d3["new_balance"]
-    assert d4["credits"] == d1["plan"]["credits"]
+    assert d4["balance_msat"] == d3["new_balance"]
+    assert d4["balance_msat"] == d1["msat_credit"]
 
 
 def test_paywall_verify_is_idempotent_per_payment_hash(client):
     # Buy credits
-    r1 = client.get("/v1/topup/trial")
+    r1 = client.post("/v1/topup/lightning", json={"sats": 1000})
     d1 = r1.json()
     ph1 = d1["payment_hash"]
     mac1 = d1["macaroon"]
     pre1 = client.get(f"/dev/mock/pay/{ph1}").json()["preimage"]
-    topup = client.get("/v1/topup/trial", headers={"Authorization": _auth(mac1, pre1)}).json()
+    topup = client.post("/v1/topup/lightning", json={"sats": 1000}, headers={"Authorization": _auth(mac1, pre1)}).json()
     api_key = topup["api_key"]
 
-    bal_before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+    bal_before = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
 
     # Challenge paywall
     r2 = client.post(
@@ -167,18 +169,18 @@ def test_paywall_verify_is_idempotent_per_payment_hash(client):
     v2 = r4.json()
     assert v2["charged_credits"] == 0
 
-    bal_after = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
-    assert bal_after == bal_before - 1
+    bal_after = client.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
+    assert bal_after == bal_before - 100
 
 
 def test_forecast_has_recommendation_keys(client):
     # Buy credits
-    r1 = client.get("/v1/topup/trial")
+    r1 = client.post("/v1/topup/lightning", json={"sats": 1000})
     d1 = r1.json()
     ph1 = d1["payment_hash"]
     mac1 = d1["macaroon"]
     pre1 = client.get(f"/dev/mock/pay/{ph1}").json()["preimage"]
-    topup = client.get("/v1/topup/trial", headers={"Authorization": _auth(mac1, pre1)}).json()
+    topup = client.post("/v1/topup/lightning", json={"sats": 1000}, headers={"Authorization": _auth(mac1, pre1)}).json()
     api_key = topup["api_key"]
 
     # Create and verify one payment so forecast has some data
@@ -204,7 +206,9 @@ def test_forecast_has_recommendation_keys(client):
     data = r2.json()
     assert data["ok"] is True
 
-    rec = data["recommendation"]
-    assert "recommended_purchase" in rec
-    assert "should_topup_now" in rec
-    assert "trigger_at_iso" in rec
+    assert data["recommendation"] is None
+    assert data["forecast"]["status"] in {"insufficient_data", "low_sample", "ok"}
+    assert "recommended_purchase" not in data["forecast"]
+    dumped = json.dumps(data)
+    for pack in ("trial", "starter", "growth", "scale", "hyper", "mega"):
+        assert pack not in dumped

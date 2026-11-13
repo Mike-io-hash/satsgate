@@ -174,11 +174,11 @@ def _auth(macaroon: str, preimage_hex: str) -> str:
 
 
 def _buy(http: TestClient) -> str:
-    started = http.get("/v1/topup/trial")
+    started = http.post("/v1/topup/lightning", json={"sats": 1000})
     assert started.status_code == 402, started.text
     body = started.json()
     preimage = http.get(f"/dev/mock/pay/{body['payment_hash']}").json()["preimage"]
-    settled = http.get("/v1/topup/trial", headers={"Authorization": _auth(body["macaroon"], preimage)})
+    settled = http.post("/v1/topup/lightning", json={"sats": 1000}, headers={"Authorization": _auth(body["macaroon"], preimage)})
     assert settled.status_code == 200, settled.text
     return settled.json()["api_key"]
 
@@ -284,11 +284,38 @@ def test_migration_adds_tables_and_leaves_a_realistic_database(tmp_path, monkeyp
         "suspended_at",
         "suspend_reason",
         "payee_flagged_at",
+        "balance_msat",
+        "low_notified_at",
+        "zero_notified_at",
+        "low_rearm",
+        "zero_rearm",
     ]
     expected = dict(before)
     expected["clients"] = before["clients"] + payee_columns
-    expected["ledger"] = before["ledger"] + ["network", "amount_usd_atomic"]
-    expected["topups"] = before["topups"] + ["rail", "tx_hash", "amount_usd_atomic", "network"]
+    expected["ledger"] = before["ledger"] + ["network", "amount_usd_atomic", "delta_msat"]
+    expected["topups"] = before["topups"] + [
+        "rail",
+        "tx_hash",
+        "amount_usd_atomic",
+        "network",
+        "bonus_bps",
+        "rate_source",
+        "rate_value",
+        "rate_as_of",
+        "delta_msat",
+        "rate_num",
+        "rate_den",
+    ]
+    expected["paywall_challenges"] = before["paywall_challenges"] + [
+        "satsgate_fee_msat",
+        "fee_rail",
+        "accounting_source",
+        "accounting_rate_num",
+        "accounting_rate_den",
+        "accounting_as_of",
+        "quota_reserved",
+        "test_mode",
+    ]
     assert after == expected
     assert {"sites", "site_routes", "payment_offers", "x402_authorizations"} <= tables
     assert credits == 42
@@ -299,10 +326,10 @@ def test_migration_adds_tables_and_leaves_a_realistic_database(tmp_path, monkeyp
     assert site_count == 0
 
     with TestClient(module.app) as http:
-        assert http.get("/health").json() == {"ok": True, "version": "0.19.1"}
+        assert http.get("/health").json() == {"ok": True, "version": "0.20.0"}
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})
         assert balance.status_code == 200
-        assert balance.json()["credits"] == 42
+        assert balance.json()["balance_msat"] == 0
         old_ledger = http.get("/v1/ledger", headers={"X-Api-Key": legacy_key}).json()["entries"]
         settled = next(row for row in old_ledger if row["reason"] == "topup_settled")
         assert settled["ref"] == "old-payment"
@@ -482,7 +509,8 @@ def test_scopes_limits_and_other_owners(http: TestClient, monkeypatch):
     assert challenge.status_code == 403
     assert challenge.json()["error"] == "insufficient_scope"
     balance = http.get("/v1/balance", headers={"X-Api-Key": writer_key})
-    assert balance.status_code == 403
+    assert balance.status_code == 200
+    assert "balance_msat" in balance.json()
 
     still = http.post(
         "/v1/paywall/challenge",
@@ -601,14 +629,14 @@ def test_admin_routes_hide_when_the_token_is_unset(tmp_path, monkeypatch):
     with TestClient(module.app) as http:
         assert http.post("/v1/admin/sites/my-shop/approve").status_code == 404
         assert http.get("/v1/admin/sites").status_code == 404
-        assert http.get("/health").json()["version"] == "0.19.1"
+        assert http.get("/health").json()["version"] == "0.20.0"
 
 
 def test_missing_site_secret_key_refuses_create_and_boots(tmp_path, monkeypatch):
     module = _load_app(tmp_path, SATSGATE_SITE_SECRET_KEY="")
     _patch_dns(monkeypatch, module)
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.19.1"
+        assert http.get("/health").json()["version"] == "0.20.0"
         account = _buy(http)
         response = http.post(
             "/v1/sites",

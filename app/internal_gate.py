@@ -229,6 +229,25 @@ def internal_challenge(
     from . import x402_service
 
     plan = x402_service.quote_plan(site, route)
+    test_mode = str(site.get("x402_mode") or "") == "test"
+    if not test_mode and plan.get("price_currency") == "usd":
+        from .accounting_rate import accounting_rate
+        from .quota import free_remaining
+
+        now = int(time.time())
+        with core.db._connect(config.DB_PATH) as conn:
+            free = free_remaining(conn, client.id, now)
+        try:
+            if free <= 0 and accounting_rate(now=now) is None:
+                raise ValueError("rate_unavailable")
+        except ValueError as exc:
+            if str(exc) == "rate_unavailable":
+                return JSONResponse(
+                    status_code=503,
+                    content={"ok": False, "error": "rate_unavailable"},
+                    headers=_NO_STORE,
+                )
+            raise
     pay_to = None
     if plan["x402_on"]:
         pay_to = db_x402.payee_verified(config.DB_PATH, client_id=client.id)
@@ -277,6 +296,7 @@ def internal_challenge(
             request,
             _owner_principal(client),
             x_satsgate_buyer_ip,
+            test_mode=str(site.get("x402_mode") or "") == "test",
         )
         if isinstance(issued, JSONResponse):
             # A limit applies to the whole request. A failed derived invoice

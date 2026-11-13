@@ -55,7 +55,12 @@ def _load_app(tmp_path: Path, **env: str):
     for name in list(sys.modules.keys()):
         if name == "app" or name.startswith("app."):
             sys.modules.pop(name, None)
-    return importlib.import_module("app.main")
+    module = importlib.import_module("app.main")
+    rates = importlib.import_module("app.accounting_rate")
+    rates.fetcher = lambda _url: {"bitcoin": {"usd": 80070}}
+    rates.reset_for_tests()
+    module.accounting_rate = rates
+    return module
 
 
 def _patch_dns(monkeypatch, module):
@@ -79,11 +84,11 @@ def _auth(macaroon: str, preimage_hex: str) -> str:
 
 
 def _buy(http: TestClient) -> str:
-    started = http.get("/v1/topup/trial")
+    started = http.post("/v1/topup/lightning", json={"sats": 1000})
     assert started.status_code == 402, started.text
     body = started.json()
     preimage = http.get(f"/dev/mock/pay/{body['payment_hash']}").json()["preimage"]
-    settled = http.get("/v1/topup/trial", headers={"Authorization": _auth(body["macaroon"], preimage)})
+    settled = http.post("/v1/topup/lightning", json={"sats": 1000}, headers={"Authorization": _auth(body["macaroon"], preimage)})
     assert settled.status_code == 200, settled.text
     return settled.json()["api_key"]
 
@@ -192,7 +197,7 @@ def _install_poster(post) -> None:
 
 
 def _credits(http: TestClient, key: str) -> int:
-    return http.get("/v1/balance", headers={"X-Api-Key": key}).json()["credits"]
+    return http.get("/v1/balance", headers={"X-Api-Key": key}).json()["balance_msat"]
 
 
 def test_x402_is_off_by_default_and_lightning_is_unchanged(tmp_path, monkeypatch):
@@ -599,7 +604,7 @@ def test_old_site_routes_keep_their_sats_price(tmp_path):
     assert row == (21, "sats", None)
     price = next(column for column in notnull if column[1] == "price_sats")
     assert price[3] == 0
-    assert module.config.APP_VERSION == "0.19.1"
+    assert module.config.APP_VERSION == "0.20.0"
 
 
 def test_address_change_clears_the_x402_rail(tmp_path, monkeypatch):

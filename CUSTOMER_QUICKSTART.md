@@ -21,31 +21,23 @@ Hosted API:
   - You will need a `nostr+walletconnect://...` connection string
   - Treat it like a password (do not paste it in chats or commit it)
 
-## 1) Get an API key (top up payment verifications)
+## 1) Get an API key
 
-Clone and install deps:
+`POST /v1/accounts` with an empty body returns an `sg_` key once. The balance starts at 0. The first 500 live unlocks in a UTC month are free. After that the fee is 2 sats, capped at 10% of the item, with a US$0.001 floor on USDC items. The prepaid balance does not expire.
 
-```bash
-git clone https://github.com/Mike-io-hash/satsgate.git
-cd satsgate
-npm install
-```
-
-Buy the `trial` plan (1000 sats → 200 payment verifications, no expiry). Each unlock spends **1 credit**, about **5 sats** on this plan, no matter how many sats the buyer pays you. A 21-sat item therefore has about **25%** verification overhead (5/21). See the plan table in [`README.md`](./README.md) before you pick a price.
+To add balance, `POST /v1/topup/lightning` with `{"sats": 1000}` (minimum 1,000) or `POST /v1/topup/usdc` with `{"usd": "1.00"}` (minimum US$1).
 
 ```bash
-SATSGATE_BASE_URL='https://api.satsgate.org' \
-SATSGATE_TEST_PAYER_NWC='nostr+walletconnect://...' \
-node client_topup_nwc.mjs trial
+curl -fsS -X POST "$SATSGATE_BASE_URL/v1/accounts" -H 'content-type: application/json' -d '{}'
 ```
 
-Save the returned `api_key` (it may only be shown once).
+Save the returned `api_key` (it is shown once).
 
 If the hosted payee's provider advertises LUD-21 `verify` (Alby does), you can skip NWC: pay the 402 invoice from any wallet, then poll `GET /v1/topup/status/{payment_hash}` with `Authorization: L402 <macaroon>` until `settled` is true. The Python SDK method is `poll_topup`. Wallet of Satoshi still needs the preimage. The invoice is payable until its own expiry (often about a day). The macaroon stays valid through that time plus a short grace, not only for 10 minutes.
 
 Pay the invoice from a **different** wallet than the one that receives it. Paying yourself from the same node (for example Alby Go on the same Alby Hub) usually fails.
 
-The same packs can be bought with USDC when the operator has set `SATSGATE_TREASURY_EVM_ADDRESS`. While `SATSGATE_X402_CDP` is on, the pack is Base mainnet USDC only (`eip155:8453`). While it is off, the pack is Base Sepolia only (`eip155:84532`) and the response says `testing: true`. Credits are not sold for faucet USDC once mainnet is on. `GET /v1/topup/trial/x402` with the account key returns `402` and `PAYMENT-REQUIRED`. Retry with `PAYMENT-SIGNATURE` after your wallet signs that exact USDC authorization. Credits land only after the facilitator settles, and they are not redeemable for USDC. If the treasury variable is unset, the route says `x402_topup_disabled` and the Lightning steps above are unchanged. A request sketch is `scripts/x402_topup_example.py`. The proxy and the MCP server do not call this route.
+USDC top-up uses `POST /v1/topup/usdc` when the operator has set `SATSGATE_TREASURY_EVM_ADDRESS`. While `SATSGATE_X402_CDP` is on, that top-up is Base mainnet USDC only (`eip155:8453`). While it is off, it is Base Sepolia only (`eip155:84532`) and the response says `testing: true`. Prepaid balance is not sold for faucet USDC once mainnet is on. No `PAYMENT-SIGNATURE` yet: `402` and `PAYMENT-REQUIRED`. Retry with `PAYMENT-SIGNATURE` after your wallet signs that exact USDC authorization. The balance grows only after the facilitator settles, and it is not redeemable for USDC. If the treasury variable is unset, the route says `x402_topup_disabled` and Lightning top-up is unchanged. The proxy and the MCP server do not call this route.
 
 A hosted site that takes USDC starts in test mode. Try on Base Sepolia with your agent first, then switch the site to live. See [`gate/README.md`](./gate/README.md).
 
@@ -176,11 +168,11 @@ This script:
 - requests a paywall challenge
 - pays the Lightning invoice via NWC
 - verifies the L402 proof (`expected_resource` is required and must exactly match the challenge `resource`, including case)
-- spends **1 payment verification** (1 credit)
+- uses one free quota slot, or debits the locked milisat fee when the quota is gone
 
 Pay that invoice from a **different** wallet than the payee. Alby Go paying an invoice that the same Alby Hub issued usually fails. Use a second wallet for the buyer.
 
-If you pay from a wallet that does not hand you the preimage, poll `GET /v1/paywall/status/{payment_hash}` with the API key and `Authorization: L402 <macaroon>` until `settled` is true. That GET spends the credit when it settles. `POST /v1/paywall/verify` is the preimage alternative. Only the first settled call spends a credit.
+If you pay from a wallet that does not hand you the preimage, poll `GET /v1/paywall/status/{payment_hash}` with the API key and `Authorization: L402 <macaroon>` until `settled` is true. That GET spends the credit when it settles. `POST /v1/paywall/verify` is the preimage alternative. Only the first settled call takes a free slot or debits the locked fee.
 
 `invoice_expires_at` is when the buyer must pay. `claim_until` (and `valid_until` on a new challenge) is when you can still unlock. Those used to differ by hours: the invoice lived about a day and the token died after 10 minutes. They now stay aligned, plus a grace period. `cache_until` on a successful unlock is how long to cache that result when the challenge has no usage policy.
 

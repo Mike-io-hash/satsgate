@@ -122,7 +122,7 @@ def test_concurrent_issuance_writes_one_row_and_one_debit(tmp_path, monkeypatch)
         tokens = [item["receipt"] for item in results]
         assert tokens[0] == tokens[1]
         assert _rows(module.config.DB_PATH) == 1
-        assert _credits(http, key) == before - 1
+        assert _credits(http, key) == before - 2000
 
 
 def test_replay_after_expiry_is_token_expired(tmp_path, monkeypatch):
@@ -156,7 +156,7 @@ def test_replay_after_expiry_is_token_expired(tmp_path, monkeypatch):
         )
         assert expired.status_code == 401, expired.text
         assert expired.json()["error"] == "token_expired"
-        assert _credits(http, key) == before - 1
+        assert _credits(http, key) == before - 2000
         assert _rows(module.config.DB_PATH) == 1
 
 
@@ -254,7 +254,7 @@ def test_live_x402_receipt_debits_once_and_settles_once(tmp_path, monkeypatch):
         )
         assert paid.status_code == 200, paid.text
         assert paid.json()["receipt"]
-        assert _credits(http, key) == before - 1
+        assert _credits(http, key) == before - 1248
         assert sum(1 for url in calls if url.endswith("/settle")) == 1
         replay = _gate(
             http,
@@ -265,7 +265,7 @@ def test_live_x402_receipt_debits_once_and_settles_once(tmp_path, monkeypatch):
         assert replay.status_code == 200, replay.text
         assert replay.json()["receipt"] == paid.json()["receipt"]
         assert sum(1 for url in calls if url.endswith("/settle")) == 1
-        assert _credits(http, key) == before - 1
+        assert _credits(http, key) == before - 1248
 
 
 def _ledger_count(db_path: str, client_id: int) -> int:
@@ -342,7 +342,7 @@ def test_x402_receipt_survives_an_expired_offer(tmp_path, monkeypatch):
         paid_body = paid.json()
         first = verify_receipt(paid_body["receipt"], secret=origin_secret, site="my-shop", path="/paid")
         credits_after = _credits(http, key)
-        assert credits_after == before - 1
+        assert credits_after == before - 1248
         settles = _settle_count(calls)
         verifies = _verify_count(calls)
         ledger = _ledger_count(module.config.DB_PATH, client_id)
@@ -1519,7 +1519,7 @@ def test_suspension_disables_sites_and_blocks_new_work(tmp_path, monkeypatch):
         )
         assert created.status_code == 403, created.text
         assert created.json()["error"] == "account_suspended"
-        topup = http.get("/v1/topup/trial", headers={"X-Api-Key": key})
+        topup = http.post("/v1/topup/lightning", json={"sats": 1000}, headers={"X-Api-Key": key})
         assert topup.status_code == 403, topup.text
         link = http.post("/v1/client/payee/evm/connect", headers={"X-Api-Key": key})
         assert link.status_code == 403, link.text
@@ -1587,24 +1587,30 @@ def test_geoblock_and_ofac_screens(tmp_path, monkeypatch):
             return None
 
     with TestClient(blocked.app) as http:
-        missing = http.get("/v1/topup/trial", headers={"X-Forwarded-For": "203.0.113.10"})
+        missing = http.post("/v1/topup/lightning", json={"sats": 1000}, headers={"X-Forwarded-For": "203.0.113.10"})
+        signup_missing = http.post("/v1/accounts", json={}, headers={"X-Forwarded-For": "203.0.113.10"})
     assert missing.status_code == 503, missing.text
     assert missing.json()["error"] == "geoblock_unavailable"
+    assert signup_missing.status_code == 503
+    assert signup_missing.json()["error"] == "geoblock_unavailable"
     db_path.write_text("open", encoding="utf-8")
     os.utime(db_path, (time.time() + 5, time.time() + 5))
     monkeypatch.setattr(_mod("app.geoblock"), "_open", lambda path: _Reader(codes))
     with TestClient(blocked.app) as http:
-        unknown = http.get("/v1/topup/trial", headers={"X-Forwarded-For": "198.51.100.8"})
+        unknown = http.post("/v1/topup/lightning", json={"sats": 1000}, headers={"X-Forwarded-For": "198.51.100.8"})
         assert unknown.status_code == 402, unknown.text
-        allowed = http.get("/v1/topup/trial", headers={"X-Forwarded-For": "203.0.113.10"})
+        allowed = http.post("/v1/topup/lightning", json={"sats": 1000}, headers={"X-Forwarded-For": "203.0.113.10"})
         assert allowed.status_code == 402, allowed.text
         for code, ip in (("CU", "203.0.113.20"), ("IR", "203.0.113.21"), ("KP", "203.0.113.22")):
             codes[ip] = code
         os.utime(db_path, (time.time() + 10, time.time() + 10))
         for ip in ("203.0.113.20", "203.0.113.21", "203.0.113.22"):
-            refused = http.get("/v1/topup/trial", headers={"X-Forwarded-For": ip})
+            refused = http.post("/v1/topup/lightning", json={"sats": 1000}, headers={"X-Forwarded-For": ip})
             assert refused.status_code == 451, refused.text
             assert refused.json()["error"] == "region_unavailable"
+            signup = http.post("/v1/accounts", json={}, headers={"X-Forwarded-For": ip})
+            assert signup.status_code == 451, signup.text
+            assert signup.json()["error"] == "region_unavailable"
 
     assert _mod("app.ofac").listed("0x" + "ab" * 20) is False
     assert _mod("app.ofac").status()["ofac_list"] == "missing"

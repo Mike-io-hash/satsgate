@@ -137,11 +137,11 @@ def _auth(macaroon: str, preimage_hex: str) -> str:
 
 
 def _buy_client(client: TestClient) -> str:
-    started = client.get("/v1/topup/trial")
+    started = client.post("/v1/topup/lightning", json={"sats": 1000})
     assert started.status_code == 402, started.text
     body = started.json()
     preimage = client.get(f"/dev/mock/pay/{body['payment_hash']}").json()["preimage"]
-    settled = client.get("/v1/topup/trial", headers={"Authorization": _auth(body["macaroon"], preimage)})
+    settled = client.post("/v1/topup/lightning", json={"sats": 1000}, headers={"Authorization": _auth(body["macaroon"], preimage)})
     assert settled.status_code == 200, settled.text
     return settled.json()["api_key"]
 
@@ -735,11 +735,14 @@ def test_migration_adds_the_hash_column_and_leaves_old_rows_unlimited(tmp_path):
     assert stored == ("old/resource", None, None)
     assert "idx_challenges_buyer" in indexes
 
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE clients SET balance_msat = credits * 2000")
+        conn.commit()
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.19.1"
+        assert http.get("/health").json()["version"] == "0.20.0"
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})
         assert balance.status_code == 200
-        assert balance.json()["credits"] == 7
+        assert balance.json()["balance_msat"] == 14_000
         first = _challenge(http, legacy_key, resource="old/new")
         second = _challenge(http, legacy_key, resource="old/new")
         assert first.status_code == 200, first.text
@@ -817,7 +820,7 @@ def test_unpaid_price_quotes_stop_counting_after_the_short_window(tmp_path, monk
         )
         assert confirmed.status_code == 200, confirmed.text
         assert confirmed.json()["charged_credits"] == 0
-        before = http.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"]
+        before = http.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"]
         charged = http.post(
             "/v1/paywall/charge",
             headers={"X-Api-Key": api_key, "Authorization": _pay(http, issued[1])},
@@ -825,7 +828,7 @@ def test_unpaid_price_quotes_stop_counting_after_the_short_window(tmp_path, monk
         )
         assert charged.status_code == 200, charged.text
         assert charged.json()["charged_credits"] == 1
-        assert http.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["credits"] == before - 1
+        assert http.get("/v1/balance", headers={"X-Api-Key": api_key}).json()["balance_msat"] == before - 100
 
 
 class _TestClientTransport(httpx.BaseTransport):
@@ -848,7 +851,7 @@ def test_sdk_sends_the_buyer_header(tmp_path):
         sys.path.insert(0, str(sdk_root))
     from satsgate_sdk import SatsgateClient, __version__
 
-    assert __version__ == "0.7.0"
+    assert __version__ == "0.8.0"
     with TestClient(module.app) as http:
         account = _buy_client(http)
         sg = SatsgateClient(base_url="http://testserver", api_key=account)

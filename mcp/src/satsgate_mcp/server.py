@@ -118,9 +118,9 @@ def build_server(buyer: Buyer | None = None, settings: Settings | None = None) -
 
     @mcp.tool(annotations=_READ, structured_output=False)
     async def credits_balance() -> dict:
-        """Read GET /v1/balance with the optional restricted key. A restricted key is refused by core.
+        """Read GET /v1/balance. An sgr_ key can read balance_msat, quota, and the estimate.
 
-        This tool does not top up, change the payee, or create keys.
+        This tool does not top up, change the payee, rotate a key, or create an account.
         """
         try:
             return await buyer.credits_balance()

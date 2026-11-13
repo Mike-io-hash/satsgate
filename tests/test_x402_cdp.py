@@ -119,11 +119,11 @@ def test_unusable_secret_keeps_mainnet_off_and_does_not_log_the_value(tmp_path, 
         SATSGATE_X402_CDP_KEY_SECRET=secret,
     )
     assert module.config.X402_MAINNET_ENABLED is False
-    assert module.config.APP_VERSION == "0.19.1"
+    assert module.config.APP_VERSION == "0.20.0"
     assert secret not in caplog.text
     assert "USDC mainnet disabled" in caplog.text
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.19.1"
+        assert http.get("/health").json()["version"] == "0.20.0"
         status = http.get("/v1/admin/x402", headers={"X-Admin-Token": "test-admin-token"}).json()
         assert status["mainnet_enabled"] is False
         assert status["cdp"]["reason"] == "credentials"
@@ -358,7 +358,7 @@ def test_topup_is_mainnet_only_while_the_switch_is_on(tmp_path, monkeypatch) -> 
     buyer = Account.create()
     with TestClient(module.app) as http:
         key = _buy(http)
-        quoted = http.get("/v1/topup/trial/x402", headers={"X-Api-Key": key})
+        quoted = http.post("/v1/topup/usdc", headers={"X-Api-Key": key}, json={"usd": "1.00"})
         assert quoted.status_code == 402, quoted.text
         document = json.loads(base64.b64decode(quoted.headers["payment-required"]))
         assert [item["network"] for item in document["accepts"]] == ["eip155:8453"]
@@ -374,20 +374,21 @@ def test_topup_is_mainnet_only_while_the_switch_is_on(tmp_path, monkeypatch) -> 
     _patch_dns(monkeypatch, module)
     _quote(module)
     with TestClient(module.app) as http:
-        paid = http.get(
-            "/v1/topup/trial/x402",
+        paid = http.post(
+            "/v1/topup/usdc",
             headers={"X-Api-Key": key, "PAYMENT-SIGNATURE": signature},
+            json={"usd": "1.00"},
         )
         assert paid.status_code == 402
         assert paid.json()["error"] == "network_mismatch"
-        fresh = http.get("/v1/topup/trial/x402", headers={"X-Api-Key": key})
+        fresh = http.post("/v1/topup/usdc", headers={"X-Api-Key": key}, json={"usd": "1.00"})
         assert fresh.status_code == 402, fresh.text
         fresh_doc = json.loads(base64.b64decode(fresh.headers["payment-required"]))
         assert fresh_doc["accepts"][0]["network"] == "eip155:84532"
         assert fresh_doc["accepts"][0]["extra"]["name"] == "USDC"
         assert fresh.json()["testing"] is True
         assert fresh.json()["x402_mode"] == "test"
-        started = http.get("/v1/topup/trial", headers={"X-Api-Key": key})
+        started = http.post("/v1/topup/lightning", json={"sats": 1000}, headers={"X-Api-Key": key})
         assert started.status_code == 402
         assert started.json()["invoice"]
 
