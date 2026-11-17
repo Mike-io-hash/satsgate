@@ -126,8 +126,13 @@ jobs:
             [[ "${got}" == "${VER}" ]]
             uid="$(docker run --rm --platform "${platform}" --entrypoint id "${image}" -u)"
             [[ "${uid}" == "65532" ]]
-            found="$(docker run --rm --platform "${platform}" --entrypoint sh "${image}" -c 'find / -xdev -name ".env*" -o -name "*.sqlite3" 2>/dev/null')"
-            [[ -z "${found}" ]]
+            # find exits non-zero when an unreadable directory is skipped. The check is the output.
+            found="$(docker run --rm --platform "${platform}" --entrypoint sh "${image}" -c 'find / -xdev -name ".env*" -o -name "*.sqlite3" 2>/dev/null' || true)"
+            if [[ -n "${found}" ]]; then
+              echo "unexpected files:" >&2
+              printf '%s\n' "${found}" >&2
+              exit 1
+            fi
           done
           {
             echo "### ghcr.io/mike-io-hash/satsgate-proxy"
@@ -201,6 +206,10 @@ jobs:
           docker run --rm --platform linux/amd64 --entrypoint python satsgate-proxy:pr-amd64 -c 'import satsgate_proxy; print(satsgate_proxy.__version__)'
           uid="$(docker run --rm --platform linux/amd64 --entrypoint id satsgate-proxy:pr-amd64 -u)"
           [[ "${uid}" == "65532" ]]
-          found="$(docker run --rm --platform linux/amd64 --entrypoint sh satsgate-proxy:pr-amd64 -c 'find / -xdev -name ".env*" -o -name "*.sqlite3" 2>/dev/null')"
-          [[ -z "${found}" ]]
+          found="$(docker run --rm --platform linux/amd64 --entrypoint sh satsgate-proxy:pr-amd64 -c 'find / -xdev -name ".env*" -o -name "*.sqlite3" 2>/dev/null' || true)"
+          if [[ -n "${found}" ]]; then
+            echo "unexpected files:" >&2
+            printf '%s\n' "${found}" >&2
+            exit 1
+          fi
           docker run --rm --platform linux/arm64 satsgate-proxy:pr-arm64 satsgate-proxy --help

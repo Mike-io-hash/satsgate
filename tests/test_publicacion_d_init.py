@@ -9,6 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 from fastapi.testclient import TestClient
 
@@ -16,6 +17,12 @@ from init_harness import RecordingSync, invoke
 from test_x402 import _load_app
 
 ROOT = Path(__file__).resolve().parents[1]
+@pytest.fixture(autouse=True)
+def _free_quota(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Restored after the test so later modules are not left on the free quota."""
+    monkeypatch.setenv("SATSGATE_FREE_QUOTA", "500")
+
+
 def _app(tmp_path: Path):
     return _load_app(tmp_path, SATSGATE_FREE_QUOTA="500")
 

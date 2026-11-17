@@ -128,12 +128,18 @@ jobs:
               raise SystemExit(subprocess.call([sys.executable, "-m", "pip_audit", "-r", str(req)]))
           PY
           python - <<'PY'
+          import glob
           import os
           import shlex
           import subprocess
           import sys
 
-          args = shlex.split(os.environ["TESTS"])
+          args = []
+          for pattern in shlex.split(os.environ["TESTS"]):
+              matched = sorted(glob.glob(pattern))
+              if not matched:
+                  raise SystemExit(f"no tests matched {pattern}")
+              args.extend(matched)
           raise SystemExit(subprocess.call([sys.executable, "-m", "pytest", "-q", *args]))
           PY
           (
