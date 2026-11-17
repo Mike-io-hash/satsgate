@@ -1,0 +1,18 @@
+# Build context for images whose context is the repo root (core and proxy).
+.git
+.env
+.env.*
+!.env.example
+*.sqlite3
+data/
+backups/
+.satsgate/
+**/__pycache__
+**/*.pyc
+node_modules/
+web/connect/node_modules/
+web/*/dist/
+.venv/
+dist/
+build/
+*.egg-info/

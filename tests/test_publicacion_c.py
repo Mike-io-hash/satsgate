@@ -90,6 +90,7 @@ def test_t_c_1_3_wheels_declare_apache_and_cli_license_matches(tmp_path: Path) -
 
 
 def test_t_c_1_4_versions_match() -> None:
+    """Pinned versions. T-D.1.3 below reuses this instead of copying it."""
     projects = {path: project for path, project in _projects()}
     assert projects[ROOT / "cli" / "pyproject.toml"]["version"] == "0.1.0"
     assert '__version__ = "0.1.0"' in _text(ROOT / "cli" / "src" / "satsgate" / "__init__.py")
@@ -101,6 +102,14 @@ def test_t_c_1_4_versions_match() -> None:
     assert '__version__ = "0.15.2"' in _text(ROOT / "gate" / "src" / "satsgate_gate" / "__init__.py")
     assert projects[ROOT / "mcp" / "pyproject.toml"]["version"] == "0.13.0"
     assert '__version__ = "0.13.0"' in _text(ROOT / "mcp" / "src" / "satsgate_mcp" / "__init__.py")
+
+
+def test_t_d_1_3_pyproject_version_equals_dunder_version() -> None:
+    """T-D.1.3: pyproject version == __version__ for all four packages.
+
+    Extends T-C.1.4. The assertions stay there so the two tests cannot drift.
+    """
+    test_t_c_1_4_versions_match()
 
 
 def test_t_c_1_5_proxy_is_a_hard_dependency_and_mcp_is_an_extra() -> None:
