@@ -1151,6 +1151,11 @@ def test_delivery_deadline_covers_dns_headers_and_body(tmp_path):
     assert status == 200
     assert payload == b"ready"
     assert seen["accept"] == "identity"
+    # The mock peer keeps sleeping after the deadline returns. Later tests count
+    # these workers, so this one waits them out. The wait is not part of the bound.
+    for thread in threading.enumerate():
+        if thread.name in {"satsgate-webhook-http", "satsgate-webhook-dns"}:
+            thread.join(3)
 
 
 def _http_workers() -> list[threading.Thread]:
