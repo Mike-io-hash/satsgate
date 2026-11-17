@@ -1061,7 +1061,7 @@ def _execute(options: InitOptions, console: _Console, transport: Any, run: _Run)
         if isinstance(terms, str) and terms:
             run.terms_url = terms
         run.evm_verified = bool(peeked.get("payee_evm_verified"))
-        run.x402 = run.evm_verified
+        run.x402 = bool(options.want_usdc) and run.evm_verified
         stored = (peeked.get("payee_lightning_address") or "").strip()
         if stored and stored != address and not replace_payee and console.human:
             answer = console.ask("Replace the saved Lightning Address? [y/N] ")

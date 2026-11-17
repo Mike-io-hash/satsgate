@@ -213,7 +213,7 @@ def test_t_c_3_5_core_failure_is_explained_by_one_diagnostic(tmp_path: Path, mon
 
 
 def test_t_c_3_6_x402_turns_on_only_after_the_evm_payee_is_verified(tmp_path: Path) -> None:
-    """Always enabling x402 would fail the first assertion."""
+    """Enabling x402 just because the payee is verified fails the second run."""
     _module, http, transport = _core(tmp_path)
     work = tmp_path / "work"
     work.mkdir()
@@ -225,16 +225,22 @@ def test_t_c_3_6_x402_turns_on_only_after_the_evm_payee_is_verified(tmp_path: Pa
         assert "public_base" not in text
         _verify_payee(http, _account_key(work), Account.create())
         again, again_body, _out2, _err2 = invoke(work, transport)
+        still = (work / "satsgate-proxy.yaml").read_text(encoding="utf-8")
+        chosen, chosen_body, _out3, _err3 = invoke(work, transport, want_usdc=True)
         updated = (work / "satsgate-proxy.yaml").read_text(encoding="utf-8")
     finally:
         _close(http)
     assert again == 0, again_body
+    assert still == text
+    assert again_body["usdc"]["enabled"] is False
+    assert again_body["test_402"]["rail_x402"] is False
+    assert chosen == 0, chosen_body
     assert "x402: true" in updated
     assert "x402_mode: test" in updated
     assert "public_base" in updated
-    assert again_body["test_402"]["rail_x402"] is True
-    assert again_body["test_402"]["debited"] is False
-    assert again_body["usdc"]["enabled"] is True
+    assert chosen_body["test_402"]["rail_x402"] is True
+    assert chosen_body["test_402"]["debited"] is False
+    assert chosen_body["usdc"]["enabled"] is True
 
 
 def test_t_c_3_7_start_command_and_docker_compose_keep_secrets_out(tmp_path: Path) -> None:
@@ -419,10 +425,14 @@ def test_t_c_5_9_next_steps_name_the_buyer_path_only_when_usdc_is_on(tmp_path: P
         assert code == 0, body
         _verify_payee(http, _account_key(work), Account.create())
         again, again_body, _out2, _err2 = invoke(work, transport)
+        chosen, chosen_body, _out3, _err3 = invoke(work, transport, want_usdc=True)
     finally:
         _close(http)
     assert any("--want-usdc" in step for step in body["next_steps"])
     assert not any("Base Sepolia" in step for step in body["next_steps"])
     assert again == 0, again_body
-    assert any("Base Sepolia" in step and "satsgate-mcp-pay" in step for step in again_body["next_steps"])
-    assert not any("--want-usdc" in step for step in again_body["next_steps"])
+    assert any("--want-usdc" in step for step in again_body["next_steps"])
+    assert not any("Base Sepolia" in step for step in again_body["next_steps"])
+    assert chosen == 0, chosen_body
+    assert any("Base Sepolia" in step and "satsgate-mcp-pay" in step for step in chosen_body["next_steps"])
+    assert not any("--want-usdc" in step for step in chosen_body["next_steps"])
