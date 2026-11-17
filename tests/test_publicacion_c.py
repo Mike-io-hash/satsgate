@@ -92,8 +92,8 @@ def test_t_c_1_3_wheels_declare_apache_and_cli_license_matches(tmp_path: Path) -
 def test_t_c_1_4_versions_match() -> None:
     """Pinned versions. T-D.1.3 below reuses this instead of copying it."""
     projects = {path: project for path, project in _projects()}
-    assert projects[ROOT / "cli" / "pyproject.toml"]["version"] == "0.1.0"
-    assert '__version__ = "0.1.0"' in _text(ROOT / "cli" / "src" / "satsgate" / "__init__.py")
+    assert projects[ROOT / "cli" / "pyproject.toml"]["version"] == "0.1.1"
+    assert '__version__ = "0.1.1"' in _text(ROOT / "cli" / "src" / "satsgate" / "__init__.py")
     assert projects[ROOT / "sdk" / "python" / "pyproject.toml"]["version"] == "0.10.0"
     assert '__version__ = "0.10.0"' in _text(ROOT / "sdk" / "python" / "src" / "satsgate_sdk" / "__init__.py")
     assert projects[ROOT / "proxy" / "pyproject.toml"]["version"] == "0.14.1"
@@ -134,7 +134,7 @@ def test_t_c_1_6_installed_script_and_module_print_the_version(tmp_path: Path) -
     from satsgate_proxy import __version__ as proxy_version
     from satsgate_sdk import __version__ as sdk_version
 
-    assert satsgate.__version__ == "0.1.0"
+    assert satsgate.__version__ == "0.1.1"
     assert sdk_version == "0.10.0"
     assert proxy_version == "0.14.1"
     if shutil.which("python3") is None:
@@ -163,7 +163,7 @@ def test_t_c_1_6_installed_script_and_module_print_the_version(tmp_path: Path) -
     assert module.returncode == 0, module.stderr
     assert command.returncode == 0, command.stderr
     assert module.stdout == command.stdout
-    assert module.stdout.startswith("satsgate 0.1.0\n")
+    assert module.stdout.startswith("satsgate 0.1.1\n")
     assert "satsgate-sdk 0.10.0\n" in module.stdout
     assert "satsgate-proxy 0.14.1\n" in module.stdout
 

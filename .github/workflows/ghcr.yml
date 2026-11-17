@@ -1,0 +1,206 @@
+# The proxy image publishes only from a proxy-v* tag. Pull requests build and do not push.
+name: ghcr
+
+on:
+  push:
+    tags:
+      - proxy-v*
+  pull_request:
+
+permissions: {}
+
+jobs:
+  image:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    environment: ghcr
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Check the tag and compute image tags
+        id: prep
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
+          git fetch origin --tags --force
+          version=""
+          dist_name=""
+          while IFS= read -r line; do
+            case "${line}" in
+              version=*) version="${line#version=}" ;;
+              dist_name=*) dist_name="${line#dist_name=}" ;;
+            esac
+          done < <(python scripts/release/check_tag.py "${GITHUB_REF_NAME}")
+          if [[ "${dist_name}" != "satsgate-proxy" ]]; then
+            echo "not a proxy tag" >&2
+            exit 1
+          fi
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          created="$(date -u -d "@${SOURCE_DATE_EPOCH}" +%Y-%m-%dT%H:%M:%SZ)"
+          mapfile -t existing < <(git tag -l 'proxy-v*')
+          {
+            echo "version=${version}"
+            echo "epoch=${SOURCE_DATE_EPOCH}"
+            echo "created=${created}"
+            echo "definitions<<EOF"
+            python scripts/release/proxy_tags.py "${version}" "${existing[@]}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/mike-io-hash/satsgate-proxy
+          tags: ${{ steps.prep.outputs.definitions }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/Mike-io-hash/satsgate
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.prep.outputs.version }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.title=satsgate-proxy
+            org.opencontainers.image.description=Charge AI agents in Lightning and USDC on the same 402. 500 free unlocks per UTC month. Cobrale a agentes de IA en Lightning y USDC, en el mismo 402.
+            org.opencontainers.image.created=${{ steps.prep.outputs.created }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: proxy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ steps.prep.outputs.epoch }}
+
+      - name: Attest the image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/mike-io-hash/satsgate-proxy
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Smoke-test the pushed digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VER: ${{ steps.prep.outputs.version }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/mike-io-hash/satsgate-proxy@${DIGEST}"
+          for platform in linux/amd64 linux/arm64; do
+            docker pull --platform "${platform}" "${image}"
+            docker run --rm --platform "${platform}" "${image}" satsgate-proxy --help
+            got="$(docker run --rm --platform "${platform}" --entrypoint python "${image}" -c 'import satsgate_proxy; print(satsgate_proxy.__version__)')"
+            [[ "${got}" == "${VER}" ]]
+            uid="$(docker run --rm --platform "${platform}" --entrypoint id "${image}" -u)"
+            [[ "${uid}" == "65532" ]]
+            found="$(docker run --rm --platform "${platform}" --entrypoint sh "${image}" -c 'find / -xdev -name ".env*" -o -name "*.sqlite3" 2>/dev/null')"
+            [[ -z "${found}" ]]
+          done
+          {
+            echo "### ghcr.io/mike-io-hash/satsgate-proxy"
+            echo
+            echo "Digest: \`${DIGEST}\`"
+            echo
+            echo "Version: \`${VER}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  build:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the proxy for amd64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: proxy/Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          provenance: false
+          tags: satsgate-proxy:pr-amd64
+
+      - name: Build the proxy for arm64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: proxy/Dockerfile
+          platforms: linux/arm64
+          load: true
+          push: false
+          provenance: false
+          tags: satsgate-proxy:pr-arm64
+
+      - name: Build the core image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: false
+          provenance: false
+
+      - name: Build the gate image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: gate
+          file: gate/Dockerfile
+          platforms: linux/amd64
+          push: false
+          provenance: false
+
+      - name: Smoke-test the local proxy images
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/amd64 satsgate-proxy:pr-amd64 satsgate-proxy --help
+          docker run --rm --platform linux/amd64 --entrypoint python satsgate-proxy:pr-amd64 -c 'import satsgate_proxy; print(satsgate_proxy.__version__)'
+          uid="$(docker run --rm --platform linux/amd64 --entrypoint id satsgate-proxy:pr-amd64 -u)"
+          [[ "${uid}" == "65532" ]]
+          found="$(docker run --rm --platform linux/amd64 --entrypoint sh satsgate-proxy:pr-amd64 -c 'find / -xdev -name ".env*" -o -name "*.sqlite3" 2>/dev/null')"
+          [[ -z "${found}" ]]
+          docker run --rm --platform linux/arm64 satsgate-proxy:pr-arm64 satsgate-proxy --help

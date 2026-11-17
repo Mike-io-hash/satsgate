@@ -61,9 +61,18 @@ def _compose_service(text: str) -> dict:
 
 
 def _assert_compose_service(text: str, source: str) -> None:
-    """A volume line that is not valid YAML, or a host port on every interface, fails here."""
+    """A short volume line, or a host port on every interface, fails here."""
     service = _compose_service(text)
-    assert service["volumes"] == [f"{source}:/etc/satsgate/proxy.yaml:ro"]
+    assert service["volumes"] == [
+        {
+            "type": "bind",
+            "source": source,
+            "target": "/etc/satsgate/proxy.yaml",
+            "read_only": True,
+        }
+    ]
+    assert "build" not in service
+    assert service["image"] == "ghcr.io/mike-io-hash/satsgate-proxy:0.14.1"
     assert service["ports"] == ["127.0.0.1:8080:8080"]
     assert service["read_only"] is True
     assert service["user"] == "65532:65532"
@@ -282,7 +291,11 @@ def test_n1_rerun_without_want_usdc_keeps_the_x402_config(tmp_path: Path) -> Non
     assert again_body["usdc"]["enabled"] is True
     assert again_body.get("error") is None
     statement = [step for step in again_body["next_steps"] if "stays on" in step]
-    assert statement == ["USDC test mode stays on in the existing config. This run does not turn it off."]
+    assert statement == [
+        "USDC test mode stays on in the existing config. This run does not turn it off. "
+        "To turn it off, edit the YAML (x402: false on the route, or delete the route's x402 keys) "
+        "and run init again, or delete the YAML and re-run (it is regenerated; keys are reused)."
+    ]
 
 
 def test_t_c_3_7_start_command_and_docker_compose_keep_secrets_out(tmp_path: Path) -> None:
@@ -300,17 +313,17 @@ def test_t_c_3_7_start_command_and_docker_compose_keep_secrets_out(tmp_path: Pat
     assert "env_file: .env" in compose
     assert "satsgate-proxy:0.14.1" in compose
     assert "ghcr.io/mike-io-hash/satsgate-proxy:0.14.1" in compose
-    assert "dockerfile: Dockerfile.satsgate-proxy" in compose
-    assert "proxy/Dockerfile" not in compose
+    assert "dockerfile:" not in compose
+    assert "Until that image is published" not in compose
+    assert "Do not publish from this repo" not in compose
+    assert "proxy/Dockerfile" in compose
     assert "host: 0.0.0.0" in compose
     _assert_compose_service(compose, "./satsgate-proxy.yaml")
     assert _env_value(work, "SATSGATE_API_KEY") not in compose
     assert _env_value(work, "SATSGATE_ORIGIN_SECRET") not in compose
     assert "docker compose -f docker-compose.satsgate.yml up" in body["next_steps"]
-    dockerfile = (work / "Dockerfile.satsgate-proxy").read_text(encoding="utf-8")
-    assert "FROM python:3.12-slim" in dockerfile
-    assert 'satsgate-proxy>=0.14.1,<0.15' in dockerfile
-    assert "--uid 65532" in dockerfile
+    assert "From a checkout, until the packages are published" not in "\n".join(body["next_steps"])
+    assert not (work / "Dockerfile.satsgate-proxy").exists()
     written = (work / "satsgate-proxy.yaml").read_text(encoding="utf-8")
     assert "host: 127.0.0.1" in written
     assert "host: 0.0.0.0" not in written
@@ -365,13 +378,11 @@ def test_m3_start_command_uses_yaml_out(tmp_path: Path) -> None:
     assert "# Start: " in text
     assert "alt.yaml" in text
     assert "satsgate-proxy.yaml" not in text
-    source = [step for step in body["next_steps"] if "python -m satsgate_proxy" in step]
-    assert source and "alt.yaml" in source[0]
-    assert "satsgate-proxy.yaml" not in source[0]
+    assert "until the packages are published" not in "\n".join(body["next_steps"])
 
 
 def test_i3_docker_mounts_the_yaml_out_path(tmp_path: Path) -> None:
-    """A compose file that builds proxy/Dockerfile, listens only on loopback, or mounts the default name fails."""
+    """A compose file with a build key, a public port, or the default mount name fails."""
     _module, http, transport = _core(tmp_path)
     work = tmp_path / "work"
     work.mkdir()
@@ -383,7 +394,8 @@ def test_i3_docker_mounts_the_yaml_out_path(tmp_path: Path) -> None:
     compose = (work / "docker-compose.satsgate.yml").read_text(encoding="utf-8")
     _assert_compose_service(compose, "./alt.yaml")
     assert "satsgate-proxy.yaml" not in compose
-    assert "proxy/Dockerfile" not in compose
+    assert "build:" not in compose
+    assert "proxy/Dockerfile" in compose
     assert "host: 0.0.0.0" in compose
     assert "host.docker.internal" in compose
     written = (work / "alt.yaml").read_text(encoding="utf-8")

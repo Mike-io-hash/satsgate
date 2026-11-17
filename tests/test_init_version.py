@@ -11,7 +11,7 @@ from satsgate.__main__ import build_parser, run, version_line
 
 def test_init_version_line_names_the_three_packages() -> None:
     text = version_line()
-    assert text.startswith("satsgate 0.1.0\n")
+    assert text.startswith("satsgate 0.1.1\n")
     assert "satsgate-sdk 0.10.0\n" in text
     assert text.endswith("satsgate-proxy 0.14.1\n")
     stdout = io.StringIO()
