@@ -443,6 +443,16 @@ def test_t_b_1_6_live_caddy_serves_terms(tmp_path: Path) -> None:
         assert '<link rel="canonical" href="https://satsgate.org/terms/2026-11-13">' in dated_text
         assert "https://satsgate.org/terms" in dated_text
 
+        # T-C.9.1: a dated 404 must not keep the year-long cache.
+        future_status, future_headers, _future_body = _get(port, "/terms/2099-01-01")
+        extra_status, extra_headers, _extra_body = _get(port, "/terms/2026-11-13/x")
+        assert future_status == 404
+        assert extra_status == 404
+        assert "max-age=31536000" not in future_headers.get("cache-control", "")
+        assert "max-age=31536000" not in extra_headers.get("cache-control", "")
+        assert future_headers.get("cache-control") == "no-store"
+        assert extra_headers.get("cache-control") == "no-store"
+
         missing_status, missing_headers, missing_body = _get(port, "/terms/does-not-exist")
         assert missing_status == 404
         assert missing_headers.get("location") is None

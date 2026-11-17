@@ -2,7 +2,7 @@
 
 A reverse proxy a merchant runs beside an existing HTTP API. The buyer hits the proxy. The proxy sells the request through [satsgate](https://api.satsgate.org) and forwards only a paid request to the origin. The merchant does not write paywall code.
 
-The proxy is version **0.14.0**. Default `mode: paywall` talks to the satsgate core paywall (challenge, verify, status, charge, and x402 verify/settle). Core is **0.20.2**. The hosted gate is **0.15.2**. `mode: receipt` does not call core and does not use an API key. It checks `Satsgate-Receipt` with the site secret and forwards a successful check to the origin. The proxy does not sell prepaid balance and does not call the facilitator. Top up on the core with `POST /v1/topup/lightning` or `POST /v1/topup/usdc`. While the operator CDP switch is on, a USDC top-up is Base mainnet USDC only. The hosted gate is a separate program and only sells receipts. Buyer USDC on a proxied paywall route goes to the merchant's verified `payTo`. In receipt mode the buyer already paid the gate.
+The proxy is version **0.14.1**. Default `mode: paywall` talks to the satsgate core paywall (challenge, verify, status, charge, and x402 verify/settle). Core is **0.20.3**. The hosted gate is **0.15.2**. `mode: receipt` does not call core and does not use an API key. It checks `Satsgate-Receipt` with the site secret and forwards a successful check to the origin. The proxy does not sell prepaid balance and does not call the facilitator. Top up on the core with `POST /v1/topup/lightning` or `POST /v1/topup/usdc`. While the operator CDP switch is on, a USDC top-up is Base mainnet USDC only. The hosted gate is a separate program and only sells receipts. Buyer USDC on a proxied paywall route goes to the merchant's verified `payTo`. In receipt mode the buyer already paid the gate.
 
 ## USDC payments: Base network only
 
@@ -44,7 +44,7 @@ Satsgate never custodies, receives, forwards, or refunds buyer funds. The USDC m
    docker compose -f proxy/docker-compose.yml up --build
    ```
 
-   Buyers use the proxy's published port. `GET /healthz` is the proxy (`{"ok":true,"component":"satsgate-proxy","version":"0.14.0"}`). It is not forwarded.
+   Buyers use the proxy's published port. `GET /healthz` is the proxy (`{"ok":true,"component":"satsgate-proxy","version":"0.14.1"}`). It is not forwarded.
 
    Startup logs `key fp` and 12 hex characters. That is the start of SHA-256 of the API key. It is not a prefix of the key, and the key itself is not written to the log.
 
@@ -55,7 +55,7 @@ pip install -r proxy/requirements.txt
 PYTHONPATH=proxy/src python -m satsgate_proxy --config proxy/satsgate-proxy.yaml
 ```
 
-The image listens as uid 65532. Build it from the repo root: `docker build -f proxy/Dockerfile -t satsgate-proxy:0.14.0 .`
+The image listens as uid 65532. Build it from the repo root: `docker build -f proxy/Dockerfile -t satsgate-proxy:0.14.1 .`
 
 ## Receipt mode
 
@@ -116,11 +116,11 @@ First match wins. Anything that is not a free path or a route is **404**. A path
 
 `description` is sent as the challenge memo, trimmed to 250 characters.
 
-## Price and credits
+## Price
 
-One credit is one settled payment, not one HTTP call and not the sats the buyer paid. The trial plan is about **5 sats per credit**. Set `pricing.sats_per_credit` to the plan you bought. A `per_request` price below **10 times** that number logs a warning at startup (under 50 sats on the trial plan). Cheap calls should be `uses:N` or `pass:<seconds>`, so one credit covers many requests. Bundles and passes do not warn.
+A new account gets **500 free unlocks per UTC month**. After that, each unlock is **2 sats**, with a **10%** cap. The fee is taken once per payment, and only after the origin returns 2xx. `uses:N` and `pass:<seconds>` still bundle requests inside that one payment. `pricing.sats_per_credit` in an old config is ignored.
 
-Credits are charged once per `payment_hash`, and only after the origin returns 2xx. For USDC, settle has to succeed as well. They are not refunded. The Lightning payment goes to the merchant's payee when the invoice is paid, before the origin runs. A failed origin takes no credit and no use. The buyer retries the same macaroon or signature. Any remedy for that failed origin is between the buyer and the merchant.
+The Lightning payment goes to the merchant's payee when the invoice is paid, before the origin runs. A failed origin takes no fee and no use. The buyer retries the same macaroon or signature. Any remedy for that failed origin is between the buyer and the merchant. USDC test payments through this proxy do not use the free unlocks or the prepaid balance.
 
 ## Buyer IP
 

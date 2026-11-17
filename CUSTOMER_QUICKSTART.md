@@ -1,6 +1,17 @@
 # Customer Quickstart (hosted)
 
-This is the fastest path to integrate **satsgate** as a *customer* (agent operator).
+## Fastest path: `satsgate init`
+
+`satsgate` is not on PyPI yet (until Publicación D). From a checkout of this repo:
+
+```bash
+pip install -e sdk/python -e proxy -e cli
+satsgate init
+```
+
+After publication the same setup is `uvx satsgate init`.
+
+This is the path to integrate **satsgate** as a *customer* (agent operator).
 
 Notes:
 - **Non-custodial:** your users pay **your** Lightning Address (LNURL-pay). satsgate never holds your funds.
@@ -158,7 +169,7 @@ curl -s -X POST https://api.satsgate.org/v1/api-keys \
 
 That key can call the paywall challenge, status, and verify routes for resources starting with `demo/`. It cannot top up, change the payee, manage keys, or read the ledger. Drop the prefix field to allow every resource. Revoke it with `POST /v1/api-keys/{id}/revoke` using the account key. Python: `SatsgateClient.create_api_key`, `list_api_keys`, `revoke_api_key` (satsgate-sdk 0.4.0).
 
-To put that key in front of an API you already have, without writing paywall code, run [`satsgate-proxy`](./proxy/README.md). It is a separate process (version 0.14.0) and uses resource ids `route:<name>` or `site`, so set `resource_prefix` to match those (or omit it). The core in this quickstart stays the hosted API. `x402: true` without `x402_mode` is Base Sepolia. `x402_mode: live` is Base, after the operator has enabled it.
+To put that key in front of an API you already have, without writing paywall code, run [`satsgate-proxy`](./proxy/README.md). It is a separate process (version 0.14.1) and uses resource ids `route:<name>` or `site`, so set `resource_prefix` to match those (or omit it). The core in this quickstart stays the hosted API. `x402: true` without `x402_mode` is Base Sepolia. `x402_mode: live` is Base, after the operator has enabled it.
 
 A buyer-side agent uses [`satsgate-mcp`](./mcp/README.md) (version 0.11.0). That process does not create challenges. It pays a Lightning URL the proxy already protects, reads an x402 offer without signing it, and `list_sites` reads the public directory of approved sites, including a USD-priced route. The optional `sgr_` key on the MCP server is only for read-only status and is a different key from the one in the proxy.
 
@@ -176,7 +187,7 @@ If you pay from a wallet that does not hand you the preimage, poll `GET /v1/payw
 
 `invoice_expires_at` is when the buyer must pay. `claim_until` (and `valid_until` on a new challenge) is when you can still unlock. Those used to differ by hours: the invoice lived about a day and the token died after 10 minutes. They now stay aligned, plus a grace period. `cache_until` on a successful unlock is how long to cache that result when the challenge has no usage policy.
 
-A settled payment debits the prepaid balance in milisatoshis after the free quota. A cheap API call should be a bundle or a time pass, not a new Lightning invoice. On the challenge, send `max_uses` (how many requests) and/or `access_seconds` (how long after settlement). Then each buyer request calls verify or status with `consume=true`. The server stores the counter, so more than one proxy replica shares it. HTTP 401 `token_used_up` or `token_expired` means mint a new challenge. Without those fields, behaviour is unchanged. Python SDK 0.6.0: `paywall_challenge(max_uses=1)` and `paywall_verify(..., consume=True)`. `max_uses: 1` is the right default for a proxy in front of a paid request. A 50-call bundle or a one-hour pass is how you price something cheaper than one credit.
+A settled payment debits the prepaid balance in milisatoshis after the free quota. A cheap API call should be a bundle or a time pass, not a new Lightning invoice. On the challenge, send `max_uses` (how many requests) and/or `access_seconds` (how long after settlement). Then each buyer request calls verify or status with `consume=true`. The server stores the counter, so more than one proxy replica shares it. HTTP 401 `token_used_up` or `token_expired` means mint a new challenge. Without those fields, behaviour is unchanged. Python SDK 0.6.0: `paywall_challenge(max_uses=1)` and `paywall_verify(..., consume=True)`. `max_uses: 1` is the right default for a proxy in front of a paid request. A 50-call bundle or a one-hour pass is how you price something cheaper than one unlock.
 
 If that proxy is public, send the end buyer's IP in `X-Satsgate-Buyer-Ip` (`paywall_challenge(..., buyer_ip=)`). Satsgate uses it only when your connection comes from `SATSGATE_TRUSTED_PROXIES`. One buyer then gets a small budget (default 10 challenges per minute, and 5 unexpired unpaid challenges at a time on each rail) instead of the whole account budget, and an identical retry within 30 seconds gets the same invoice back. HTTP 429 `buyer_rate_limited` or `too_many_open_challenges_for_buyer` includes `Retry-After`. That wait is the soonest expiry of the challenges that still count. An expired challenge does not count. Lightning and x402 are counted separately. The address is stored only as a truncated hash, and that hash is deleted with the challenge.
 

@@ -269,11 +269,19 @@ def _refuse_flagged(client_id: int) -> None:
         raise x402.X402Error("payee_not_allowed", status=403)
 
 
-def _require_credit(client_id: int) -> int:
-    credits = db_x402.client_credits(config.DB_PATH, client_id)
-    if credits < _COST:
+def _require_model_b(client_id: int, offer: dict) -> None:
+    """Funded when a free slot remains or the prepaid balance covers the locked fee.
+
+    The legacy credits column is not an x402 decision.
+    """
+    from .charging import can_fund, fee_from_offer
+
+    fee_msat, _test_mode = fee_from_offer(offer)
+    now = int(time.time())
+    with db_x402._connect(config.DB_PATH) as conn:
+        funded = can_fund(conn, client_id=int(client_id), fee_msat=int(fee_msat), now=now, test_mode=False)
+    if not funded:
         raise ValueError("insufficient balance")
-    return credits
 
 
 def verify_payment(
@@ -291,7 +299,7 @@ def verify_payment(
     _refuse_flagged(client_id)
     payload, offer, fields = _bind(encoded, client_id=client_id, resource=resource, resource_url=url)
     if require_credit:
-        _require_credit(client_id)
+        _require_model_b(client_id, offer)
     state = db_x402.insert_pending(
         config.DB_PATH,
         network=fields["network"],
@@ -427,7 +435,7 @@ def settle_payment(
     if row["state"] not in {"verified", "settling", "settled"}:
         raise x402.X402Error("x402_in_progress", status=409)
     if require_credit:
-        _require_credit(client_id)
+        _require_model_b(client_id, offer)
     if row["state"] == "settled" and row["tx_hash"]:
         charged = db_x402.mark_settled_and_charge(
             config.DB_PATH,

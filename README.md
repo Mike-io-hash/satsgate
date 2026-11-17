@@ -6,6 +6,17 @@
 
 `satsgate` lets you charge AI agents, APIs, and web apps in Lightning and USDC on the same 402. Open an account without paying. Test mode is free. Live use includes 500 free unlocks per UTC month, then 2 sats per unlock with a 10% cap.
 
+## Fastest path: `satsgate init`
+
+`satsgate` is not on PyPI yet (until Publicación D). From a checkout of this repo:
+
+```bash
+pip install -e sdk/python -e proxy -e cli
+satsgate init
+```
+
+After publication the same setup is `uvx satsgate init`.
+
 The merchant flow from a cold start:
 
 1. Open an account with `POST /v1/accounts` (empty body). The `sg_` key is returned once. Top up any amount with `POST /v1/topup/lightning` (`{"sats": N}`, minimum 1,000) or `POST /v1/topup/usdc` (`{"usd": "1.00"}`, minimum US$1). Pay, then poll `GET /v1/topup/status/{payment_hash}` for Lightning.
@@ -475,13 +486,13 @@ Startup adds columns. It does not add a table. Copy `satsgate.sqlite3` before re
 
 ## No-code proxy
 
-`satsgate-proxy` (version 0.14.0, in [`proxy/`](./proxy/README.md)) sits in front of an HTTP API you already run. The default `mode: paywall` is unchanged: buyers talk to the proxy, the proxy calls this core with a restricted `sgr_` key, and the origin checks an HMAC. `mode: receipt` does not call core and does not need an `sgr_` key. The buyer pays the hosted gate, then calls the proxy with `Satsgate-Receipt`. The proxy checks the receipt and forwards a 2xx to the origin with the same HMAC.
+`satsgate-proxy` (version 0.14.1, in [`proxy/`](./proxy/README.md)) sits in front of an HTTP API you already run. The default `mode: paywall` is unchanged: buyers talk to the proxy, the proxy calls this core with a restricted `sgr_` key, and the origin checks an HMAC. `mode: receipt` does not call core and does not need an `sgr_` key. The buyer pays the hosted gate, then calls the proxy with `Satsgate-Receipt`. The proxy checks the receipt and forwards a 2xx to the origin with the same HMAC.
 
 An unpaid request is **402** with `WWW-Authenticate: L402 macaroon="...", invoice="..."` (macaroon before invoice, standard base64), which lnget and Alby `fetch402` already parse. The JSON body carries `amount_sats`, `payment_hash`, `invoice_expires_at`, and a hint for wallets that do not return a preimage. A route with `x402: true` adds `PAYMENT-REQUIRED` on that same 402. `Authorization: L402 <macaroon>:<preimage>` confirms the payment. `Authorization: L402 <macaroon>` polls status. The credit is taken after the origin returns 2xx. Pending stays on that invoice (`402 payment_pending`, `Retry-After`). A used, expired, or wrong-route token is a fresh 402, not 401.
 
-The self-hosted proxy is 0.14.0. `GET /healthz` on the proxy reports `0.14.0`. Core health is `0.20.2`. In `mode: paywall` the proxy confirms payment, calls the origin, and debits only after a 2xx, on Lightning and on x402. A failed origin reports no debit. The same `PAYMENT-SIGNATURE` can be retried after that failure. Set `x402: true` on a route, and `server.public_base` to the URL buyers pay, to offer USDC as well. `x402: true` without `x402_mode` is test (Base Sepolia). `x402_mode: live` is Base, and only while the operator switch is on. Try on Base Sepolia with your agent first, then switch the site to live. Startup logs `key fp` and a SHA-256 fingerprint of the restricted key, not any part of the key. An x402 settle through this proxy records that key's id on the ledger debit. The proxy does not sell prepaid balance. Top up on the core, with Lightning or with `POST /v1/topup/usdc`.
+The self-hosted proxy is 0.14.1. `GET /healthz` on the proxy reports `0.14.1`. Core health is `0.20.3`. In `mode: paywall` the proxy confirms payment, calls the origin, and debits only after a 2xx, on Lightning and on x402. A failed origin reports no debit. The same `PAYMENT-SIGNATURE` can be retried after that failure. Set `x402: true` on a route, and `server.public_base` to the URL buyers pay, to offer USDC as well. `x402: true` without `x402_mode` is test (Base Sepolia). `x402_mode: live` is Base, and only while the operator switch is on. Try on Base Sepolia with your agent first, then switch the site to live. Startup logs `key fp` and a SHA-256 fingerprint of the restricted key, not any part of the key. An x402 settle through this proxy records that key's id on the ledger debit. The proxy does not sell prepaid balance. Top up on the core, with Lightning or with `POST /v1/topup/usdc`.
 
-Config is YAML: upstream base URL, routes (`per_request`, `uses:N`, `pass:<seconds>`, scope `route` or `site`), free paths, body limits, and an origin secret from the environment. A `per_request` price below about 20 sats logs a warning at startup, about ten times the standard 2-sat fee. Cheap calls should be bundles or passes.
+Config is YAML: upstream base URL, routes (`per_request`, `uses:N`, `pass:<seconds>`, scope `route` or `site`), free paths, body limits, and an origin secret from the environment. `pricing.sats_per_credit` in an old file is ignored. Cheap calls should be bundles or passes.
 
 The proxy sends `X-Satsgate-Buyer-Ip` when it has a real buyer address. Hosted `https://api.satsgate.org` uses that header only if the proxy's egress IP is in `SATSGATE_TRUSTED_PROXIES` and the edge does not strip it. Otherwise per-buyer limits do not apply and the per-client caps still do.
 

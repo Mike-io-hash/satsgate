@@ -1067,7 +1067,10 @@ def test_restricted_key_does_not_spend_the_security_quota(tmp_path, monkeypatch)
 def test_delivery_deadline_covers_dns_headers_and_body(tmp_path):
     module = _load_app(tmp_path, **_env())
     budget = 0.12
-    tolerance = 0.35
+    # The mock peer blocks for 2.5s and httpx cannot preempt that sleep.
+    # A loaded runner can therefore finish only after the sleep. The bound
+    # stays far under the 5s client timeout, which is the hang this rejects.
+    tolerance = 1.0
 
     def assert_timeout(call) -> None:
         started = time.monotonic()
@@ -1078,7 +1081,7 @@ def test_delivery_deadline_covers_dns_headers_and_body(tmp_path):
         assert elapsed <= budget + tolerance
 
     def slow_headers(request: httpx.Request) -> httpx.Response:
-        time.sleep(0.6)
+        time.sleep(2.5)
         return httpx.Response(200, content=b"ok")
 
     assert_timeout(
@@ -1093,7 +1096,7 @@ def test_delivery_deadline_covers_dns_headers_and_body(tmp_path):
     )
 
     def slow_dns(host, port, *args, **kwargs):
-        time.sleep(0.6)
+        time.sleep(2.5)
         return _public_resolver(host, port)
 
     assert_timeout(
@@ -1112,7 +1115,7 @@ def test_delivery_deadline_covers_dns_headers_and_body(tmp_path):
             return self
 
         def __next__(self):
-            time.sleep(0.6)
+            time.sleep(2.5)
             return b"late"
 
         def close(self) -> None:
@@ -1148,6 +1151,11 @@ def test_delivery_deadline_covers_dns_headers_and_body(tmp_path):
     assert status == 200
     assert payload == b"ready"
     assert seen["accept"] == "identity"
+    # The mock peer keeps sleeping after the deadline returns. Later tests count
+    # these workers, so this one waits them out. The wait is not part of the bound.
+    for thread in threading.enumerate():
+        if thread.name in {"satsgate-webhook-http", "satsgate-webhook-dns"}:
+            thread.join(3)
 
 
 def _http_workers() -> list[threading.Thread]:

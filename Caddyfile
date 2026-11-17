@@ -137,11 +137,25 @@ gate.satsgate.org {
 	handle @terms {
 		route {
 			import satsgate_terms_headers
-			@dated path_regexp ^/terms/[0-9]{4}-[0-9]{2}-[0-9]{2}($|/)
-			header @dated Cache-Control "public, max-age=31536000"
-			@current not path_regexp ^/terms/[0-9]{4}-[0-9]{2}-[0-9]{2}($|/)
-			header @current Cache-Control "no-store"
 			uri strip_prefix /terms
+			@dated_file {
+				path_regexp ^/[0-9]{4}-[0-9]{2}-[0-9]{2}/?$
+				file {
+					root /srv/terms
+					try_files {path} {path}/index.html
+				}
+			}
+			header @dated_file Cache-Control "public, max-age=31536000"
+			@dated_missing {
+				path_regexp ^/[0-9]{4}-[0-9]{2}-[0-9]{2}($|/)
+				not file {
+					root /srv/terms
+					try_files {path} {path}/index.html
+				}
+			}
+			header @dated_missing Cache-Control "no-store"
+			@current not path_regexp ^/[0-9]{4}-[0-9]{2}-[0-9]{2}($|/)
+			header @current Cache-Control "no-store"
 			root * /srv/terms
 			try_files {path} {path}/index.html
 			file_server

@@ -3407,6 +3407,21 @@ def _paywall_x402(body: PaywallX402In, x_api_key: str | None, *, settle: bool):
         )
     from . import x402_service
 
+    test_offer = False
+    try:
+        _payload, offer, _fields = x402_service.peek_authorization(
+            client_id=auth.client.id,
+            slug="",
+            path="",
+            resource=body.resource,
+            encoded=body.payment_signature,
+            resource_url=resource_url,
+        )
+        del _payload
+        network = str(offer.get("network") or "")
+        test_offer = network == x402_mod.network_for_mode("test")
+    except x402_mod.X402Error:
+        test_offer = False
     try:
         if settle:
             result = x402_service.settle_payment(
@@ -3417,6 +3432,8 @@ def _paywall_x402(body: PaywallX402In, x_api_key: str | None, *, settle: bool):
                 encoded=body.payment_signature,
                 resource_url=resource_url,
                 api_key_id=auth.api_key_id,
+                require_credit=not test_offer,
+                cost=0 if test_offer else None,
             )
         else:
             result = x402_service.verify_payment(
@@ -3426,6 +3443,7 @@ def _paywall_x402(body: PaywallX402In, x_api_key: str | None, *, settle: bool):
                 resource=body.resource,
                 encoded=body.payment_signature,
                 resource_url=resource_url,
+                require_credit=not test_offer,
             )
     except x402_mod.X402Error as exc:
         content: dict[str, object] = {"ok": False, "error": exc.code}

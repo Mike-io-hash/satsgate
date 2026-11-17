@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.3] - 2026-11-17
+
+Core **0.20.3**. Hosted gate stays **0.15.2**. Packages were not published. `satsgate init` is not installable from PyPI until Publicación D.
+
+### Fixed
+- USDC test payments through a self-hosted proxy no longer use quota or balance.
+- A new account can take USDC through a self-hosted proxy using its free unlocks.
+- A dated `/terms` path is cached for a year only when that page exists. A dated 404 is `no-store`.
+
+### Added
+- `satsgate` **0.1.0** adds `satsgate init`. It writes a self-hosted paywall config and checks it with a 402 that does not pay.
+- Python SDK **0.10.0** adds `SatsgateClient.create_connect_link()`.
+
+### Changed
+- `satsgate-proxy` **0.14.1** no longer warns about a cheap per-request price. `pricing.sats_per_credit` in an old config still loads and is ignored.
+
 ## [0.20.2] - 2026-11-17
 
 Core **0.20.2**. Hosted gate stays **0.15.2**. Packages were not published.

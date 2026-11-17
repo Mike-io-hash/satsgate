@@ -259,8 +259,8 @@ def test_example_config_loads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_versions() -> None:
-    assert __version__ == "0.14.0"
-    assert 'APP_VERSION = "0.20.2"' in (ROOT / "app" / "config.py").read_text(encoding="utf-8")
+    assert __version__ == "0.14.1"
+    assert 'APP_VERSION = "0.20.3"' in (ROOT / "app" / "config.py").read_text(encoding="utf-8")
     compose = (ROOT / "proxy" / "docker-compose.yml").read_text(encoding="utf-8")
     assert f"image: satsgate-proxy:{__version__}" in compose
     assert "satsgate-proxy:0.8.0" not in compose
@@ -366,14 +366,22 @@ def test_buyer_ip_matches_core() -> None:
     assert buyer_ip_for_core(peer="203.0.113.10", forwarded_for="198.51.100.4", trusted_proxies="") == "203.0.113.10"
 
 
-def test_cheap_per_request_warns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    text = YAML.replace("price_sats: 100", "price_sats: 21")
-    caplog.set_level(logging.WARNING, logger="satsgate_proxy")
+def test_t_c_7_1_ten_sat_route_does_not_warn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """Restoring the packs-era cheap-call warning makes this fail."""
+    text = YAML.replace("price_sats: 100", "price_sats: 10").replace("  sats_per_credit: 5\n", "")
+    caplog.set_level(logging.DEBUG, logger="satsgate_proxy")
     settings = _load(tmp_path, monkeypatch, text)
-    assert any("Cheap calls should use" in item for item in settings.warnings)
-    assert "Cheap calls should use" in caplog.text
-    assert SECRET not in caplog.text
-    assert KEY not in caplog.text
+    assert settings.warnings == ()
+    assert "Cheap calls should use" not in caplog.text
+    assert "sats_per_credit is ignored" not in caplog.text
+
+
+def test_t_c_7_2_sats_per_credit_is_ignored_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    text = YAML.replace("price_sats: 100", "price_sats: 10")
+    caplog.set_level(logging.INFO, logger="satsgate_proxy")
+    settings = _load(tmp_path, monkeypatch, text)
+    assert settings.warnings == ()
+    assert caplog.text.count("pricing.sats_per_credit is ignored (pricing changed)") == 1
 
 
 def test_bundle_does_not_warn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
@@ -448,7 +456,7 @@ def test_health_and_free_and_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     with _client(settings, world) as client:
         health = client.get("/healthz")
         assert health.status_code == 200
-        assert health.json() == {"ok": True, "component": "satsgate-proxy", "version": "0.14.0"}
+        assert health.json() == {"ok": True, "component": "satsgate-proxy", "version": "0.14.1"}
         assert client.head("/healthz").status_code == 200
         free = client.get("/health", headers={"Authorization": "Bearer keep-me", "X-Satsgate-Payment-Hash": "forged"})
         missing = client.get("/nope")

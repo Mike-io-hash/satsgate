@@ -1,6 +1,6 @@
 [project]
 name = "satsgate-sdk"
-version = "0.9.0"
+version = "0.10.0"
 description = "Charge AI agents in Lightning and USDC on the same 402. 500 free unlocks per UTC month. Cobrale a agentes de IA en Lightning y USDC, en el mismo 402."
 readme = "README.md"
 requires-python = ">=3.10"

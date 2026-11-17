@@ -1,0 +1,43 @@
+[project]
+name = "satsgate"
+version = "0.1.0"
+description = "Charge AI agents in Lightning and USDC on the same 402. 500 free unlocks per UTC month. Cobrale a agentes de IA en Lightning y USDC, en el mismo 402."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+  "satsgate-sdk>=0.10.0,<0.11",
+  "satsgate-proxy>=0.14.1,<0.15",
+]
+
+[project.optional-dependencies]
+mcp = ["satsgate-mcp>=0.13.0,<0.14"]
+
+[project.scripts]
+satsgate = "satsgate.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/Mike-io-hash/satsgate"
+Issues = "https://github.com/Mike-io-hash/satsgate/issues"
+Changelog = "https://github.com/Mike-io-hash/satsgate/blob/main/CHANGELOG.md"
+
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+satsgate = ["snippets/*"]

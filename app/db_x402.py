@@ -672,6 +672,7 @@ def _offer_dict(row) -> dict:
         "requirements": requirements,
         "resource_url": row["resource_url"],
         "grant_credits": None if row["grant_credits"] is None else int(row["grant_credits"]),
+        "satsgate_fee_msat": None if row["satsgate_fee_msat"] is None else int(row["satsgate_fee_msat"]),
         "created_at": int(row["created_at"]),
     }
 

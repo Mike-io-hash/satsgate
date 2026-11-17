@@ -74,7 +74,6 @@ MAX_REQUEST_BYTES = 32 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 DEFAULT_REQUEST_BYTES = 1024 * 1024
 DEFAULT_RESPONSE_BYTES = 10 * 1024 * 1024
-CHEAP_CALL_MULTIPLE = 10
 MEMO_MAX = 250
 
 
@@ -129,7 +128,6 @@ class Settings:
     inject_headers: tuple[tuple[str, str], ...] = field(repr=False)
     origin_secret: str = field(repr=False)
     max_skew_seconds: int
-    sats_per_credit: int
     host: str
     port: int
     trusted_proxies: str
@@ -427,19 +425,6 @@ def _free_patterns(value: object) -> tuple[re.Pattern[str], ...]:
     return tuple(compiled)
 
 
-def _cheap_warnings(routes: tuple[Route, ...], sats_per_credit: int) -> list[str]:
-    threshold = CHEAP_CALL_MULTIPLE * sats_per_credit
-    warnings: list[str] = []
-    for route in routes:
-        if route.access.kind == "per_request" and route.price_sats < threshold:
-            warnings.append(
-                f"route {route.name} price {route.price_sats} sats per_request is below {threshold} "
-                f"(10 x sats_per_credit {sats_per_credit}). "
-                "Cheap calls should use uses:N or pass:<seconds> so one credit covers many requests."
-            )
-    return warnings
-
-
 def _redact(secrets: list[str]) -> None:
     logger = logging.getLogger("satsgate_proxy")
     logger.filters = [item for item in logger.filters if not isinstance(item, _Redact)]
@@ -512,7 +497,8 @@ def load_settings(path: str | Path) -> Settings:
     secret, secret_warning = _origin_secret(_env_name(origin.get("secret_env", "SATSGATE_ORIGIN_SECRET"), "secret_env"))
     inject = _inject_headers(upstream.get("inject_headers"))
     routes = _routes(_require(data, "routes", "routes"))
-    sats_per_credit = _as_int(pricing.get("sats_per_credit", 5), "sats_per_credit", lo=1, hi=1_000_000)
+    if "sats_per_credit" in pricing:
+        log.info("pricing.sats_per_credit is ignored (pricing changed)")
 
     if "listen" in server and ("host" in server or "port" in server):
         raise ConfigError("set listen or host and port, not both")
@@ -528,7 +514,7 @@ def load_settings(path: str | Path) -> Settings:
     if any(route.x402 for route in routes) and not public_base:
         raise ConfigError("server.public_base is required when a route sets x402: true")
 
-    warnings = _cheap_warnings(routes, sats_per_credit)
+    warnings: list[str] = []
     if secret_warning:
         warnings.append(secret_warning)
     for warning in warnings:
@@ -544,7 +530,6 @@ def load_settings(path: str | Path) -> Settings:
         inject_headers=inject,
         origin_secret=secret,
         max_skew_seconds=_as_int(origin.get("max_skew_seconds", 300), "max_skew_seconds", lo=1, hi=3600),
-        sats_per_credit=sats_per_credit,
         host=host,
         port=port,
         trusted_proxies=_trusted_proxies(server.get("trusted_proxies")),
