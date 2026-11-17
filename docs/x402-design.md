@@ -1,12 +1,12 @@
 # x402 v2 on Satsgate (USDC on Base)
 
-Core 0.14.0 sells the same credit packs for USDC, paid to `SATSGATE_TREASURY_EVM_ADDRESS`, with the amount taken from the BTC/USD median and locked on the offer. Core 0.14.1 and satsgate-gate 0.13.0 charge a Lightning credit only after the origin returns 2xx, give gate-route x402 offers the short 60–300 second window, and count only unexpired challenges toward the buyer cap. Core 0.14.2 and satsgate-proxy 0.12.0 do the same for the self-hosted proxy, on Lightning and on x402, and an unpaid Lightning quote leaves the buyer cap after that short window even when the invoice is still payable. An x402 debit records `network` and `amount_usd_atomic`. Core 0.13.0 added the BTC/USD median. Core 0.12.0 already had Base Sepolia (`eip155:84532`), the x402.org facilitator (confirmed: `GET /supported` lists `exact` on that network), merchant payTo, per-site rails, a USD or sats price, and verify-then-settle. satsgate-gate 0.12.0 serves both rails on one 402 and runs verify, then the origin, then settle. Those sentences describe the tree through core 0.14.2. Core 0.15.0 adds an exclusive mode. Test mode offers only Base Sepolia through x402.org. Live mode offers only Base through the Coinbase CDP facilitator when `SATSGATE_X402_CDP` is on. One 402 lists one network. Core health is 0.15.1. The EIP-712 domain name is `USDC` on Base Sepolia and `USD Coin` on Base. The hosted gate is 0.14.0. The proxy is 0.13.0. satsgate-mcp stays 0.11.0.
+Core 0.14.0 sells the same prepaid top-ups removed in 0.20.0 for USDC, paid to `SATSGATE_TREASURY_EVM_ADDRESS`, with the amount taken from the BTC/USD internal backup and locked on the offer. Core 0.14.1 and satsgate-gate 0.13.0 charge a Lightning credit only after the origin returns 2xx, give gate-route x402 offers the short 60–300 second window, and count only unexpired challenges toward the buyer cap. Core 0.14.2 and satsgate-proxy 0.12.0 do the same for the self-hosted proxy, on Lightning and on x402, and an unpaid Lightning quote leaves the buyer cap after that short window even when the invoice is still payable. An x402 debit records `network` and `amount_usd_atomic`. Core 0.13.0 added the BTC/USD internal backup. Core 0.12.0 already had Base Sepolia (`eip155:84532`), the x402.org facilitator (confirmed: `GET /supported` lists `exact` on that network), merchant payTo, per-site rails, a USD or sats price, and verify-then-settle. satsgate-gate 0.12.0 serves both rails on one 402 and runs verify, then the origin, then settle. Those sentences describe the tree through core 0.14.2. Core 0.15.0 adds an exclusive mode. Test mode offers only Base Sepolia through x402.org. Live mode offers only Base through the CDP facilitator when `SATSGATE_X402_CDP` is on. One 402 lists one network. Core health is 0.15.1. The EIP-712 domain name is `USDC` on Base Sepolia and `USD Coin` on Base. The hosted gate is 0.14.0. The proxy is 0.13.0. satsgate-mcp stays 0.11.0.
 
 The protocol is [x402 v2](https://github.com/x402-foundation/x402/blob/main/specs/x402-specification-v2.md) over HTTP: a 402 carries `PAYMENT-REQUIRED`, the buyer retries with `PAYMENT-SIGNATURE`, and a successful response carries `PAYMENT-RESPONSE`. The only scheme in the first cut is `exact` with EIP-3009 (`transferWithAuthorization`). The only asset is USDC. The only networks are Base Sepolia (`eip155:84532`) and, behind a flag, Base (`eip155:8453`).
 
 ## 1. Goals and non-goals
 
-A buyer can pay a hosted-gate route, a self-hosted proxy route, or a Satsgate credit pack with USDC on Base, using a third-party facilitator. The merchant picks the rail and the currency. Satsgate still charges one of the merchant's credits per successful unlock, on either rail.
+A buyer can pay a hosted-gate route, a self-hosted proxy route, or a Satsgate prepaid top-up removed in 0.20.0 with USDC on Base, using a third-party facilitator. The merchant picks the rail and the currency. Satsgate still charges one of the merchant's credits per successful unlock, on either rail.
 
 Non-goals for the first cut:
 
@@ -20,7 +20,7 @@ Non-goals for the first cut:
 
 1. **Credit timing, both rails.** On the hosted gate and on satsgate-proxy 0.12.0, the merchant's credit and the use counter move only after a successful origin response. x402 also waits for a successful `/settle` (section 3.2). A failed origin consumes neither. `POST /v1/paywall/verify` still debits when `charge` is omitted, which is what proxy 0.8.0 sends before it forwards.
 2. **x402 flow.** Offers use the standard `exact` flow: facilitator `/verify`, then the origin, then `/settle`. Not `upfront`. A later per-site setting may advertise `upfront`. The first cut has no such column.
-3. **USDC credit packs.** Each plan has a fixed USD price, not a BTC median. The amounts are decided in Etapa 4 pricing. Testnet uses placeholder values. This is decided later, not open.
+3. **USDC prepaid top-ups removed in 0.20.0.** Each plan has a fixed USD price, not a BTC effective quote. The amounts are decided in Etapa 4 pricing. Testnet uses placeholder values. This is decided later, not open.
 
 ## 2. What the code did before the gate
 
@@ -32,7 +32,7 @@ Hosted routes live in `sites` and `site_routes`. `site_routes.price_sats` is `NO
 
 The proxy (`proxy/src/satsgate_proxy/`) does the same shape against `POST /v1/paywall/challenge` and `/v1/paywall/verify`, with prices in YAML (`price_sats`, `access`). satsgate-mcp parses only the L402 header and the JSON sats fields (`mcp/src/satsgate_mcp/challenge.py`). Its budget (`mcp/src/satsgate_mcp/budget.py`) is in sats.
 
-Credit packs are `app/plans.py`. Every plan has `price_sats` and `credits`. `GET /v1/topup/{plan_id}` sells them for Lightning into `topups`, then credits `ledger`.
+Prepaid top-ups removed in 0.20.0 are `app/plans.py`. Every plan has `price_sats` and `credits`. `the Lightning top-up route removed in 0.20.0` sells them for Lightning into `topups`, then credits `ledger`.
 
 ## 3. Payment flows
 
@@ -156,7 +156,7 @@ The Lightning branch shipped in gate 0.13.0. Verify and status are called with `
 
 ### 3.4 Credit top-up in USDC
 
-`GET /v1/topup/{plan_id}` stays Lightning and still uses `plans.price_sats`. `GET /v1/topup/{plan_id}/x402` sells the same pack for USDC to Satsgate's own Base address (`SATSGATE_TREASURY_EVM_ADDRESS`). Packs have no separate USD list. The amount is the sats price converted with the BTC/USD median, rounded up to the next atomic unit, and locked on the offer. Below $0.001 or above $1,000,000 is not offered. The $100 route cap does not apply. A missing or stale median does not price this route. Satsgate is the seller of that one route. There is no origin. The flow is `/verify`, then `/settle`, then the ledger write. Credits are applied only after settle succeeds. The facilitator submits the USDC to the treasury. Core does not sign or run a facilitator. Credits are not transferred and are not redeemable for money. A failed facilitator response adds nothing. Unset or invalid treasury disables this route and leaves Lightning alone.
+`the Lightning top-up route removed in 0.20.0` stays Lightning and still uses `plans.price_sats`. `the USDC top-up route removed in 0.20.0` sells the same pack for USDC to Satsgate's own Base address (`SATSGATE_TREASURY_EVM_ADDRESS`). Packs have no separate USD list. The amount is the sats price converted with the BTC/USD effective quote, rounded up to the next atomic unit, and locked on the offer. Below $0.001 or above $1,000,000 is not offered. The $100 route cap does not apply. A missing or stale effective quote does not price this route. Satsgate is the seller of that one route. There is no origin. The flow is `/verify`, then `/settle`, then the ledger write. Credits are applied only after settle succeeds. The facilitator submits the USDC to the treasury. Core does not sign or run a facilitator. Credits are not transferred and are not redeemable for money. A failed facilitator response adds nothing. Unset or invalid treasury disables this route and leaves Lightning alone.
 
 ```mermaid
 sequenceDiagram
@@ -218,7 +218,7 @@ New table `payment_offers`, one row per issued 402:
 | `client_id`, `resource`, `api_key_id` | Same meaning as `paywall_challenges`. |
 | `price_currency` | Which price was the merchant's. |
 | `amount_sats`, `amount_usd_atomic` | Locked quotes. Null if that rail was not offered. |
-| `rate_num`, `rate_den`, `rate_fetched_at` | The median used, if any. Null when only the main currency was offered. |
+| `rate_num`, `rate_den`, `rate_fetched_at` | The effective quote used, if any. Null when only the main currency was offered. |
 | `expires_at` | Shared window. Lightning invoice expiry and x402 `maxTimeoutSeconds` end here. |
 | `max_uses`, `access_seconds` | Copied from the route, as today. |
 | `payment_hash` | Set when a Lightning invoice was minted. Unique when not null. Points at `paywall_challenges`. |
@@ -241,7 +241,7 @@ New table `x402_authorizations`, the replay record:
 
 Insert `pending` before `/verify`. Two workers cannot both verify one nonce. Verify failure marks `rejected` and does not call the origin. Origin failure leaves `pending` and does not call `/settle`. Settle success stores the tx, then the same transaction debits the credit and takes the use. Settle failure after a 2xx leaves the credit and the use alone and writes a log line. `verifications` stays the Lightning once-per-hash record, inserted by the Lightning PR only after origin 2xx. It is not a nonce table.
 
-Shipped in 0.14.0: `topups` gains `rail` (`lightning` or `x402`, default `lightning`), `tx_hash`, `amount_usd_atomic`, and `network`. `payment_hash` stays unique. An x402 row stores the EIP-3009 nonce (without `0x`) there and the facilitator tx in `tx_hash`. `ledger.reason` is `topup_x402`, `ledger.ref` is that tx hash, and `ledger` also gains `network` and `amount_usd_atomic`. `payment_offers` gains `resource_url` and `grant_credits` so the pack size is the one locked at 402 time. The nonce row stays `x402_authorizations`. `credit_charged` flips to 1 in the same write as the credit grant. There is no new table. `app/plans.py` did not gain a fixed USD column. The median is the price.
+Shipped in 0.14.0: `topups` gains `rail` (`lightning` or `x402`, default `lightning`), `tx_hash`, `amount_usd_atomic`, and `network`. `payment_hash` stays unique. An x402 row stores the EIP-3009 nonce (without `0x`) there and the facilitator tx in `tx_hash`. `ledger.reason` is `topup_x402`, `ledger.ref` is that tx hash, and `ledger` also gains `network` and `amount_usd_atomic`. `payment_offers` gains `resource_url` and `grant_credits` so the pack size is the one locked at 402 time. The nonce row stays `x402_authorizations`. `credit_charged` flips to 1 in the same write as the credit grant. There is no new table. `app/plans.py` did not gain a fixed USD column. The effective quote is the price.
 
 ## 5. API
 
@@ -317,7 +317,7 @@ Satsgate never converts a settled payment. If the buyer pays the USDC amount, th
 
 These are constraints on the design, not a legal opinion. The terms are `docs/hosted-gate-terms.md`. The public page is `https://satsgate.org/terms`. Core 0.15.0 added the points in section 9.
 
-Satsgate does not custody a buyer's payment for a merchant route, and it does not forward or refund it. A Lightning payment goes to `clients.payee_lightning_address`. A USDC payment for a route goes to `payee_evm_address`. A credit pack is the client paying Satsgate for credits, so that USDC goes to `SATSGATE_TREASURY_EVM_ADDRESS`. The facilitator submits the transaction. Satsgate does not. Credits are not a balance of USDC.
+Satsgate does not custody a buyer's payment for a merchant route, and it does not forward or refund it. A Lightning payment goes to `clients.payee_lightning_address`. A USDC payment for a route goes to `payee_evm_address`. A prepaid top-up removed in 0.20.0 is the client paying Satsgate for credits, so that USDC goes to `SATSGATE_TREASURY_EVM_ADDRESS`. The facilitator submits the transaction. Satsgate does not. Credits are not a balance of USDC.
 
 Satsgate does not run a facilitator or a relayer. Configuring our own `/settle` that signs with a Satsgate key would cross this line.
 
@@ -365,25 +365,25 @@ Unit tests, with the facilitator HTTP mocked, the same style as `tests/test_sats
 
 Base Sepolia, after deploy: one site in test mode (or a proxy route with `x402_mode: test`), pointed at a small HTTPS origin the operator runs, x402 only, priced at a few cents of test USDC. The merchant's own agent pays through the x402.org facilitator with faucet USDC. Confirm the transaction `to` is the merchant address, not Satsgate, and that the origin saw the signed request without `PAYMENT-SIGNATURE`. Then force the origin to fail and confirm the credit balance did not move. Retry the same signature and confirm it settles once.
 
-Mainnet, after `SATSGATE_X402_CDP` is on: switch that site to live. Pay one route of 0.01 USD to the merchant's address through CDP, and buy one Trial credit pack in USDC paid to `SATSGATE_TREASURY_EVM_ADDRESS`. Credits are not sold for faucet USDC while the switch is on. A merchant route can stay in test mode while packs are on mainnet.
+Mainnet, after `SATSGATE_X402_CDP` is on: switch that site to live. Pay one route of 0.01 USD to the merchant's address through CDP, and buy one Trial prepaid top-up removed in 0.20.0 in USDC paid to `SATSGATE_TREASURY_EVM_ADDRESS`. Credits are not sold for faucet USDC while the switch is on. A merchant route can stay in test mode while packs are on mainnet.
 
 ## 11. Later pull requests
 
 Each one is shippable on its own. Items 1–7 shipped before this pull request. Item 8 is this pull request.
 
 1. Core, testnet only. Offer rows, nonce table, payTo verification, standard `/verify` then `/settle` through the x402.org facilitator, feature flag default off for mainnet. No gate change. A test can call the internal routes. Lightning debit timing stays as it is today.
-2. Rates and main currency. Shipped in core 0.13.0: median refresh, lock on the offer, stale-rate behavior. The route columns landed in 0.12.0.
+2. Rates and main currency. Shipped in core 0.13.0: effective quote refresh, lock on the offer, stale-rate behavior. The route columns landed in 0.12.0.
 3. Gate. Shipped as satsgate-gate 0.12.0. Dual 402, header pass-through, verify then origin then settle. x402 credit and use move only after origin 2xx and settle success. The Lightning path still uses today's `consume=true`. The private Sepolia check is in the gate README.
 4. Lightning credit timing. Shipped for the hosted gate in satsgate-gate 0.13.0 and core 0.14.1. `settled_at` on payment confirmation. Credit and `uses_consumed` only after origin 2xx. Retry and replay as in section 3.1. Proxy 0.12.0 does the same through the public paywall routes. This release also shortens gate-route x402 offers to the 60–300 second window, stops expired offers from filling the buyer cap, and names the settlement field `transaction` (section 5.3 of the x402 v2 spec) with `tx` kept as an alias.
-5. USDC credit top-up. Shipped in core 0.14.0 as `GET /v1/topup/{plan_id}/x402`, payTo `SATSGATE_TREASURY_EVM_ADDRESS`, amount from the BTC/USD median locked on the offer. Credits only after settle. No gate change.
+5. USDC credit top-up. Shipped in core 0.14.0 as `the USDC top-up route removed in 0.20.0`, payTo `SATSGATE_TREASURY_EVM_ADDRESS`, amount from the BTC/USD effective quote locked on the offer. Credits only after settle. No gate change.
 6. Proxy YAML and the same headers, still talking to core.
 7. MCP. Shipped as satsgate-mcp 0.11.0. It parses `PAYMENT-REQUIRED`, shows the USDC amount exactly as the 402 states it, and enforces a separate USD cap (`SATSGATE_MCP_MAX_PAYMENT_USD` and `SATSGATE_MCP_DAILY_MAX_USD`). Both must be set before a `PAYMENT-SIGNATURE` is forwarded. It does not hold a buyer private key and does not pay. The sats caps in `budget.py` do not apply to USDC. An unknown network or asset is reported and is not payable. Only USDC on Base Sepolia and Base is treated as supported. A signature is forwarded only when every accept is supported and inside both caps, because the signature may select any accept.
 8. CDP mainnet behind `SATSGATE_X402_CDP`, default off. Shipped in core 0.15.0 as an exclusive per-site mode (`test` or `live`), not two accepts in one 402. A per-site `upfront` option is not in this list. The operator still runs the real mainnet payment in section 10 after deploy.
 
 ## 12. Open questions
 
-Credit timing, the standard x402 flow, and rounding are decisions (sections 1.1 and 6). Credit packs in 0.14.0 use the BTC/USD median rather than a fixed USD list. The testnet facilitator URL is `https://x402.org/facilitator`; `GET /supported` lists `exact` on `eip155:84532`. These still need an owner:
+Credit timing, the standard x402 flow, and rounding are decisions (sections 1.1 and 6). Prepaid top-ups removed in 0.20.0 in 0.14.0 use the BTC/USD effective quote rather than a fixed USD list. The testnet facilitator URL is `https://x402.org/facilitator`; `GET /supported` lists `exact` on `eip155:84532`. These still need an owner:
 
 1. Whether `payTo` may appear on `GET /v1/sites`. This design keeps it off the directory, like the Lightning address, and puts it only in the 402.
 2. Whether the MCP may hold a buyer private key. Decided for the first MCP release: no. satsgate-mcp 0.11.0 returns the payment requirements and enforces both USD caps. A key in the environment remains a separate decision, and it would have to be unread from logs the way `SATSGATE_MCP_NWC_URI` is.
-3. The mainnet facilitator URL. Decided in core 0.15.0: `https://api.cdp.coinbase.com/platform/v2/x402`, JWT bearer, hardcoded so it cannot be pointed at another host. Test mode stays on `https://x402.org/facilitator`.
+3. The mainnet facilitator URL. Decided in core 0.15.0: the Coinbase CDP host `https://api.cdp.coinbase.com/platform/v2/x402`, JWT bearer, hardcoded so it cannot be pointed at another host. Test mode stays on `https://x402.org/facilitator`.

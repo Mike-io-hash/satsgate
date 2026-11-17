@@ -19,9 +19,7 @@ origin:
   secret_env: SATSGATE_ORIGIN_SECRET
   max_skew_seconds: 300
 
-pricing:
-  # Trial is about 5 sats per credit. per_request below 10x this logs a warning.
-  sats_per_credit: 5
+# pricing.sats_per_credit is ignored. Pricing changed.
 
 server:
   host: 0.0.0.0

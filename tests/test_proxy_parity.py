@@ -127,7 +127,8 @@ def test_proxy_lightning_charges_once_after_a_successful_origin(tmp_path, monkey
 
 
 def test_proxy_x402_charges_once_and_records_the_ledger(tmp_path, monkeypatch):
-    module = _load_app(tmp_path)
+    monkeypatch.setenv("SATSGATE_FREE_QUOTA", "500")
+    module = _load_app(tmp_path, SATSGATE_FREE_QUOTA="500")
     _use(module, {"coinbase": "65000", "kraken": "65000", "bitstamp": "65000"})
     owner = Account.create()
     buyer = Account.create()
@@ -141,7 +142,9 @@ def test_proxy_x402_charges_once_and_records_the_ledger(tmp_path, monkeypatch):
         _verify_payee(core, account, owner)
         monkeypatch.setenv("SATSGATE_API_KEY", _restricted(core, account))
         settings = _settings(tmp_path, monkeypatch, x402=True)
-        before = core.get("/v1/balance", headers={"X-Api-Key": account}).json()["balance_msat"]
+        balance_before = core.get("/v1/balance", headers={"X-Api-Key": account}).json()
+        before = balance_before["balance_msat"]
+        free_before = balance_before["free_unlocks_remaining"]
         with TestClient(build_app(settings, transport=CoreBridge(module.app, origin))) as proxy:
             challenge = proxy.get("/blog/a", headers={"Authorization": "Bearer buyer"})
             assert challenge.status_code == 402, challenge.text
@@ -193,19 +196,20 @@ def test_proxy_x402_charges_once_and_records_the_ledger(tmp_path, monkeypatch):
             assert settled["tx"] == settled["transaction"]
             assert settled["network"] == "eip155:84532"
             assert settled["payer"] == buyer.address
-            assert core.get("/v1/balance", headers={"X-Api-Key": account}).json()["balance_msat"] == before - 2000
+            after = core.get("/v1/balance", headers={"X-Api-Key": account}).json()
+            assert after["balance_msat"] == before
+            assert after["free_unlocks_remaining"] == free_before
             keys = core.get("/v1/api-keys", headers={"X-Api-Key": account}).json()["keys"]
             assert len(keys) == 1
             with sqlite3.connect(os.environ["SATSGATE_DB_PATH"]) as conn:
                 ledger = conn.execute(
-                    """
-                    SELECT api_key_id, network, amount_usd_atomic, COUNT(*)
-                    FROM ledger WHERE reason = 'paywall_verify'
-                    """
+                    "SELECT COUNT(*) FROM ledger WHERE reason = 'paywall_verify'"
                 ).fetchone()
-            assert ledger[0] == keys[0]["id"]
-            assert ledger[1] == "eip155:84532"
-            assert ledger[2] == int(body["x402"]["amount"])
-            assert ledger[3] == 1
+                settled = conn.execute(
+                    "SELECT state, network FROM x402_authorizations"
+                ).fetchone()
+            assert ledger[0] == 0
+            assert settled[0] == "settled"
+            assert settled[1] == "eip155:84532"
             assert sum(1 for url, _body in calls if url.endswith("/settle")) == 1
             assert sum(1 for url, _body in calls if url.endswith("/verify")) == 1

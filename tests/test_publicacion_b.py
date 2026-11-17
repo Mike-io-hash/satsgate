@@ -10,10 +10,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 _HOUSES = ("bitstamp", "kraken", "chainlink", "coingecko", "d23_median")
 _COINBASE_OK = (
-    "cdp",
-    "facilitator",
+    "coinbase cdp",
+    "cdp facilitator",
     "smart wallet",
-    "wallet",
+    "coinbase wallet",
+    "wallet sdk",
     "replaysafehash",
     "deposit address",
     "coinbasepreference",
@@ -52,16 +53,25 @@ def _silence_files() -> list[Path]:
         ROOT / "proxy" / "README.md",
         ROOT / "mcp" / "README.md",
     ]
+    files.append(ROOT / "cli" / "README.md")
+    files.extend(path for path in (ROOT / "cli" / "src").rglob("*") if path.is_file() and path.suffix in {".py", ".md", ".js"})
+    files.extend(path for path in (ROOT / "cli" / "src" / "satsgate" / "snippets").glob("*") if path.is_file())
     files.extend(path for path in (ROOT / "docs").rglob("*") if path.is_file() and path.name != "CHANGELOG.md")
     files.extend(path for path in (ROOT / "web").rglob("*") if path.is_file() and "node_modules" not in path.parts)
     return files
 
 
 def _coinbase_allowed(line: str) -> bool:
+    """A coinbase line passes only through an allowlisted phrase, and not as a price."""
+    import re
+
     lowered = line.lower()
     if "coinbase" not in lowered:
         return True
-    return any(token in lowered for token in _COINBASE_OK)
+    normalized = re.sub(r"[^a-z0-9]+", " ", lowered)
+    if any(word in normalized for word in ("price", "rate", "quote", "spot")):
+        return False
+    return any(token in normalized for token in _COINBASE_OK)
 
 
 def _kraken_is_the_connect_deposit_warning(path: Path, line: str) -> bool:

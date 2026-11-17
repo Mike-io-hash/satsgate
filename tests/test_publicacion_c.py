@@ -188,3 +188,70 @@ def test_t_c_4_0_create_connect_link_against_the_core(
     sent = transport.requests[-1]
     assert sent.method == "POST"
     assert sent.url.path == "/v1/client/payee/evm/connect"
+
+
+def test_t_c_8_1_coinbase_price_sentence_is_rejected() -> None:
+    """Adding a spot-price sentence to a public README fails the silence check."""
+    from test_publicacion_b import _coinbase_allowed
+
+    bad = "Prices use the Coinbase spot price for your wallet."
+    assert _coinbase_allowed(bad) is False
+    assert _coinbase_allowed("Live mode uses the Coinbase CDP facilitator.") is True
+
+
+def test_t_c_8_2_silence_list_includes_the_umbrella() -> None:
+    from test_publicacion_b import _silence_files
+
+    files = _silence_files()
+    assert ROOT / "cli" / "README.md" in files
+    assert any(path.suffix == ".py" and "cli" in path.parts for path in files)
+    assert any(path.parent.name == "snippets" for path in files)
+
+
+def test_t_c_8_3_pack_wording_is_gone_from_the_listed_docs() -> None:
+    banned = ("5 sats per credit", "trial plan", "credit pack", "get /v1/topup/{plan_id}", "median")
+    paths = (
+        ROOT / "proxy" / "README.md",
+        ROOT / ".env.example",
+        ROOT / "CUSTOMER_QUICKSTART.md",
+        ROOT / "docs" / "x402-design.md",
+        ROOT / "cli" / "README.md",
+    )
+    for path in paths:
+        lowered = path.read_text(encoding="utf-8").lower()
+        for phrase in banned:
+            assert phrase not in lowered, f"{phrase} in {path}"
+
+
+def test_t_c_8_4_init_output_does_not_name_custody_or_a_rate_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from init_harness import RecordingSync, Scripted, invoke
+
+    monkeypatch.setenv("SATSGATE_FREE_QUOTA", "500")
+    module = _load_app(tmp_path, SATSGATE_FREE_QUOTA="500")
+    http = TestClient(module.app)
+    http.__enter__()
+    transport = RecordingSync(http)
+    work = tmp_path / "human"
+    work.mkdir()
+    stdin = Scripted(["merchant@pay.example\n", "n\n", "none\n"], tty=True)
+    try:
+        code, _body, out, err = invoke(
+            work,
+            transport,
+            stdin=stdin,
+            json_mode=False,
+            lightning_address=None,
+            want_usdc=None,
+            framework=None,
+            stdout_tty=True,
+        )
+    finally:
+        http.__exit__(None, None, None)
+    assert code == 0, out
+    text = (out + err).lower()
+    for house in ("bitstamp", "kraken", "chainlink", "coingecko", "coinbase"):
+        assert house not in text
+    custod = text.replace("non-custodial", "")
+    assert "custod" not in custod
