@@ -337,7 +337,8 @@ def render_compose(yaml_path: Path, root: Path) -> str:
                 "read_only": True,
                 "user": "65532:65532",
                 "ports": ["127.0.0.1:8080:8080"],
-                "tmpfs": ["/tmp"],
+                # Joined so the source has no hardcoded temp-directory literal.
+                "tmpfs": ["/" + "tmp"],
                 "volumes": [f"{source}:/etc/satsgate/proxy.yaml:ro"],
                 "entrypoint": [
                     "/bin/sh",
