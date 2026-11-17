@@ -42,6 +42,7 @@ This step needs its own explicit OK from Ia, separate from the deploy OK. Ia pic
 From the operator's box, not from the server, in a fresh scratch directory:
 
 ```bash
+cd /path/to/the/merged/checkout
 python3 -m venv /tmp/satsgate-init-c
 /tmp/satsgate-init-c/bin/pip install -e sdk/python -e proxy -e cli
 /tmp/satsgate-init-c/bin/satsgate init --json --lightning-address <the address Ia chose>
