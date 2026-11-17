@@ -83,6 +83,9 @@ def test_t_b_3_1_create_account_against_the_core(tmp_path: Path, monkeypatch: py
 
 
 def test_t_b_3_2_signup_limit_is_raised_and_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Restore the suite's high caps afterward. A leftover 3 breaks later top-up tests.
+    monkeypatch.setenv("SATSGATE_SIGNUP_MAX_PER_IP_PER_DAY", "3")
+    monkeypatch.setenv("SATSGATE_SIGNUP_MAX_GLOBAL_PER_DAY", "100")
     module = _load_app(
         tmp_path,
         SATSGATE_SIGNUP_MAX_PER_IP_PER_DAY="3",

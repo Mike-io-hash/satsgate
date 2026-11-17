@@ -285,6 +285,7 @@ class _Caddy:
             "-e",
             "SATSGATE_REOWN_PROJECT_ID=test-reown-project",
             "caddy:2",
+            "caddy",
             "run",
             "--config",
             "/etc/caddy/Caddyfile",
