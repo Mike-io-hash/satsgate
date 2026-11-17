@@ -54,6 +54,6 @@ Lightning has no test network. A paid Lightning request moves real sats to the m
 uvx --env-file .env satsgate-proxy --config satsgate-proxy.yaml
 ```
 
-`--docker` writes `docker-compose.satsgate.yml` and prints `docker compose -f docker-compose.satsgate.yml up`.
+`--docker` writes `docker-compose.satsgate.yml` and `Dockerfile.satsgate-proxy`, and prints `docker compose -f docker-compose.satsgate.yml up`. The compose file names `ghcr.io/mike-io-hash/satsgate-proxy:0.14.1` as the image D will publish. Until that image exists, the Dockerfile installs `satsgate-proxy` with pip into `python:3.12-slim`. The generated service listens on `0.0.0.0`; the YAML written for `uvx` stays on `127.0.0.1`.
 
 `--framework fastapi`, `express`, or `nginx` copies the existing origin check. A client that can reach the origin directly must fail closed. The Caddy file in the package is a note, not an HMAC check.

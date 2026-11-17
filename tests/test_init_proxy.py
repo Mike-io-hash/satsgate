@@ -251,11 +251,44 @@ def test_t_c_3_7_start_command_and_docker_compose_keep_secrets_out(tmp_path: Pat
     compose = (work / "docker-compose.satsgate.yml").read_text(encoding="utf-8")
     assert "env_file: .env" in compose
     assert "satsgate-proxy:0.14.1" in compose
+    assert "ghcr.io/mike-io-hash/satsgate-proxy:0.14.1" in compose
+    assert "dockerfile: Dockerfile.satsgate-proxy" in compose
+    assert "proxy/Dockerfile" not in compose
+    assert "host: 0.0.0.0" in compose
+    assert '"./satsgate-proxy.yaml":/etc/satsgate/proxy.yaml:ro' in compose
     assert 'user: "65532:65532"' in compose
     assert "read_only: true" in compose
     assert _env_value(work, "SATSGATE_API_KEY") not in compose
     assert _env_value(work, "SATSGATE_ORIGIN_SECRET") not in compose
     assert "docker compose -f docker-compose.satsgate.yml up" in body["next_steps"]
+    dockerfile = (work / "Dockerfile.satsgate-proxy").read_text(encoding="utf-8")
+    assert "FROM python:3.12-slim" in dockerfile
+    assert 'satsgate-proxy>=0.14.1,<0.15' in dockerfile
+    assert "--uid 65532" in dockerfile
+    written = (work / "satsgate-proxy.yaml").read_text(encoding="utf-8")
+    assert "host: 127.0.0.1" in written
+    assert "host: 0.0.0.0" not in written
+
+
+def test_i3_docker_mounts_the_yaml_out_path(tmp_path: Path) -> None:
+    """A compose file that builds proxy/Dockerfile, listens only on loopback, or mounts the default name fails."""
+    _module, http, transport = _core(tmp_path)
+    work = tmp_path / "work"
+    work.mkdir()
+    try:
+        code, body, _out, _err = invoke(work, transport, docker=True, yaml_out="alt.yaml")
+    finally:
+        _close(http)
+    assert code == 0, body
+    compose = (work / "docker-compose.satsgate.yml").read_text(encoding="utf-8")
+    assert '"./alt.yaml":/etc/satsgate/proxy.yaml:ro' in compose
+    assert "satsgate-proxy.yaml" not in compose
+    assert "proxy/Dockerfile" not in compose
+    assert "host: 0.0.0.0" in compose
+    assert "host.docker.internal" in compose
+    written = (work / "alt.yaml").read_text(encoding="utf-8")
+    assert "host: 127.0.0.1" in written
+    assert "host: 0.0.0.0" not in written
 
 
 def test_t_c_3_8_packaged_snippets_match_the_proxy_sources() -> None:

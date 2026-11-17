@@ -285,23 +285,69 @@ def render_yaml(
     )
 
 
-def render_compose() -> str:
-    """Local image build. Secrets stay in env_file, not in this file."""
+def _next_minor(version: str) -> str:
+    major, minor, _patch = version.split(".")
+    return f"{major}.{int(minor) + 1}"
+
+
+def render_proxy_dockerfile() -> str:
+    """Pip install of the proxy. The published image is a later step."""
+    ceiling = _next_minor(proxy_version)
+    image = f"ghcr.io/mike-io-hash/satsgate-proxy:{proxy_version}"
+    return (
+        f"# Fallback until {image} is published (D). Do not publish this image from CI.\n"
+        "FROM python:3.12-slim\n"
+        "RUN pip install --no-cache-dir "
+        f'"satsgate-proxy>={proxy_version},<{ceiling}" \\\n'
+        "    && useradd --uid 65532 --create-home --shell /usr/sbin/nologin satsgate\n"
+        "USER 65532:65532\n"
+    )
+
+
+def _compose_mount(root: Path, yaml_path: Path) -> str:
+    try:
+        relative = yaml_path.resolve().relative_to(root.resolve())
+        source = "./" + relative.as_posix()
+    except ValueError:
+        source = yaml_path.resolve().as_posix()
+    return json.dumps(source)
+
+
+def render_compose(yaml_path: Path, root: Path) -> str:
+    """Compose a merchant can build outside this repo. Secrets stay in env_file."""
+    image = f"ghcr.io/mike-io-hash/satsgate-proxy:{proxy_version}"
+    mount = _compose_mount(root, yaml_path)
     return (
         "# satsgate-proxy for this project. Secrets are read from .env.\n"
+        f"# D target image: {image}\n"
+        "# Until that image is published, build Dockerfile.satsgate-proxy\n"
+        "# (a pip install of the same release). Do not publish from this repo.\n"
+        "# upstream.base_url 127.0.0.1 is this container, not the merchant app.\n"
+        "# Use host.docker.internal when the app runs on the host.\n"
+        "# The merchant YAML keeps host 127.0.0.1 for local uvx. This service\n"
+        "# rewrites that listen address to 0.0.0.0 so the published port works.\n"
         "services:\n"
         "  satsgate-proxy:\n"
         "    build:\n"
         "      context: .\n"
-        "      dockerfile: proxy/Dockerfile\n"
+        "      dockerfile: Dockerfile.satsgate-proxy\n"
         f"    image: satsgate-proxy:{proxy_version}\n"
         "    env_file: .env\n"
         "    read_only: true\n"
         '    user: "65532:65532"\n'
         "    ports:\n"
         '      - "127.0.0.1:8080:8080"\n'
+        "    tmpfs:\n"
+        "      - /tmp\n"
         "    volumes:\n"
-        "      - ./satsgate-proxy.yaml:/etc/satsgate/proxy.yaml:ro\n"
+        f"      - {mount}:/etc/satsgate/proxy.yaml:ro\n"
+        "    entrypoint:\n"
+        "      - /bin/sh\n"
+        "      - -c\n"
+        "      - |\n"
+        "        cp /etc/satsgate/proxy.yaml /tmp/proxy.yaml\n"
+        "        sed -i 's/host: 127.0.0.1/host: 0.0.0.0/' /tmp/proxy.yaml\n"
+        "        exec satsgate-proxy --config /tmp/proxy.yaml\n"
     )
 
 
@@ -1072,12 +1118,22 @@ def _execute(options: InitOptions, console: _Console, transport: Any, run: _Run)
         if not _copy_snippets(run, root, console, options.framework or "none"):
             return
         if options.docker:
+            dockerfile = _place_file(
+                run,
+                root,
+                root / "Dockerfile.satsgate-proxy",
+                console,
+                render_proxy_dockerfile(),
+                step="write_dockerfile",
+            )
+            if dockerfile is None:
+                return
             compose = _place_file(
                 run,
                 root,
                 root / "docker-compose.satsgate.yml",
                 console,
-                render_compose(),
+                render_compose(yaml_path, root),
                 step="write_compose",
             )
             if compose is None:
