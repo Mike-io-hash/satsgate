@@ -973,10 +973,10 @@ def _fill_next_steps(run: _Run, options: InitOptions) -> None:
             "with the key on the buyer's machine). Test mode is free."
         )
         steps.append(f"Buyers need a public URL. server.public_base is {options.public_url}.")
+    elif run.connect_expires is not None:
+        steps.append("Open the connect link, connect the wallet, then run satsgate init again.")
     else:
         steps.append("To try USDC, run satsgate init again with --want-usdc.")
-    if run.connect_expires is not None:
-        steps.append("Open the connect link, connect the wallet, then run satsgate init again.")
     if run.terms_url:
         steps.append(f"Terms: {run.terms_url}")
     if options.docker:

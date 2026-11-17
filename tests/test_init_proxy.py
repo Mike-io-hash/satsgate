@@ -424,6 +424,8 @@ def test_t_c_4_1_agent_connect_link_stays_out_of_json_and_logs(
     assert stat.S_IMODE(link.stat().st_mode) == 0o600
     assert body["usdc"]["connect_link_file"].endswith("connect-link.txt")
     assert isinstance(body["usdc"]["expires_at"], int)
+    assert any("Open the connect link" in step for step in body["next_steps"])
+    assert not any("--want-usdc" in step for step in body["next_steps"])
     blob = out + err + caplog.text + json.dumps(body)
     assert url not in blob
 
