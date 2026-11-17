@@ -329,10 +329,10 @@ New sites start `pending`. `GET /v1/sites` lists only `approved` sites with `lis
 | `SATSGATE_SITE_SECRET_KEY` | unset | 64 hex characters. Required to create or rotate a site secret. Unset does not stop the process. |
 | `SATSGATE_SITES_AUTO_APPROVE` | off | `1` approves a new site only after a successful origin check, acceptance of the current `SATSGATE_TERMS_VERSION`, and an account that is not suspended. Empty terms with this switch on refuses to boot. Leave it off. |
 | `SATSGATE_RECEIPT_SECONDS` | 86400 | Receipt lifetime when the route sets no `access_seconds`. Clamped to 60–86400 and to the paywall access cap. |
-| `SATSGATE_TERMS_VERSION` | empty | Token the account must have accepted. Empty until the terms are published. |
-| `SATSGATE_TERMS_URL` | empty | https page linked from the 402 when set. |
+| `SATSGATE_TERMS_VERSION` | empty | Effective date of the terms. Production is already `2026-11-13`. Do not change it here. |
+| `SATSGATE_TERMS_URL` | empty | https page linked from the API and the gate 402 when set. Deploy sets `https://satsgate.org/terms`. Empty in Compose. |
 | `SATSGATE_ABUSE_CONTACT` | empty | Bare email. Shown on `GET /` of the gate when set. |
-| `SATSGATE_GEOBLOCK_COUNTRIES` | empty | ISO codes refused on credit-pack quotes. Empty skips the lookup. |
+| `SATSGATE_GEOBLOCK_COUNTRIES` | empty | ISO codes refused on signups and quotes. Empty skips the lookup. |
 | `SATSGATE_GEOIP_DB` | `/data/geoip/dbip-country-lite.mmdb` | DB-IP Country Lite. Required only when the country list is set. |
 | `SATSGATE_OFAC_EVM_FILE` | `/data/ofac/ofac_evm.txt` | Local EVM addresses from the OFAC SDN list. Missing file fails open. |
 | `SATSGATE_SITES_MAX_PER_ACCOUNT` | 3 | Sites per account, including disabled ones. |
@@ -376,7 +376,7 @@ When both rails are on and the quote is fresh, the challenge locks the other cur
 | --- | --- | --- |
 | `SATSGATE_RATES_ENABLED` | on | `0` skips the background refresh. |
 | `SATSGATE_RATES_REFRESH_SECONDS` | 60 | How often the quote is refreshed (15 to 600). |
-| `SATSGATE_RATES_STALE_SECONDS` | 180 | After this, the last median is not used to price a challenge. |
+| `SATSGATE_RATES_STALE_SECONDS` | 180 | After this, the internal backup is not used to price a challenge. The primary read stays fresh for 3,600 seconds. |
 | `SATSGATE_RATES_SOURCE_TIMEOUT_SECONDS` | 2 | Timeout for one source (0.5 to 5). |
 | `SATSGATE_RATES_OUTLIER_BPS` | 200 | Drop a backup sample this far from the others. 200 is 2%. |
 | `SATSGATE_BASE_RPC_URL` | `https://mainnet.base.org` | Primary Base RPC for the on-chain quote and for smart-wallet checks. |
@@ -389,7 +389,7 @@ No new table. Copy `satsgate.sqlite3` before restarting onto 0.13.0 anyway. Ligh
 
 ### Hosted gate x402 (gate 0.12.0)
 
-The gate offers Lightning, x402, or both, matching the site. A Lightning-only 402 is the 0.11.0 body and `WWW-Authenticate`, and it has no `PAYMENT-REQUIRED`. An x402 offer uses scheme `exact` on `eip155:84532`, the Base Sepolia USDC contract, and `payTo` equal to the verified address. The amount is the route's USD price, or the sats price converted with the live median and locked on that challenge. The gate does not cache the converted amount.
+The gate offers Lightning, x402, or both, matching the site. A Lightning-only 402 is the 0.11.0 body and `WWW-Authenticate`, and it has no `PAYMENT-REQUIRED`. An x402 offer uses scheme `exact` on `eip155:84532`, the Base Sepolia USDC contract, and `payTo` equal to the verified address. The amount is the route's USD price, or the sats price converted with the effective quote and locked on that challenge. The gate does not cache the converted amount.
 
 `PAYMENT-SIGNATURE` is checked by core (verify, then the origin, then settle). Both payment headers on one request is `400 one_rail_only`. The origin does not see `PAYMENT-SIGNATURE`. A USDC payment is signed with `X-Satsgate-Paid-Usd-Atomic`. The payment-hash header is the EIP-3009 nonce, because the transaction id does not exist until settle, and settle runs after the origin.
 

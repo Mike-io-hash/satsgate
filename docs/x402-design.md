@@ -287,7 +287,7 @@ A route has one main price, chosen by the merchant, stored on `site_routes`. The
 
 Core keeps one effective BTC/USD quote. The primary read is an on-chain price through the Base RPC already configured for the payee check. An internal backup is used only when that read is missing or unusable, and the public API does not name either one. The refresh task lives in the core process, next to the existing startup in `app/main.py`. It does not run in the gate.
 
-The rate is stale at 3 minutes. Stale, empty, or non-numeric means the derived rail is omitted. The main currency is still offered. A 402 never includes a guessed price. The offer row stores the numerator and denominator actually used (`rate_num` / `rate_den` as integers of USD per BTC scaled by 10^8) and `rate_fetched_at`. Settle checks the locked amount, not a new fetch.
+The primary on-chain read is fresh for 3,600 seconds. The internal backup is fresh for 180 seconds. A quote that is stale, empty, or non-numeric means the derived rail is omitted. The main currency is still offered. A 402 never includes a guessed price. The offer row stores the numerator and denominator actually used (`rate_num` / `rate_den` as integers of USD per BTC scaled by 10^8) and `rate_fetched_at`. Settle checks the locked amount, not a new fetch.
 
 Rounding, decided in core 0.13.0:
 
@@ -315,7 +315,7 @@ Satsgate never converts a settled payment. If the buyer pays the USDC amount, th
 
 ## 8. Regulatory design constraints
 
-These are constraints on the design, not a legal opinion. `docs/hosted-gate-terms.md` is still a draft and is not in effect. Core 0.15.0 added the points in section 9 to that draft. It still needs legal review.
+These are constraints on the design, not a legal opinion. The terms are `docs/hosted-gate-terms.md`. The public page is `https://satsgate.org/terms`. Core 0.15.0 added the points in section 9.
 
 Satsgate does not custody a buyer's payment for a merchant route, and it does not forward or refund it. A Lightning payment goes to `clients.payee_lightning_address`. A USDC payment for a route goes to `payee_evm_address`. A credit pack is the client paying Satsgate for credits, so that USDC goes to `SATSGATE_TREASURY_EVM_ADDRESS`. The facilitator submits the transaction. Satsgate does not. Credits are not a balance of USDC.
 
@@ -338,7 +338,7 @@ The facilitator may refuse a payment (sanctions or KYT). That refusal is a faile
 
 ## 9. Terms
 
-Core 0.15.0 added these points to the draft in `docs/hosted-gate-terms.md`. The draft is still pending legal review and is not in effect.
+Core 0.15.0 added these points to `docs/hosted-gate-terms.md`. The public page is `https://satsgate.org/terms`.
 
 - USDC payments depend on a third-party facilitator. That facilitator can reject a payment, including after the origin has been called. Satsgate does not control that decision, does not complete the payment itself, and does not refund.
 - Sites may not offer illegal or sanctioned content or services. Satsgate may disable a site on an abuse report, as it already may for the other prohibited uses.

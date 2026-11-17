@@ -520,7 +520,7 @@ def _unlock(
             content={
                 "ok": False,
                 "error": str(exc),
-                "hint": "Top up payment verifications (credits): GET /v1/plans then /v1/topup/{plan_id}",
+                "hint": "Top up with POST /v1/topup/lightning or POST /v1/topup/usdc.",
             },
             headers=_NO_STORE,
         )
@@ -604,7 +604,7 @@ def _balance_error(exc: ValueError) -> JSONResponse:
         content={
             "ok": False,
             "error": str(exc),
-            "hint": "Top up payment verifications (credits): GET /v1/plans then /v1/topup/{plan_id}",
+            "hint": "Top up with POST /v1/topup/lightning or POST /v1/topup/usdc.",
         },
         headers=_NO_STORE,
     )
