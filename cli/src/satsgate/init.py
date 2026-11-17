@@ -857,6 +857,57 @@ def _probe(
     return False
 
 
+def _block_existing_outputs(
+    run: _Run,
+    root: Path,
+    options: InitOptions,
+    framework: str,
+    api_url: str,
+    *,
+    allow_x402: bool,
+) -> bool:
+    """Refuse a foreign YAML or snippet before an account or a key is created."""
+    plain = render_yaml(api_url=api_url, upstream=options.upstream, route_path=options.path)
+    owned = {plain}
+    if allow_x402:
+        owned.add(
+            render_yaml(
+                api_url=api_url,
+                upstream=options.upstream,
+                route_path=options.path,
+                x402=True,
+                public_base=options.public_url,
+            )
+        )
+    yaml_path = _yaml_path(root, options)
+    if yaml_path.exists() and not yaml_path.is_symlink() and files.read_text(yaml_path) not in owned:
+        _fail(
+            run,
+            code="file_exists",
+            step="write_yaml",
+            message=f"{yaml_path.name} already exists and was not overwritten.",
+            exit_code=3,
+            status="file_exists",
+        )
+        return False
+    for dest_name, source_name in _SNIPPETS.get(framework, ()):
+        path = root / dest_name
+        if not path.exists() or path.is_symlink():
+            continue
+        expected = (resource_files("satsgate") / "snippets" / source_name).read_text(encoding="utf-8")
+        if files.read_text(path) != expected:
+            _fail(
+                run,
+                code="file_exists",
+                step="snippet",
+                message=f"{path.name} already exists and was not overwritten.",
+                exit_code=3,
+                status="file_exists",
+            )
+            return False
+    return True
+
+
 def _copy_snippets(run: _Run, root: Path, console: _Console, framework: str) -> bool:
     pairs = _SNIPPETS.get(framework, ())
     planned: list[tuple[Path, str]] = []
@@ -999,6 +1050,15 @@ def _execute(options: InitOptions, console: _Console, transport: Any, run: _Run)
 
     account_file = _account_path(root)
     saved_key = _read_account_key(account_file) if account_file.exists() else None
+    if not _block_existing_outputs(
+        run,
+        root,
+        options,
+        framework,
+        raw_url,
+        allow_x402=saved_key is not None,
+    ):
+        return
     open_new = _confirm_new_account(console, options, saved_key is not None)
     if saved_key and not open_new:
         saved_key_use: str | None = saved_key

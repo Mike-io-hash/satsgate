@@ -22,7 +22,7 @@ from satsgate_proxy.config import load_settings
 from satsgate_sdk import SatsgateClient
 from test_x402 import _load_app, _verify_payee
 
-from init_harness import RecordingSync, Scripted, invoke
+from init_harness import RecordingSync, Scripted, invoke, posts
 
 ROOT = Path(__file__).resolve().parents[1]
 _SNIPPETS = ("fastapi_verify.py", "express_verify.js", "nginx_verify.js", "nginx.conf", "Caddyfile")
@@ -341,12 +341,15 @@ def test_t_c_3_10_framework_snippets_are_copied_and_not_overwritten(tmp_path: Pa
         blocked.mkdir()
         target = blocked / "satsgate_fastapi_verify.py"
         target.write_text("keep this snippet\n", encoding="utf-8")
+        opened = len(posts(transport, "/v1/accounts"))
         code, body, _out, _err = invoke(blocked, transport, framework="fastapi")
     finally:
         _close(http)
     assert code == 3
     assert body["status"] == "file_exists"
     assert target.read_text(encoding="utf-8") == "keep this snippet\n"
+    assert len(posts(transport, "/v1/accounts")) == opened
+    assert not (blocked / ".satsgate" / "account.env").exists()
 
 
 def test_t_c_4_1_agent_connect_link_stays_out_of_json_and_logs(

@@ -110,6 +110,9 @@ def test_t_c_5_3_existing_yaml_is_not_overwritten(tmp_path: Path) -> None:
     assert body["status"] == "file_exists"
     assert body["error"]["code"] == "file_exists"
     assert target.read_bytes() == before
+    assert posts(transport, "/v1/accounts") == []
+    assert not (work / ".satsgate" / "account.env").exists()
+    assert not (work / ".env").exists()
 
 
 def test_t_c_5_4_env_appends_missing_keys_and_conflicts_stop(tmp_path: Path) -> None:
