@@ -33,16 +33,34 @@ jobs:
         run: node tests/webhook_signature.test.js
 
       - name: Ruff
-        run: ruff check app tests proxy/src proxy/snippets/fastapi_verify.py proxy/snippets/fastapi_receipt.py mcp/src mcp/scripts gate/src sdk/python/src
+        run: ruff check app tests proxy/src proxy/snippets/fastapi_verify.py proxy/snippets/fastapi_receipt.py mcp/src mcp/scripts gate/src sdk/python/src cli/src
 
       - name: Bandit
-        run: bandit -r app proxy/src mcp/src gate/src sdk/python/src -ll
+        run: bandit -r app proxy/src mcp/src gate/src sdk/python/src cli/src -ll
 
       - name: pip-audit
         run: pip-audit -r requirements.txt -r proxy/requirements.txt -r mcp/requirements.txt -r gate/requirements.txt
 
       - name: Run tests
         run: pytest -q
+
+  init-py310:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install from the tree and run init tests
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt -r requirements-dev.txt -r proxy/requirements.txt
+          pip install -e sdk/python -e proxy -e cli
+          pytest -q tests/test_init_*.py
 
   web:
     runs-on: ubuntu-latest

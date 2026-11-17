@@ -1,4 +1,4 @@
-"""Core 0.20.2 is the version, the changelog, and the health check."""
+"""Core 0.20.3 is the version and the health check. 0.20.2 stays in the changelog."""
 
 from __future__ import annotations
 
@@ -13,14 +13,14 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 def test_t_5_5_1_version_matches_health_and_changelog(tmp_path) -> None:
     module = _load_app(tmp_path)
-    assert module.config.APP_VERSION == "0.20.2"
+    assert module.config.APP_VERSION == "0.20.3"
     changelog = (_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     assert "## [0.20.2]" in changelog
     assert "## [0.20.1]" in changelog
     with TestClient(module.app) as http:
         health = http.get("/health")
         assert health.status_code == 200
-        assert health.json()["version"] == "0.20.2"
+        assert health.json()["version"] == "0.20.3"
     gate = (_ROOT / "gate" / "src" / "satsgate_gate" / "__init__.py").read_text(encoding="utf-8")
     assert '__version__ = "0.15.2"' in gate
 

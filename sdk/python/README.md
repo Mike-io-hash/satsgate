@@ -44,6 +44,9 @@ sg = SatsgateClient(base_url="http://127.0.0.1:8000", api_key="sg_...")
 # 1) Register payee (once)
 sg.set_payee("burlybakery53@walletofsatoshi.com")
 
+# One-time browser link for a USDC payee. The URL is not logged.
+# link = sg.create_connect_link()
+
 # 2) Create a challenge for your resource
 ch = sg.paywall_challenge(resource="demo/test", amount_sats=10, memo="my service")
 

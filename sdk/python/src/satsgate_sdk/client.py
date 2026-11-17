@@ -189,14 +189,19 @@ def _accept(response: httpx.Response, *, statuses: set[int]) -> dict:
     return data
 
 
-def create_account(*, base_url: str, timeout_seconds: float = 10.0) -> dict:
+def create_account(
+    *,
+    base_url: str,
+    timeout_seconds: float = 10.0,
+    transport: httpx.BaseTransport | None = None,
+) -> dict:
     """Open an account with POST /v1/accounts. No API key is sent.
 
     The returned dict includes ``api_key`` once. This function does not log it
-    and does not retry.
+    and does not retry. ``transport`` is for tests; it is not logged.
     """
     url = f"{base_url.rstrip('/')}/v1/accounts"
-    with httpx.Client(timeout=timeout_seconds) as http:
+    with httpx.Client(timeout=timeout_seconds, transport=transport) as http:
         response = http.post(url, json={}, headers={"Content-Type": "application/json"})
     return _accept(response, statuses={201})
 
@@ -222,10 +227,11 @@ class SatsgateClient:
         base_url: str,
         api_key: str,
         timeout_seconds: float = 10.0,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
-        self._http = httpx.Client(timeout=timeout_seconds)
+        self._http = httpx.Client(timeout=timeout_seconds, transport=transport)
 
         # payment_hash -> cache_until (a cache hint, not a content-access grant)
         self._verified: dict[str, int] = {}
@@ -316,6 +322,18 @@ class SatsgateClient:
             f"{self.base_url}/v1/client/payee",
             headers={**self._headers(), "Content-Type": "application/json"},
             json={"payee_lightning_address": lightning_address},
+        )
+        return self._ok_or_raise(r)
+
+    def create_connect_link(self) -> dict:
+        """Mint a one-time wallet link from POST /v1/client/payee/evm/connect.
+
+        The returned dict includes ``connect_url`` and ``expires_at``. The URL
+        is not logged.
+        """
+        r = self._http.post(
+            f"{self.base_url}/v1/client/payee/evm/connect",
+            headers=self._headers(),
         )
         return self._ok_or_raise(r)
 

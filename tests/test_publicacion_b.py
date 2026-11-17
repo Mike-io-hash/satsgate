@@ -85,20 +85,20 @@ def test_t_b_4_3_public_text_does_not_name_rate_sources() -> None:
 def test_t_b_4_4_versions_match() -> None:
     proxy_project = tomllib.loads(_text(ROOT / "proxy" / "pyproject.toml"))
     proxy_init = _text(ROOT / "proxy" / "src" / "satsgate_proxy" / "__init__.py")
-    assert proxy_project["project"]["version"] == "0.14.0"
-    assert '__version__ = "0.14.0"' in proxy_init
+    assert proxy_project["project"]["version"] == "0.14.1"
+    assert '__version__ = "0.14.1"' in proxy_init
 
     sdk_project = tomllib.loads(_text(ROOT / "sdk" / "python" / "pyproject.toml"))
     sdk_init = _text(ROOT / "sdk" / "python" / "src" / "satsgate_sdk" / "__init__.py")
-    assert sdk_project["project"]["version"] == "0.9.0"
-    assert '__version__ = "0.9.0"' in sdk_init
+    assert sdk_project["project"]["version"] == "0.10.0"
+    assert '__version__ = "0.10.0"' in sdk_init
 
     mcp_project = tomllib.loads(_text(ROOT / "mcp" / "pyproject.toml"))
     mcp_init = _text(ROOT / "mcp" / "src" / "satsgate_mcp" / "__init__.py")
     assert mcp_project["project"]["version"] == "0.13.0"
     assert '__version__ = "0.13.0"' in mcp_init
 
-    assert 'APP_VERSION = "0.20.2"' in _text(ROOT / "app" / "config.py")
+    assert 'APP_VERSION = "0.20.3"' in _text(ROOT / "app" / "config.py")
     assert '__version__ = "0.15.2"' in _text(ROOT / "gate" / "src" / "satsgate_gate" / "__init__.py")
 
 
@@ -142,9 +142,4 @@ def test_t_b_5_1_three_packages_pass_twine_check(tmp_path: Path) -> None:
     assert check.returncode == 0, check.stdout + check.stderr
 
 
-def test_t_b_5_2_there_is_no_umbrella_package() -> None:
-    for path in ROOT.rglob("pyproject.toml"):
-        if "node_modules" in path.parts or ".venv" in path.parts:
-            continue
-        project = tomllib.loads(path.read_text(encoding="utf-8"))["project"]
-        assert project["name"] != "satsgate", path
+# T-B.5.2 (no distribution named satsgate) is replaced by T-C.1.1.
