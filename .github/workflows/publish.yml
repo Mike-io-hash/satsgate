@@ -1,0 +1,449 @@
+# Tag pushes can publish. Pull requests only build and smoke-test.
+name: publish
+
+on:
+  push:
+    tags:
+      - sdk-v*
+      - proxy-v*
+      - mcp-v*
+      - satsgate-v*
+  pull_request:
+    paths:
+      - sdk/python/**
+      - proxy/**
+      - mcp/**
+      - cli/**
+      - scripts/release/**
+      - .github/workflows/publish.yml
+
+permissions: {}
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+      smoke_matrix: ${{ steps.select.outputs.smoke_matrix }}
+      dist_name: ${{ steps.select.outputs.dist_name }}
+      version: ${{ steps.select.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Select packages
+        id: select
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            git fetch origin main
+            git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
+            python scripts/release/check_tag.py "${GITHUB_REF_NAME}" >> "${GITHUB_OUTPUT}"
+            args+=(--tag "${GITHUB_REF_NAME}")
+          fi
+          {
+            echo "matrix=$(python scripts/release/package_matrix.py "${args[@]}")"
+            echo "smoke_matrix=$(python scripts/release/package_matrix.py --expand-python "${args[@]}")"
+          } >> "${GITHUB_OUTPUT}"
+
+  build:
+    needs: resolve
+    runs-on: ubuntu-latest
+    # Uploading the built files needs the artifact scope. This job has no id-token.
+    permissions:
+      contents: read
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.resolve.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools and test dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt -r proxy/requirements.txt -r mcp/requirements.txt -r gate/requirements.txt
+          python -m pip install --require-hashes --force-reinstall -r scripts/release/requirements-build.txt
+
+      - name: Build, check, and test
+        env:
+          PKG: ${{ matrix.package_dir }}
+          DIST: ${{ matrix.dist_name }}
+          VER: ${{ matrix.version }}
+          TESTS: ${{ matrix.tests }}
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
+          export TZ=UTC
+          export PYTHONHASHSEED=0
+          first="${RUNNER_TEMP}/build-a"
+          second="${RUNNER_TEMP}/build-b"
+          out="${RUNNER_TEMP}/publish-dist"
+          mkdir -p "${first}" "${second}" "${out}"
+          python -m build --no-isolation --outdir "${first}" "${PKG}"
+          python -m build --no-isolation --outdir "${second}" "${PKG}"
+          python scripts/release/repro_check.py "${first}" "${second}"
+          cp "${first}"/*.whl "${first}"/*.tar.gz "${out}/"
+          python -m twine check --strict "${out}"/*.whl "${out}"/*.tar.gz
+          python scripts/release/audit_dist.py "${out}"
+          python - <<'PY'
+          import os
+          import pathlib
+          import subprocess
+          import sys
+
+          sys.path.insert(0, "scripts/release")
+          import package_matrix
+
+          lines = package_matrix.third_party(pathlib.Path("."), os.environ["PKG"])
+          req = pathlib.Path(os.environ["RUNNER_TEMP"]) / "third-party.txt"
+          req.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+          if lines:
+              raise SystemExit(subprocess.call([sys.executable, "-m", "pip_audit", "-r", str(req)]))
+          PY
+          python - <<'PY'
+          import os
+          import shlex
+          import subprocess
+          import sys
+
+          args = shlex.split(os.environ["TESTS"])
+          raise SystemExit(subprocess.call([sys.executable, "-m", "pytest", "-q", *args]))
+          PY
+          (
+            cd "${out}"
+            sha256sum ./*.whl ./*.tar.gz > SHA256SUMS
+          )
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ matrix.dist_name }}-${{ matrix.version }}
+          path: ${{ runner.temp }}/publish-dist
+          retention-days: 7
+          if-no-files-found: error
+
+  smoke-local:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.resolve.outputs.smoke_matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Download built files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: dist-*
+          path: all-dist
+
+      - name: Install the built files and smoke-test
+        env:
+          DIST: ${{ matrix.dist_name }}
+          VER: ${{ matrix.version }}
+          MODULE: ${{ matrix.module }}
+          COMMANDS: ${{ matrix.commands }}
+          KIND: ${{ matrix.kind }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r sums; do
+            (cd "$(dirname "${sums}")" && sha256sum -c SHA256SUMS)
+          done < <(find all-dist -name SHA256SUMS -type f)
+          mode="pr"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            mode="tag"
+          fi
+          python -m venv "${RUNNER_TEMP}/smoke"
+          python scripts/release/smoke_install.py \
+            --python "${RUNNER_TEMP}/smoke/bin/python" \
+            --root "${GITHUB_WORKSPACE}" \
+            --dist "${DIST}" \
+            --artifacts "${GITHUB_WORKSPACE}/all-dist" \
+            --mode "${mode}"
+          work="$(mktemp -d)"
+          probe=()
+          if [[ "${KIND}" == "satsgate" ]]; then
+            probe+=(--init-probe --work "${work}")
+          fi
+          python scripts/release/smoke_check.py \
+            --python "${RUNNER_TEMP}/smoke/bin/python" \
+            --module "${MODULE}" \
+            --version "${VER}" \
+            --commands "${COMMANDS}" \
+            "${probe[@]}"
+
+  plan:
+    needs: resolve
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      rehearse: ${{ steps.decide.outputs.rehearse }}
+      dist_name: ${{ needs.resolve.outputs.dist_name }}
+      version: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Decide whether this is the first release
+        id: decide
+        env:
+          DIST: ${{ needs.resolve.outputs.dist_name }}
+          VER: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          result="$(python scripts/release/first_release.py "${DIST}" "${VER}")"
+          echo "${result}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "### Plan"
+            echo
+            echo "Project: \`${DIST}\`"
+            echo
+            echo "Version: \`${VER}\`"
+            echo
+            echo "${result}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  publish-testpypi:
+    needs: [build, plan]
+    if: startsWith(github.ref, 'refs/tags/') && needs.plan.outputs.rehearse == 'true'
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+      actions: read
+    steps:
+      - name: Download the built files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist-${{ needs.plan.outputs.dist_name }}-${{ needs.plan.outputs.version }}
+          path: incoming
+
+      - name: Check the hashes and stage the distributions
+        run: |
+          set -euo pipefail
+          (cd incoming && sha256sum -c SHA256SUMS)
+          mkdir -p dist
+          cp incoming/*.whl incoming/*.tar.gz dist/
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist
+
+  smoke-testpypi:
+    needs: [build, plan, publish-testpypi]
+    if: startsWith(github.ref, 'refs/tags/') && needs.plan.outputs.rehearse == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Download the built files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist-${{ needs.plan.outputs.dist_name }}-${{ needs.plan.outputs.version }}
+          path: incoming
+
+      - name: Download the TestPyPI files and compare them
+        env:
+          DIST: ${{ needs.plan.outputs.dist_name }}
+          VER: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          url="https://test.pypi.org/pypi/${DIST}/${VER}/json"
+          ok=0
+          for _ in $(seq 1 30); do
+            code="$(curl -sS -o "${RUNNER_TEMP}/meta.json" -w "%{http_code}" --max-time 20 "${url}" || echo 000)"
+            if [[ "${code}" == "200" ]]; then
+              ok=1
+              break
+            fi
+            sleep 10
+          done
+          [[ "${ok}" == "1" ]]
+          got="${RUNNER_TEMP}/from-testpypi"
+          mkdir -p "${got}"
+          python -m pip download --no-deps --index-url https://test.pypi.org/simple/ --only-binary=:all: --dest "${got}" "${DIST}==${VER}"
+          python -m pip download --no-deps --index-url https://test.pypi.org/simple/ --no-binary=:all: --dest "${got}" "${DIST}==${VER}"
+          python scripts/release/hashes.py incoming/SHA256SUMS "${got}"
+          python -m venv "${RUNNER_TEMP}/smoke"
+          python scripts/release/smoke_install.py \
+            --python "${RUNNER_TEMP}/smoke/bin/python" \
+            --root "${GITHUB_WORKSPACE}" \
+            --dist "${DIST}" \
+            --artifacts "${got}" \
+            --mode tag
+          commands="$(python -c 'import json,sys; rows=json.load(sys.stdin); print(next(row["commands"] for row in rows if row["dist_name"]==sys.argv[1]))' "${DIST}" <<<"$(python scripts/release/package_matrix.py)")"
+          module="$(python -c 'import json,sys; rows=json.load(sys.stdin); print(next(row["module"] for row in rows if row["dist_name"]==sys.argv[1]))' "${DIST}" <<<"$(python scripts/release/package_matrix.py)")"
+          python scripts/release/smoke_check.py \
+            --python "${RUNNER_TEMP}/smoke/bin/python" \
+            --module "${module}" \
+            --version "${VER}" \
+            --commands "${commands}"
+
+  publish-pypi:
+    needs: [smoke-local, plan, smoke-testpypi]
+    if: >-
+      always() &&
+      startsWith(github.ref, 'refs/tags/') &&
+      needs.smoke-local.result == 'success' &&
+      needs.plan.result == 'success' &&
+      (needs.plan.outputs.rehearse == 'false' && needs.smoke-testpypi.result == 'skipped' ||
+      needs.plan.outputs.rehearse == 'true' && needs.smoke-testpypi.result == 'success')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      actions: read
+    steps:
+      - name: Download the built files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist-${{ needs.plan.outputs.dist_name }}-${{ needs.plan.outputs.version }}
+          path: incoming
+
+      - name: Check the hashes and stage the distributions
+        run: |
+          set -euo pipefail
+          (cd incoming && sha256sum -c SHA256SUMS)
+          mkdir -p dist
+          cp incoming/*.whl incoming/*.tar.gz dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist
+
+  verify-pypi:
+    needs: [plan, publish-pypi]
+    if: startsWith(github.ref, 'refs/tags/') && needs.publish-pypi.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Download the built files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist-${{ needs.plan.outputs.dist_name }}-${{ needs.plan.outputs.version }}
+          path: incoming
+
+      - name: Download the PyPI files and compare them
+        env:
+          DIST: ${{ needs.plan.outputs.dist_name }}
+          VER: ${{ needs.plan.outputs.version }}
+          REHEARSE: ${{ needs.plan.outputs.rehearse }}
+        run: |
+          set -euo pipefail
+          url="https://pypi.org/pypi/${DIST}/${VER}/json"
+          ok=0
+          for _ in $(seq 1 30); do
+            code="$(curl -sS -o "${RUNNER_TEMP}/meta.json" -w "%{http_code}" --max-time 20 "${url}" || echo 000)"
+            if [[ "${code}" == "200" ]]; then
+              ok=1
+              break
+            fi
+            sleep 10
+          done
+          [[ "${ok}" == "1" ]]
+          got="${RUNNER_TEMP}/from-pypi"
+          mkdir -p "${got}"
+          python -m pip download --no-deps --index-url https://pypi.org/simple/ --only-binary=:all: --dest "${got}" "${DIST}==${VER}"
+          python -m pip download --no-deps --index-url https://pypi.org/simple/ --no-binary=:all: --dest "${got}" "${DIST}==${VER}"
+          python scripts/release/hashes.py incoming/SHA256SUMS "${got}"
+          python -m venv "${RUNNER_TEMP}/smoke"
+          python scripts/release/smoke_install.py \
+            --python "${RUNNER_TEMP}/smoke/bin/python" \
+            --root "${GITHUB_WORKSPACE}" \
+            --dist "${DIST}" \
+            --artifacts "${got}" \
+            --mode tag
+          commands="$(python -c 'import json,sys; rows=json.load(sys.stdin); print(next(row["commands"] for row in rows if row["dist_name"]==sys.argv[1]))' "${DIST}" <<<"$(python scripts/release/package_matrix.py)")"
+          module="$(python -c 'import json,sys; rows=json.load(sys.stdin); print(next(row["module"] for row in rows if row["dist_name"]==sys.argv[1]))' "${DIST}" <<<"$(python scripts/release/package_matrix.py)")"
+          python scripts/release/smoke_check.py \
+            --python "${RUNNER_TEMP}/smoke/bin/python" \
+            --module "${module}" \
+            --version "${VER}" \
+            --commands "${commands}"
+          {
+            echo "### ${DIST} ${VER}"
+            echo
+            echo '```'
+            cat incoming/SHA256SUMS
+            echo '```'
+            echo
+            echo "Rehearsal: ${REHEARSE}"
+            if [[ "${REHEARSE}" == "true" ]]; then
+              echo
+              echo "TestPyPI: https://test.pypi.org/project/${DIST}/${VER}/"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"

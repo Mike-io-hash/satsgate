@@ -1,0 +1,6 @@
+# Pinned builders for publish.yml. Compile with:
+#   pip-compile --generate-hashes --allow-unsafe --output-file=scripts/release/requirements-build.txt scripts/release/requirements-build.in
+build==1.6.1
+setuptools==84.2.1
+wheel==0.48.0
+twine==7.0.0
