@@ -33,10 +33,10 @@ jobs:
         run: node tests/webhook_signature.test.js
 
       - name: Ruff
-        run: ruff check app tests proxy/src proxy/snippets/fastapi_verify.py proxy/snippets/fastapi_receipt.py mcp/src mcp/scripts gate/src
+        run: ruff check app tests proxy/src proxy/snippets/fastapi_verify.py proxy/snippets/fastapi_receipt.py mcp/src mcp/scripts gate/src sdk/python/src
 
       - name: Bandit
-        run: bandit -r app proxy/src mcp/src gate/src -ll
+        run: bandit -r app proxy/src mcp/src gate/src sdk/python/src -ll
 
       - name: pip-audit
         run: pip-audit -r requirements.txt -r proxy/requirements.txt -r mcp/requirements.txt -r gate/requirements.txt
