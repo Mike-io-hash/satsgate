@@ -277,6 +277,22 @@ def test_t_c_3_7_start_command_and_docker_compose_keep_secrets_out(tmp_path: Pat
     assert "host: 0.0.0.0" not in written
 
 
+def test_m5_probe_does_not_import_starlette_testclient(tmp_path: Path) -> None:
+    """Importing starlette.testclient in init fails this test, even when httpx2 hides the warning."""
+    source = (ROOT / "cli" / "src" / "satsgate" / "init.py").read_text(encoding="utf-8")
+    assert "starlette.testclient" not in source
+    _module, http, transport = _core(tmp_path)
+    work = tmp_path / "work"
+    work.mkdir()
+    try:
+        code, body, _out, err = invoke(work, transport)
+    finally:
+        _close(http)
+    assert code == 0, body
+    assert "starlette.testclient" not in err
+    assert "httpx2" not in err
+
+
 def test_m4_missing_usdc_offer_is_not_the_wrong_network() -> None:
     """Calling a missing offer 'not on Base Sepolia' fails this test."""
     code, message = x402_offer_problem("")

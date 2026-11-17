@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -15,11 +16,11 @@ from pathlib import Path
 from typing import Any, TextIO
 from urllib.parse import urlsplit
 
+import httpx
 from satsgate_proxy import __version__ as proxy_version
 from satsgate_proxy.app import build_app
 from satsgate_proxy.config import ConfigError, Settings, key_fingerprint, load_settings
 from satsgate_sdk import SatsgateClient, SatsgateError, create_account
-from starlette.testclient import TestClient
 
 from satsgate import files
 
@@ -811,6 +812,16 @@ def x402_offer_problem(header: str) -> tuple[str, str] | None:
     return None
 
 
+def _probe_get(app: Any, route_path: str) -> httpx.Response:
+    async def once() -> httpx.Response:
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://satsgate-proxy") as client:
+                return await client.get(probe_path(route_path))
+
+    return asyncio.run(once())
+
+
 def _probe(
     run: _Run,
     settings: Settings,
@@ -820,8 +831,7 @@ def _probe(
 ) -> bool:
     """One unpaid 402 through the in-memory proxy. No verify, no settle, no payment."""
     app = build_app(settings, transport=proxy_transport)
-    with TestClient(app) as http:
-        response = http.get(probe_path(route_path))
+    response = _probe_get(app, route_path)
     challenge = response.headers.get("www-authenticate", "")
     if response.status_code == 402 and challenge.startswith("L402 "):
         amount = response.json().get("amount_sats")
