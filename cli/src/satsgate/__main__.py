@@ -41,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--yaml-out", default=None, help="Config path. Default: satsgate-proxy.yaml.")
     init.add_argument("--new-account", action="store_true", help="Open another account even if one is saved.")
     init.add_argument(
+        "--replace-api-key",
+        action="store_true",
+        help="With --new-account, replace SATSGATE_API_KEY with a key for the new account.",
+    )
+    init.add_argument(
         "--replace-lightning-address",
         action="store_true",
         help="Replace a different Lightning Address already saved on the account.",
@@ -63,6 +68,7 @@ def options_from(args: argparse.Namespace) -> InitOptions:
         yaml_out=args.yaml_out,
         new_account=bool(args.new_account),
         replace_lightning_address=bool(args.replace_lightning_address),
+        replace_api_key=bool(args.replace_api_key),
     )
 
 

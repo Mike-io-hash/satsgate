@@ -316,6 +316,68 @@ def test_t_c_5_10_symlink_targets_are_not_written(tmp_path: Path) -> None:
     assert real_yaml.read_text(encoding="utf-8") == "keep: true\n"
 
 
+def test_b1_new_account_keeps_the_old_key_and_mints_a_new_proxy_key(tmp_path: Path) -> None:
+    """Dropping the backup, or reusing the old sgr_, fails this test."""
+    http, _module = _core(tmp_path)
+    from init_harness import RecordingSync
+
+    transport = RecordingSync(http)
+    work = tmp_path / "work"
+    work.mkdir()
+    try:
+        first, first_body, _out, _err = invoke(work, transport)
+        assert first == 0, first_body
+        old_account = (work / ".satsgate" / "account.env").read_text(encoding="utf-8")
+        old_key = old_account.split("=", 1)[1].strip()
+        old_id = first_body["account"]["client_id"]
+        old_proxy = _env_line(work, "SATSGATE_API_KEY")
+        blocked, blocked_body, blocked_out, blocked_err = invoke(work, transport, new_account=True)
+        assert blocked == 3
+        assert blocked_body["status"] == "env_conflict"
+        assert "--replace-api-key" in blocked_body["error"]["message"]
+        assert (work / ".satsgate" / "account.env").read_text(encoding="utf-8") == old_account
+        assert len(posts(transport, "/v1/accounts")) == 1
+        code, body, out, err = invoke(work, transport, new_account=True, replace_api_key=True)
+        assert code == 0, body
+        new_proxy = _env_line(work, "SATSGATE_API_KEY")
+        old_who = http.get("/v1/balance", headers={"X-Api-Key": old_proxy}).json()["client_id"]
+        new_who = http.get("/v1/balance", headers={"X-Api-Key": new_proxy}).json()["client_id"]
+    finally:
+        _close(http)
+    assert code == 0, body
+    assert body["account"]["client_id"] != old_id
+    assert body["account"]["reused"] is False
+    assert body["files"][".satsgate/account.env"] == "updated"
+    new_account = (work / ".satsgate" / "account.env").read_text(encoding="utf-8")
+    new_key = new_account.split("=", 1)[1].strip()
+    assert new_key != old_key
+    backups = [
+        path
+        for path in (work / ".satsgate").glob("account.*.env")
+        if path.name != "account.env"
+    ]
+    assert len(backups) == 1
+    assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
+    assert backups[0].read_text(encoding="utf-8") == old_account
+    new_proxy = _env_line(work, "SATSGATE_API_KEY")
+    assert new_proxy != old_proxy
+    assert old_who == old_id
+    assert new_who == body["account"]["client_id"]
+    blob = out + err + json.dumps(body)
+    assert old_key not in blob
+    assert new_key not in blob
+    assert old_proxy not in blob
+    assert new_proxy not in blob
+    assert _env_line(work, "SATSGATE_ORIGIN_SECRET") not in blob
+
+
+def _env_line(work: Path, name: str) -> str:
+    for line in (work / ".env").read_text(encoding="utf-8").splitlines():
+        if line.startswith(name + "="):
+            return line.split("=", 1)[1]
+    raise AssertionError(name)
+
+
 def test_render_yaml_has_no_secret_slot() -> None:
     text = render_yaml(api_url=API, upstream="http://127.0.0.1:3000", route_path="/paid/**")
     assert "sgr_" not in text

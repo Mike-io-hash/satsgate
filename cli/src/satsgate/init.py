@@ -8,6 +8,7 @@ import logging
 import os
 import secrets
 import sys
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from importlib.resources import files as resource_files
 from pathlib import Path
@@ -57,6 +58,7 @@ class InitOptions:
     yaml_out: str | None = None
     new_account: bool = False
     replace_lightning_address: bool = False
+    replace_api_key: bool = False
     cwd: Path | None = None
 
 
@@ -76,6 +78,7 @@ class _Run:
     api_key: str = ""
     origin_secret: str = ""
     reused_account: bool = False
+    replacing_account: bool = False
     terms_url: str | None = None
     evm_verified: bool = False
     x402: bool = False
@@ -319,7 +322,7 @@ def _read_account_key(path: Path) -> str | None:
     return value or None
 
 
-def _write_account(run: _Run, root: Path, key: str) -> None:
+def _write_account(run: _Run, root: Path, key: str, *, state: str = "created") -> None:
     directory = root / ".satsgate"
     files.refuse_symlink(directory)
     dir_ok = files.ensure_dir(directory, 0o700)
@@ -333,7 +336,7 @@ def _write_account(run: _Run, root: Path, key: str) -> None:
     path = directory / "account.env"
     text = f"{files.ACCOUNT_KEY}={key}\n"
     ok = files.atomic_write(path, text, mode=0o600)
-    _mark(run, root, path, "created", restricted=dir_ok and ok)
+    _mark(run, root, path, state, restricted=dir_ok and ok)
     if not dir_ok:
         run.restricted = False
         if "permissions_not_restricted" not in run.warnings:
@@ -373,7 +376,59 @@ def _validate_saved_key(run: _Run, api_url: str, key: str, transport: Any) -> di
         client.close()
 
 
-def _open_account(run: _Run, api_url: str, transport: Any, root: Path) -> str | None:
+def _lookup_client(api_url: str, key: str, transport: Any) -> dict | None:
+    client = _client(api_url, key, transport)
+    try:
+        return client.get_client()
+    except SatsgateError:
+        return None
+    finally:
+        client.close()
+
+
+def _backup_account(run: _Run, root: Path, key: str, transport: Any, api_url: str) -> bool:
+    """Copy the saved account key aside before a new account replaces it. Never print it."""
+    path = _account_path(root)
+    try:
+        text = files.read_text(path)
+    except files.FileRefusal as exc:
+        _fail(run, code=exc.code, step="backup_account", message=str(exc), exit_code=3, status=exc.code)
+        return False
+    info = _lookup_client(api_url, key, transport)
+    client_id = str(int(info["client_id"])) if info and info.get("client_id") is not None else "unknown"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    directory = root / ".satsgate"
+    backup = directory / f"account.{client_id}.{stamp}.env"
+    suffix = 0
+    while backup.exists():
+        suffix += 1
+        backup = directory / f"account.{client_id}.{stamp}-{suffix}.env"
+    if backup.is_symlink():
+        _fail(
+            run,
+            code="symlink_refused",
+            step="backup_account",
+            message=f"{backup.name} is a symlink and was not written.",
+            exit_code=3,
+            status="symlink_refused",
+        )
+        return False
+    ok = files.atomic_write(backup, text, mode=0o600)
+    _mark(run, root, backup, "created", restricted=ok)
+    if not ok:
+        _fail(
+            run,
+            code="backup_failed",
+            step="backup_account",
+            message="The saved account key could not be copied aside. No new account was opened.",
+            exit_code=1,
+            status="failed",
+        )
+        return False
+    return True
+
+
+def _open_account(run: _Run, api_url: str, transport: Any, root: Path, *, state: str = "created") -> str | None:
     try:
         opened = create_account(base_url=api_url, transport=transport)
     except SatsgateError as exc:
@@ -400,7 +455,7 @@ def _open_account(run: _Run, api_url: str, transport: Any, root: Path) -> str | 
     terms = opened.get("terms_url")
     if isinstance(terms, str) and terms:
         run.terms_url = terms
-    _write_account(run, root, key)
+    _write_account(run, root, key, state=state)
     return key
 
 
@@ -452,8 +507,9 @@ def _resolve_api_key(
     transport: Any,
     *,
     allow_replace: bool,
+    must_mint: bool = False,
 ) -> str | None:
-    if current:
+    if current and not must_mint:
         probe = _client(client.base_url, current, transport)
         try:
             probe.balance()
@@ -499,6 +555,8 @@ def _prepare_env(
     console: _Console,
     api_key: str,
     origin_secret: str,
+    *,
+    force_replace: set[str] | None = None,
 ) -> bool:
     path = root / ".env"
     files.refuse_symlink(path)
@@ -516,8 +574,8 @@ def _prepare_env(
                 answer = console.ask("Restrict .env to owner-only? [y/N] ")
                 if answer.strip().lower() in {"y", "yes"}:
                     previous_mode = 0o600
-    replace: set[str] = set()
-    conflicts_first = files.merge_env(existing, updates, replace=set())[1]
+    replace: set[str] = set(force_replace or ())
+    conflicts_first = files.merge_env(existing, updates, replace=replace)[1]
     if conflicts_first:
         if not console.human:
             _fail(
@@ -902,6 +960,30 @@ def _execute(options: InitOptions, console: _Console, transport: Any, run: _Run)
     else:
         saved_key_use = None
 
+    if saved_key and open_new:
+        env_path = root / ".env"
+        existing_api = None
+        if env_path.exists() and not env_path.is_symlink():
+            existing_api = files.parse_env(files.read_text(env_path)).get(files.API_KEY) or None
+        if existing_api and not options.replace_api_key:
+            if console.human:
+                answer = console.ask("Replace SATSGATE_API_KEY in .env for the new account? [y/N] ")
+                if answer.strip().lower() in {"y", "yes"}:
+                    options.replace_api_key = True
+            if not options.replace_api_key:
+                _fail(
+                    run,
+                    code="env_conflict",
+                    step="write_env",
+                    message="SATSGATE_API_KEY belongs to the saved account. Pass --replace-api-key to mint a key for the new account.",
+                    exit_code=3,
+                    status="env_conflict",
+                )
+                return
+        if not _backup_account(run, root, saved_key, sdk_transport, raw_url):
+            return
+        run.replacing_account = True
+
     if saved_key_use:
         body = _validate_saved_key(run, raw_url, saved_key_use, sdk_transport)
         if run.exit_code != 0:
@@ -913,7 +995,13 @@ def _execute(options: InitOptions, console: _Console, transport: Any, run: _Run)
         if ignore.exists():
             _mark(run, root, ignore, "unchanged", restricted=True)
     else:
-        created = _open_account(run, raw_url, sdk_transport, root)
+        created = _open_account(
+            run,
+            raw_url,
+            sdk_transport,
+            root,
+            state="updated" if run.replacing_account else "created",
+        )
         if created is None:
             return
         run.account_key = created
@@ -942,7 +1030,8 @@ def _execute(options: InitOptions, console: _Console, transport: Any, run: _Run)
             client,
             existing_api,
             sdk_transport,
-            allow_replace=console.human,
+            allow_replace=console.human or options.replace_api_key,
+            must_mint=run.replacing_account,
         )
         if api_key is None:
             return
@@ -951,7 +1040,8 @@ def _execute(options: InitOptions, console: _Console, transport: Any, run: _Run)
         if not origin:
             origin = secrets.token_hex(32)
         run.origin_secret = origin
-        if not _prepare_env(run, root, console, api_key, origin):
+        forced = {files.API_KEY} if run.replacing_account else None
+        if not _prepare_env(run, root, console, api_key, origin, force_replace=forced):
             return
         _git_warning(run, root, console)
         if options.want_usdc and not run.evm_verified:
