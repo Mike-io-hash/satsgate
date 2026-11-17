@@ -16,7 +16,7 @@ This note is for a later deploy. It is not an authorization to deploy. Do not ru
 
 2. **Checkout.** Fast-forward the server checkout to the merged main. Run `python3 scripts/build_terms.py` so `web/terms/dist/` exists. Terms do not need Node. Do not rebuild the connect page unless `web/connect/dist` is missing. Do not refresh it without a reason.
 
-3. **Caddy first.** Compose already mounts `/srv/terms` and the Caddyfile already has the terms handles. Reload Caddy inside the caddy container (`caddy reload`), not a restart of the other services, so `/terms` is live before `SATSGATE_TERMS_URL` is set. Confirm `/terms` and `/terms/2026-11-13` are 200, `/connect` is 200, and a random path still 301s to `https://github.com/Mike-io-hash/satsgate`.
+3. **Caddy first.** Superseded: do not `caddy reload`. Later deploys use `docker compose up -d --no-deps --force-recreate caddy` (see `docs/deploy-publicacion-c.md`). Compose already mounts `/srv/terms` and the Caddyfile already has the terms handles. The historical step reloaded Caddy inside the caddy container, not a restart of the other services, so `/terms` was live before `SATSGATE_TERMS_URL` was set. Confirm `/terms` and `/terms/2026-11-13` are 200, `/connect` is 200, and a random path still 301s to `https://github.com/Mike-io-hash/satsgate`.
 
 4. **Env and core.** Set `SATSGATE_TERMS_URL=https://satsgate.org/terms` on core and on the gate, in the server env file. Do not print the rest of the env. Rebuild and replace only the core container to 0.20.2, with the same short window as 0.20.1. Restart the gate container only so it reads the env. It stays image 0.15.2. Do not rebuild the proxy, demo-seller, or connect unless one of them is required. Do not restart Alby Hub.
 

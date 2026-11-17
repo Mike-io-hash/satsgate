@@ -1,5 +1,7 @@
 # Deploy Publicación C (core 0.20.3 and the terms cache)
 
+Standing rules for every later deploy: a Caddy change is `docker compose up -d --no-deps --force-recreate caddy`. Do not reload Caddy in place. Never restart Alby Hub. Client 1 is read-only. Take a backup and tag the running image before replacing a container.
+
 This note is for a later deploy. It is not an authorization to deploy. Do not run it from this pull request. Mike runs it only after Ia's separate deploy OK. Auto-approve stays off. Do not change `SATSGATE_TERMS_VERSION`. Do not restart Alby Hub. Do not touch Client 1 except to read the balance in the smoke below. Do not publish packages. There is no proxy on the server to redeploy: proxy 0.14.1 and SDK 0.10.0 reach merchants only through Publicación D.
 
 ## Preconditions
@@ -19,7 +21,7 @@ This note is for a later deploy. It is not an authorization to deploy. Do not ru
 
 3. **Core.** Rebuild and replace only the core container, to 0.20.3, with the same short window as 0.20.2. Do not rebuild `demo-seller` (it builds from `sdk/python`; SDK 0.10.0 changes nothing it uses). Do not rebuild the gate. It stays 0.15.2.
 
-4. **Caddy.** The Caddyfile changed. Recreate the container with `docker compose up -d --no-deps caddy`. Do not `caddy reload`: the file is bind-mounted and the inode changes (I-1 from the Publicación B deploy). Expect a few seconds where the API, the gate, and the apex are cut. Certificates live in named volumes and are not reissued.
+4. **Caddy.** The Caddyfile changed. Recreate the container with `docker compose up -d --no-deps --force-recreate caddy`. An unchanged compose file does not recreate the container, and a bind-mounted Caddyfile replaced by git has a new inode. Do not reload Caddy in place. Expect a few seconds where the API, the gate, and the apex are cut. Certificates live in named volumes and are not reissued.
 
 5. **Smoke, no real money.**
    - Health reports core 0.20.3 and gate 0.15.2.
@@ -33,7 +35,7 @@ This note is for a later deploy. It is not an authorization to deploy. Do not ru
    - Watchdogs are ok.
    - Do not pay leftover invoices of throwaway clients.
 
-6. **Rollback.** Return to the previous core image (`pre-0.20.3`) and the previous Caddyfile, and recreate Caddy (do not reload it). There is no migration to reverse. Restore the database only if no payment entered after the backup.
+6. **Rollback.** Return to the previous core image (`pre-0.20.3`) and the previous Caddyfile, and recreate Caddy with `docker compose up -d --no-deps --force-recreate caddy` (do not reload Caddy in place). An unchanged compose file does not recreate the container. There is no migration to reverse. Restore the database only if no payment entered after the backup.
 
 ## 7. Live `init` run (P-C11)
 

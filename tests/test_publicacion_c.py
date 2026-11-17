@@ -156,8 +156,7 @@ def test_t_c_1_6_installed_script_and_module_print_the_version(tmp_path: Path) -
         capture_output=True,
         text=True,
     )
-    if installed.returncode != 0:
-        pytest.skip("cannot create a venv: " + installed.stderr[-500:])
+    assert installed.returncode == 0, installed.stderr[-500:]
     module = subprocess.run([str(python), "-m", "satsgate", "--version"], check=False, capture_output=True, text=True)
     command = subprocess.run([str(script), "--version"], check=False, capture_output=True, text=True)
     assert module.returncode == 0, module.stderr

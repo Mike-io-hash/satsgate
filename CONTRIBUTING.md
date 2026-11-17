@@ -19,6 +19,16 @@ cp .env.example .env
 uvicorn app.main:app --reload --port 8000
 ```
 
+`.env.example` will not boot as-is (production defaults, empty secret). A local mock is:
+
+```bash
+SATSGATE_ENV=development SATSGATE_DEV_MODE=1 SATSGATE_WALLET_MODE=mock \
+  SATSGATE_MACAROON_SECRET=local-dev-only uvicorn app.main:app --reload --port 8000
+```
+
+Discovery routes for a running core are `GET /.well-known/satsgate.json` and `GET /openapi.json`.
+The release runbook is [docs/publishing.md](docs/publishing.md).
+
 ## Code style
 
 This project prefers:

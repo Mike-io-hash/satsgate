@@ -2,7 +2,7 @@
 
 The hosted gate. One process serves many approved sites at `https://gate.satsgate.org/<slug>/<path>`.
 
-Version **0.15.0**. Core is **0.18.0**. This process sells a signed receipt and nothing else. It does not call the origin, relay the buyer, or serve seller content. A site can offer Lightning, x402 (USDC on one Base network), or both. x402 is off until the merchant turns it on. A new site stores no mode. Turning x402 on without a mode stores test (Base Sepolia). Live (Base) is a separate choice and only works when the operator has enabled CDP. Test mode issues a receipt and does not debit a credit. Live mode and Lightning debit one credit when the receipt is issued. The self-hosted proxy is **0.14.0** and is a different program. In `mode: paywall` it still forwards and still charges after a successful origin. In `mode: receipt` it checks `Satsgate-Receipt` and does not call core. This process has no origin secret and does not call the facilitator. A debit from this gate still has a null `api_key_id`, because the gate authenticates with `GATE_TOKEN` rather than an `sgr_` key.
+Version **0.15.2**. Works with core 0.20.3 or later and gate 0.15.2 or later. This process sells a signed receipt and nothing else. It does not call the origin, relay the buyer, or serve seller content. A site can offer Lightning, x402 (USDC on one Base network), or both. x402 is off until the merchant turns it on. A new site stores no mode. Turning x402 on without a mode stores test (Base Sepolia). Live (Base) is a separate choice and only works when the operator has enabled CDP. Test mode issues a receipt and does not debit a credit. Live mode and Lightning debit one credit when the receipt is issued. The self-hosted proxy is **0.14.1** and is a different program. In `mode: paywall` it still forwards and still charges after a successful origin. In `mode: receipt` it checks `Satsgate-Receipt` and does not call core. This process has no origin secret and does not call the facilitator. A debit from this gate still has a null `api_key_id`, because the gate authenticates with `GATE_TOKEN` rather than an `sgr_` key.
 
 ## USDC payments: Base network only
 
@@ -60,7 +60,7 @@ Compose builds this directory and does not publish a port. Caddy is the only pub
 | `SATSGATE_ABUSE_CONTACT` | empty | Bare email included on `GET /`. |
 | `SATSGATE_TERMS_URL` | empty | https URL included on the 402 when set. |
 
-`GET /healthz` returns `{"ok": true, "component": "satsgate-gate", "version": "0.15.0"}`.
+`GET /healthz` returns `{"ok": true, "component": "satsgate-gate", "version": "0.15.2"}`.
 
 ## Turn on x402
 

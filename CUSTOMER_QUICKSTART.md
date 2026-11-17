@@ -2,14 +2,12 @@
 
 ## Fastest path: `satsgate init`
 
-`satsgate` is not on PyPI yet (until Publicación D). From a checkout of this repo:
-
 ```bash
-pip install -e sdk/python -e proxy -e cli
-satsgate init
+uvx satsgate init
+pip install satsgate
 ```
 
-After publication the same setup is `uvx satsgate init`.
+From a checkout: `pip install -e sdk/python -e proxy -e cli`.
 
 This is the path to integrate **satsgate** as a *customer* (agent operator).
 
@@ -171,7 +169,7 @@ That key can call the paywall challenge, status, and verify routes for resources
 
 To put that key in front of an API you already have, without writing paywall code, run [`satsgate-proxy`](./proxy/README.md). It is a separate process (version 0.14.1) and uses resource ids `route:<name>` or `site`, so set `resource_prefix` to match those (or omit it). The core in this quickstart stays the hosted API. `x402: true` without `x402_mode` is Base Sepolia. `x402_mode: live` is Base, after the operator has enabled it.
 
-A buyer-side agent uses [`satsgate-mcp`](./mcp/README.md) (version 0.11.0). That process does not create challenges. It pays a Lightning URL the proxy already protects, reads an x402 offer without signing it, and `list_sites` reads the public directory of approved sites, including a USD-priced route. The optional `sgr_` key on the MCP server is only for read-only status and is a different key from the one in the proxy.
+A buyer-side agent uses [`satsgate-mcp`](https://github.com/Mike-io-hash/satsgate/blob/main/mcp/README.md) (version 0.13.0). Works with core 0.20.3 or later. That process does not create challenges. It pays a Lightning URL the proxy already protects, reads an x402 offer without signing it, and `list_sites` reads the public directory of approved sites, including a USD-priced route. The optional `sgr_` key on the MCP server is only for read-only status and is a different key from the one in the proxy.
 
 ## 3) End-to-end test (challenge → pay → unlock)
 

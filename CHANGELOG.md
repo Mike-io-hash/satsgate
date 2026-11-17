@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Publicación D] - 2026-11-17
+
+Core stays **0.20.3** and the hosted gate stays **0.15.2**. This pull request adds the release workflows and the proxy image workflow. It publishes nothing: no PyPI, TestPyPI, or GHCR upload, and no tag or release.
+
+### Changed
+- The Python packages use the SPDX license form, and each wheel ships `LICENSE`.
+- `satsgate` is **0.1.1**. `init --docker` names the public GHCR proxy image and no longer writes a local Dockerfile. A probe works inside a running event loop. The compose file uses a long bind mount and a tmpfs target inside the container. The next step tells you how to turn USDC test mode off.
+
 ## [0.20.3] - 2026-11-17
 
 Core **0.20.3**. Hosted gate stays **0.15.2**. Packages were not published. `satsgate init` is not installable from PyPI until Publicación D.
