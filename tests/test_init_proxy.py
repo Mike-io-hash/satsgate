@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 import logging
@@ -16,7 +17,7 @@ from eth_account import Account
 from fastapi.testclient import TestClient
 from starlette.testclient import TestClient as ProxyClient
 
-from satsgate.init import START_COMMAND
+from satsgate.init import START_COMMAND, x402_offer_problem
 from satsgate_proxy.app import build_app
 from satsgate_proxy.config import load_settings
 from satsgate_sdk import SatsgateClient
@@ -274,6 +275,20 @@ def test_t_c_3_7_start_command_and_docker_compose_keep_secrets_out(tmp_path: Pat
     written = (work / "satsgate-proxy.yaml").read_text(encoding="utf-8")
     assert "host: 127.0.0.1" in written
     assert "host: 0.0.0.0" not in written
+
+
+def test_m4_missing_usdc_offer_is_not_the_wrong_network() -> None:
+    """Calling a missing offer 'not on Base Sepolia' fails this test."""
+    code, message = x402_offer_problem("")
+    assert code == "x402_offer_missing"
+    assert "no USDC offer" in message
+    assert "Base Sepolia" not in message
+    wrong = base64.b64encode(json.dumps({"accepts": [{"network": "eip155:1"}]}).encode()).decode()
+    code, message = x402_offer_problem(wrong)
+    assert code == "x402_network"
+    assert "Base Sepolia" in message
+    good = base64.b64encode(json.dumps({"accepts": [{"network": "eip155:84532"}]}).encode()).decode()
+    assert x402_offer_problem(good) is None
 
 
 def test_m3_start_command_uses_yaml_out(tmp_path: Path) -> None:

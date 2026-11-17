@@ -797,6 +797,20 @@ def _deliver_connect(run: _Run, root: Path, console: _Console, url: str, expires
     _mark(run, root, path, "created", restricted=ok)
 
 
+def x402_offer_problem(header: str) -> tuple[str, str] | None:
+    """None when the offer is on Base Sepolia. An empty header is a missing offer."""
+    if not header:
+        return ("x402_offer_missing", "The core returned no USDC offer.")
+    try:
+        document = json.loads(base64.b64decode(header))
+        network = document["accepts"][0]["network"]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return ("x402_offer_missing", "The core returned no USDC offer.")
+    if network != "eip155:84532":
+        return ("x402_network", "The USDC test offer was not on Base Sepolia.")
+    return None
+
+
 def _probe(
     run: _Run,
     settings: Settings,
@@ -816,21 +830,10 @@ def _probe(
             return False
         rail_x402 = False
         if run.x402:
-            encoded = response.headers.get("payment-required", "")
-            try:
-                document = json.loads(base64.b64decode(encoded))
-                network = document["accepts"][0]["network"]
-            except (ValueError, KeyError, IndexError, TypeError):
-                network = ""
-            if network != "eip155:84532":
-                _fail(
-                    run,
-                    code="x402_network",
-                    step="test_402",
-                    message="The USDC test offer was not on Base Sepolia.",
-                    exit_code=1,
-                    status="failed",
-                )
+            problem = x402_offer_problem(response.headers.get("payment-required", ""))
+            if problem is not None:
+                code, message = problem
+                _fail(run, code=code, step="test_402", message=message, exit_code=1, status="failed")
                 return False
             rail_x402 = True
         run.test_402 = {"ok": True, "rail_lightning": True, "rail_x402": rail_x402, "debited": False}
