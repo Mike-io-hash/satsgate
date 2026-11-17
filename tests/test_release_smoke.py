@@ -73,6 +73,21 @@ def test_hash_mismatch_names_the_file_only(tmp_path: Path) -> None:
         hashes.assert_same(sums, got)
 
 
+def test_console_script_is_next_to_the_venv_python_symlink(tmp_path: Path) -> None:
+    check = _load("smoke_check")
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    bindir = tmp_path / "venv" / "bin"
+    bindir.mkdir(parents=True)
+    python = bindir / "python"
+    python.symlink_to(real / "python")
+    script = bindir / "satsgate-proxy"
+    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    script.chmod(0o755)
+    check.check_commands(str(python), ["satsgate-proxy --help"])
+
+
 def test_init_probe_on_a_closed_port_writes_no_key(tmp_path: Path) -> None:
     check = _load("smoke_check")
     env_python = os.environ.get("PYTHONPATH", "")

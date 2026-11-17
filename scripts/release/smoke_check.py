@@ -34,7 +34,9 @@ def check_version(python: str, module: str, version: str) -> None:
 
 def check_commands(python: str, commands: list[str]) -> None:
     env = os.environ.copy()
-    bindir = str(Path(python).resolve().parent)
+    # A venv python is a symlink. resolve() would point at the base interpreter
+    # and miss the console scripts installed next to the symlink.
+    bindir = str(Path(python).absolute().parent)
     env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
     for command in commands:
         argv = command.split()
