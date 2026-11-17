@@ -1067,7 +1067,7 @@ def test_restricted_key_does_not_spend_the_security_quota(tmp_path, monkeypatch)
 def test_delivery_deadline_covers_dns_headers_and_body(tmp_path):
     module = _load_app(tmp_path, **_env())
     budget = 0.12
-    # The mock peer blocks for 0.6s and httpx cannot preempt that sleep.
+    # The mock peer blocks for 2.5s and httpx cannot preempt that sleep.
     # A loaded runner can therefore finish only after the sleep. The bound
     # stays far under the 5s client timeout, which is the hang this rejects.
     tolerance = 1.0
@@ -1081,7 +1081,7 @@ def test_delivery_deadline_covers_dns_headers_and_body(tmp_path):
         assert elapsed <= budget + tolerance
 
     def slow_headers(request: httpx.Request) -> httpx.Response:
-        time.sleep(0.6)
+        time.sleep(2.5)
         return httpx.Response(200, content=b"ok")
 
     assert_timeout(
@@ -1096,7 +1096,7 @@ def test_delivery_deadline_covers_dns_headers_and_body(tmp_path):
     )
 
     def slow_dns(host, port, *args, **kwargs):
-        time.sleep(0.6)
+        time.sleep(2.5)
         return _public_resolver(host, port)
 
     assert_timeout(
@@ -1115,7 +1115,7 @@ def test_delivery_deadline_covers_dns_headers_and_body(tmp_path):
             return self
 
         def __next__(self):
-            time.sleep(0.6)
+            time.sleep(2.5)
             return b"late"
 
         def close(self) -> None:
