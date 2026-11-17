@@ -539,7 +539,7 @@ def test_migration_on_an_existing_database(tmp_path):
     assert old_challenge == ("old/resource", None)
 
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.20.1"
+        assert http.get("/health").json()["version"] == "0.20.2"
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})
         assert balance.status_code == 200
         assert balance.json()["balance_msat"] == 0
@@ -577,7 +577,7 @@ def test_sdk_creates_lists_and_revokes(tmp_path):
         sys.path.insert(0, str(sdk_root))
     from satsgate_sdk import SatsgateClient, __version__
 
-    assert __version__ == "0.8.0"
+    assert __version__ == "0.9.0"
     with TestClient(module.app) as http:
         account = _buy_client(http)
         sg = SatsgateClient(base_url="http://testserver", api_key=account)

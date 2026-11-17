@@ -739,7 +739,7 @@ def test_migration_adds_the_hash_column_and_leaves_old_rows_unlimited(tmp_path):
         conn.execute("UPDATE clients SET balance_msat = credits * 2000")
         conn.commit()
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.20.1"
+        assert http.get("/health").json()["version"] == "0.20.2"
         balance = http.get("/v1/balance", headers={"X-Api-Key": legacy_key})
         assert balance.status_code == 200
         assert balance.json()["balance_msat"] == 14_000
@@ -851,7 +851,7 @@ def test_sdk_sends_the_buyer_header(tmp_path):
         sys.path.insert(0, str(sdk_root))
     from satsgate_sdk import SatsgateClient, __version__
 
-    assert __version__ == "0.8.0"
+    assert __version__ == "0.9.0"
     with TestClient(module.app) as http:
         account = _buy_client(http)
         sg = SatsgateClient(base_url="http://testserver", api_key=account)

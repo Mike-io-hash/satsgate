@@ -154,6 +154,53 @@ def _policy_limited(data: dict) -> bool:
     return data.get("max_uses") is not None or data.get("access_seconds") is not None
 
 
+def _json_body(response: httpx.Response) -> dict:
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise SatsgateError(
+            f"request failed ({response.status_code}): non-json response",
+            status_code=response.status_code,
+            data=None,
+        ) from exc
+    if not isinstance(data, dict):
+        raise SatsgateError(
+            f"request failed ({response.status_code}): non-json response",
+            status_code=response.status_code,
+            data=None,
+        )
+    return data
+
+
+def _fail(response: httpx.Response, data: dict) -> None:
+    code = data.get("error")
+    detail = code if isinstance(code, str) else "error"
+    raise SatsgateError(
+        f"request failed ({response.status_code}): {detail}",
+        status_code=response.status_code,
+        data=data,
+    )
+
+
+def _accept(response: httpx.Response, *, statuses: set[int]) -> dict:
+    data = _json_body(response)
+    if response.status_code not in statuses:
+        _fail(response, data)
+    return data
+
+
+def create_account(*, base_url: str, timeout_seconds: float = 10.0) -> dict:
+    """Open an account with POST /v1/accounts. No API key is sent.
+
+    The returned dict includes ``api_key`` once. This function does not log it
+    and does not retry.
+    """
+    url = f"{base_url.rstrip('/')}/v1/accounts"
+    with httpx.Client(timeout=timeout_seconds) as http:
+        response = http.post(url, json={}, headers={"Content-Type": "application/json"})
+    return _accept(response, statuses={201})
+
+
 def _cache_deadline(data: dict) -> int:
     """How long the SDK may remember a successful unlock.
 
@@ -196,22 +243,10 @@ class SatsgateClient:
         return {"X-Api-Key": self.api_key}
 
     def _ok_or_raise(self, r: httpx.Response) -> dict:
-        try:
-            data = r.json()
-        except Exception:
-            raise SatsgateError(
-                f"request failed ({r.status_code}): non-json response",
-                status_code=r.status_code,
-                data=None,
-            )
-
+        """200 with ok=true is success. A 402 on paywall verify still raises."""
+        data = _json_body(r)
         if r.status_code != 200 or not data.get("ok"):
-            raise SatsgateError(
-                f"request failed ({r.status_code}): {data}",
-                status_code=r.status_code,
-                data=data,
-            )
-
+            _fail(r, data)
         return data
 
     # --- Billing / account ---
@@ -220,6 +255,53 @@ class SatsgateClient:
         """Model B pricing. There is no pack catalogue to index."""
         r = self._http.get(f"{self.base_url}/v1/plans")
         return self._ok_or_raise(r)
+
+    def topup_lightning(self, *, sats: int) -> dict:
+        """Issue a Lightning top-up invoice. Requires the account key.
+
+        A 402 ``payment_required`` body is the success result. The client does
+        not change ``sats`` and does not compute the bonus. There is no
+        unauthenticated helper: that path can open an account.
+        """
+        response = self._http.post(
+            f"{self.base_url}/v1/topup/lightning",
+            headers={**self._headers(), "Content-Type": "application/json"},
+            json={"sats": int(sats)},
+        )
+        return _accept(response, statuses={402})
+
+    def topup_usdc(
+        self,
+        *,
+        usd: str | None = None,
+        usd_atomic: int | None = None,
+        payment_signature: str | None = None,
+    ) -> dict:
+        """Issue or settle a USDC top-up. This client does not sign.
+
+        Without ``payment_signature``, a 402 is success and ``PAYMENT-REQUIRED``
+        is copied from the response header. With it, the header is sent and a
+        200 settle is success.
+        """
+        body: dict[str, Any] = {}
+        if usd is not None:
+            body["usd"] = usd
+        if usd_atomic is not None:
+            body["usd_atomic"] = int(usd_atomic)
+        headers = {**self._headers(), "Content-Type": "application/json"}
+        if payment_signature is not None:
+            headers["PAYMENT-SIGNATURE"] = payment_signature
+        response = self._http.post(
+            f"{self.base_url}/v1/topup/usdc",
+            headers=headers,
+            json=body,
+        )
+        allowed = {200} if payment_signature is not None else {402}
+        data = _accept(response, statuses=allowed)
+        if response.status_code == 402:
+            data = dict(data)
+            data["PAYMENT-REQUIRED"] = response.headers.get("PAYMENT-REQUIRED")
+        return data
 
     def balance(self) -> dict:
         r = self._http.get(f"{self.base_url}/v1/balance", headers=self._headers())

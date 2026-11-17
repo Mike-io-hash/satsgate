@@ -422,7 +422,7 @@ def test_boot_has_no_new_mandatory_secret(tmp_path, monkeypatch):
         assert health.json()["ok"] is True
 
 
-def test_t_5_2_11_locked_fee_ignores_a_later_accounting_rate(tmp_path, monkeypatch):
+def test_t_5_2_7_locked_fee_ignores_a_later_accounting_rate(tmp_path, monkeypatch):
     module = _load_app(tmp_path)
     _patch_dns(monkeypatch, module)
     from test_chainlink import oracle_poster

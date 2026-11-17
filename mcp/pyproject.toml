@@ -1,9 +1,18 @@
 [project]
 name = "satsgate-mcp"
 version = "0.13.0"
-description = "Buyer-side MCP server for Satsgate L402 and x402 resources"
+description = "Charge AI agents in Lightning and USDC on the same 402. 500 free unlocks per UTC month. Buyer-side MCP server. Cobrale a agentes de IA en Lightning y USDC, en el mismo 402."
 readme = "README.md"
 requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
 dependencies = [
   "mcp>=2.0,<3",
   "httpx>=0.27.0",
@@ -18,6 +27,8 @@ satsgate-mcp-pay = "satsgate_mcp.manual:main"
 
 [project.urls]
 Homepage = "https://github.com/Mike-io-hash/satsgate"
+Issues = "https://github.com/Mike-io-hash/satsgate/issues"
+Changelog = "https://github.com/Mike-io-hash/satsgate/blob/main/CHANGELOG.md"
 
 [build-system]
 requires = ["setuptools>=69", "wheel"]

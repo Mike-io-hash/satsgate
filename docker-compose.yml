@@ -196,6 +196,8 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./web/connect/dist:/srv/connect:ro
+      # Terms HTML from scripts/build_terms.py. Do not mount this over /srv/connect.
+      - ./web/terms/dist:/srv/terms:ro
       - caddy_data:/data
       - caddy_config:/config
     networks:

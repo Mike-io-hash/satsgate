@@ -219,8 +219,6 @@ class Buyer:
                 "advice": body.get("advice"),
                 "core_url": self.settings.core_url,
             }
-        if response.status == 200 and isinstance(body.get("credits"), int):
-            return {"ok": True, "credits": body["credits"], "core_url": self.settings.core_url}
         return {
             "ok": False,
             "error": "balance_unavailable",

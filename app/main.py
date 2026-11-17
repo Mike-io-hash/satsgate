@@ -580,7 +580,9 @@ def _site_lightning_advice(client: db.Client, site: dict) -> dict | None:
 def v1_plans() -> dict:
     from .pricing import plans_document
 
-    return plans_document()
+    body = plans_document()
+    body["terms_url"] = config.TERMS_URL or None
+    return body
 
 
 @app.get("/v1/balance")
@@ -612,6 +614,7 @@ def v1_client(x_api_key: str | None = Header(default=None, alias="X-Api-Key")):
         "alert_email_pending": alerts["alert_email_pending"],
         "email_alerts_available": db_alert_email.alerts_available(),
         "suspended": db.client_is_suspended(config.DB_PATH, client_id=client.id),
+        "terms_url": config.TERMS_URL or None,
     }
 
 
@@ -2034,7 +2037,13 @@ def v1_accounts(
     assert client is not None
     return JSONResponse(
         status_code=201,
-        content={"ok": True, "api_key": api_key, "client_id": client_id, **_balance_fields(client)},
+        content={
+            "ok": True,
+            "api_key": api_key,
+            "client_id": client_id,
+            **_balance_fields(client),
+            "terms_url": config.TERMS_URL or None,
+        },
     )
 
 
@@ -3282,7 +3291,7 @@ def v1_paywall_verify(
             content={
                 "ok": False,
                 "error": str(e),
-                "hint": "Top up payment verifications (credits): GET /v1/plans then /v1/topup/{plan_id}",
+                "hint": "Top up with POST /v1/topup/lightning or POST /v1/topup/usdc.",
             },
         )
 
@@ -3339,7 +3348,7 @@ def v1_paywall_status(
             content={
                 "ok": False,
                 "error": str(e),
-                "hint": "Top up payment verifications (credits): GET /v1/plans then /v1/topup/{plan_id}",
+                "hint": "Top up with POST /v1/topup/lightning or POST /v1/topup/usdc.",
             },
         )
 
@@ -3380,7 +3389,7 @@ def v1_paywall_charge(
             content={
                 "ok": False,
                 "error": str(e),
-                "hint": "Top up payment verifications (credits): GET /v1/plans then /v1/topup/{plan_id}",
+                "hint": "Top up with POST /v1/topup/lightning or POST /v1/topup/usdc.",
             },
         )
 
@@ -3429,7 +3438,7 @@ def _paywall_x402(body: PaywallX402In, x_api_key: str | None, *, settle: bool):
             content={
                 "ok": False,
                 "error": str(exc),
-                "hint": "Top up payment verifications (credits): GET /v1/plans then /v1/topup/{plan_id}",
+                "hint": "Top up with POST /v1/topup/lightning or POST /v1/topup/usdc.",
             },
             headers={"Cache-Control": "no-store"},
         )
