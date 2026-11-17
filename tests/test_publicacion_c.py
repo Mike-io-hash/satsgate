@@ -156,6 +156,7 @@ def test_t_c_1_6_installed_script_and_module_print_the_version(tmp_path: Path) -
         capture_output=True,
         text=True,
     )
+    # T-D.7.1: a failed pip install of the built wheels is a failure, not a skip.
     assert installed.returncode == 0, installed.stderr[-500:]
     module = subprocess.run([str(python), "-m", "satsgate", "--version"], check=False, capture_output=True, text=True)
     command = subprocess.run([str(script), "--version"], check=False, capture_output=True, text=True)
@@ -165,6 +166,11 @@ def test_t_c_1_6_installed_script_and_module_print_the_version(tmp_path: Path) -
     assert module.stdout.startswith("satsgate 0.1.1\n")
     assert "satsgate-sdk 0.10.0\n" in module.stdout
     assert "satsgate-proxy 0.14.1\n" in module.stdout
+
+
+def test_t_d_7_1_pip_install_failure_is_a_failure(tmp_path: Path) -> None:
+    """A broken dependency pin in a built wheel fails this test instead of skipping it."""
+    test_t_c_1_6_installed_script_and_module_print_the_version(tmp_path)
 
 
 def test_t_c_1_7_headline_is_in_the_package_and_the_readme() -> None:
