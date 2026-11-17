@@ -92,6 +92,7 @@ class _Run:
     terms_url: str | None = None
     evm_verified: bool = False
     x402: bool = False
+    kept_usdc: bool = False
     connect_url: str = ""
     connect_file: str | None = None
     connect_expires: int | None = None
@@ -750,8 +751,16 @@ def _place_yaml(
     text: str,
     *,
     plain: str,
+    x402_text: str,
 ) -> Path | None:
     path = _yaml_path(root, options)
+    if path.exists() and not path.is_symlink() and files.read_text(path) == x402_text and text != x402_text:
+        # The merchant already turned USDC on. Leaving it on is the idempotent re-run.
+        # Turning it off is a separate decision and is not done here.
+        _mark(run, root, path, "unchanged", restricted=True)
+        run.x402 = True
+        run.kept_usdc = True
+        return path
     placed = _place_file(
         run,
         root,
@@ -968,6 +977,8 @@ def _fill_next_steps(run: _Run, options: InitOptions) -> None:
         "The packaged Caddy snippet is a note. It does not check the signature by itself.",
     ]
     if run.x402:
+        if run.kept_usdc:
+            steps.append("USDC test mode stays on in the existing config. This run does not turn it off.")
         steps.append(
             "Pay once on Base Sepolia from a buyer agent (for example satsgate-mcp-pay, "
             "with the key on the buyer's machine). Test mode is free."
@@ -1192,7 +1203,15 @@ def _execute(options: InitOptions, console: _Console, transport: Any, run: _Run)
             public_base=options.public_url,
             config=config,
         )
-        yaml_path = _place_yaml(run, root, options, console, yaml_text, plain=plain)
+        x402_text = render_yaml(
+            api_url=raw_url,
+            upstream=options.upstream,
+            route_path=options.path,
+            x402=True,
+            public_base=options.public_url,
+            config=config,
+        )
+        yaml_path = _place_yaml(run, root, options, console, yaml_text, plain=plain, x402_text=x402_text)
         if yaml_path is None:
             return
         try:

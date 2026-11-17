@@ -259,6 +259,32 @@ def test_t_c_3_6_x402_turns_on_only_after_the_evm_payee_is_verified(tmp_path: Pa
     assert chosen_body["usdc"]["enabled"] is True
 
 
+def test_n1_rerun_without_want_usdc_keeps_the_x402_config(tmp_path: Path) -> None:
+    """Treating the owned USDC config as a foreign file fails this test."""
+    _module, http, transport = _core(tmp_path)
+    work = tmp_path / "work"
+    work.mkdir()
+    try:
+        code, body, _out, _err = invoke(work, transport)
+        assert code == 0, body
+        _verify_payee(http, _account_key(work), Account.create())
+        turned, turned_body, _out2, _err2 = invoke(work, transport, want_usdc=True)
+        kept_text = (work / "satsgate-proxy.yaml").read_text(encoding="utf-8")
+        again, again_body, _out3, _err3 = invoke(work, transport)
+        still = (work / "satsgate-proxy.yaml").read_text(encoding="utf-8")
+    finally:
+        _close(http)
+    assert turned == 0, turned_body
+    assert "x402: true" in kept_text
+    assert again == 0, again_body
+    assert still == kept_text
+    assert again_body["files"]["satsgate-proxy.yaml"] == "unchanged"
+    assert again_body["usdc"]["enabled"] is True
+    assert again_body.get("error") is None
+    statement = [step for step in again_body["next_steps"] if "stays on" in step]
+    assert statement == ["USDC test mode stays on in the existing config. This run does not turn it off."]
+
+
 def test_t_c_3_7_start_command_and_docker_compose_keep_secrets_out(tmp_path: Path) -> None:
     _module, http, transport = _core(tmp_path)
     work = tmp_path / "work"
