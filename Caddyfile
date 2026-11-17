@@ -17,6 +17,20 @@
 	}
 }
 
+# /terms is the current terms page. /terms/<effective-date> is a frozen copy.
+# style-src is 'self' only: the stylesheet is a file, not an inline style.
+# No script, no third-party hosts, no cookies.
+(satsgate_terms_headers) {
+	header {
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		X-Content-Type-Options "nosniff"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		Strict-Transport-Security "max-age=31536000"
+		Content-Security-Policy "default-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'"
+	}
+}
+
 {$SATSGATE_HOSTNAME} {
 	encode zstd gzip
 
@@ -114,6 +128,24 @@ gate.satsgate.org {
 	# /demo/live/... and /demo/test/... reach the seller as /live/... and /test/...
 	handle_path /demo/* {
 		reverse_proxy demo-seller:8000
+	}
+
+	# /terms, /terms/, and /terms/* only. /terms* would also match /termsfoo,
+	# which must keep the GitHub redirect. A missing file is 404 inside this
+	# handle and does not fall through to that redirect.
+	@terms path /terms /terms/ /terms/*
+	handle @terms {
+		route {
+			import satsgate_terms_headers
+			@dated path_regexp ^/terms/[0-9]{4}-[0-9]{2}-[0-9]{2}($|/)
+			header @dated Cache-Control "public, max-age=31536000"
+			@current not path_regexp ^/terms/[0-9]{4}-[0-9]{2}-[0-9]{2}($|/)
+			header @current Cache-Control "no-store"
+			uri strip_prefix /terms
+			root * /srv/terms
+			try_files {path} {path}/index.html
+			file_server
+		}
 	}
 
 	handle {

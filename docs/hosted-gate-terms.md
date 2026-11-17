@@ -1,12 +1,16 @@
 # Satsgate hosted gate: terms of use
 
-Effective date: set at deploy (`SATSGATE_TERMS_VERSION`).
+Effective date: 2026-11-13.
 
-These terms cover the hosted gate at `https://gate.satsgate.org` and the prepaid balance a vendor holds with Satsgate. They are the agreement for that service once `SATSGATE_TERMS_VERSION` is set. If you do not accept a new version, stop using the service.
+These terms cover the hosted gate at `https://gate.satsgate.org` and the prepaid balance a vendor holds with Satsgate. They are the agreement for that service as of the effective date above. If you do not accept a new version, stop using the service.
 
 ## What Satsgate is
 
 Satsgate is a 402 gateway. A buyer can pay an invoice in Lightning or USDC. The payment goes to the vendor's own wallet. Satsgate does not take custody of buyer funds, does not split a payment, and does not take a fee from the buyer's payment.
+
+## Vendor content
+
+The vendor is solely responsible for the content, services, and conduct of any site or route they connect to Satsgate. Satsgate does not review, host, or deliver that content. After payment, the buyer redeems a receipt at the vendor's own origin.
 
 ## Accounts
 
@@ -34,10 +38,12 @@ A refund, when one is given, is a credit to the prepaid balance only. Satsgate d
 
 Quotes and signups from Cuba, Iran, and North Korea are refused when that country list is configured. EVM payout addresses are checked against a sanctions list. A receipt lasts up to 24 hours. After it expires, or after its uses are spent, the buyer needs a new payment.
 
+Satsgate has no duty to monitor vendor content or activity. It may disable a site or account used for illegal or sanctioned activity.
+
 ## Privacy
 
 Buyers do not get Satsgate accounts. Satsgate does not collect buyer personal data at signup. An IP address may be used to rate-limit signups and quotes. What is stored for a buyer limit is a hash, not a profile. Logs do not contain API keys, webhook secrets, or preimages.
 
 ## Changes
 
-A new version is identified by its effective date in `SATSGATE_TERMS_VERSION`. If you do not accept it, stop using the service.
+A new version is identified by its effective date. If you do not accept it, stop using the service.

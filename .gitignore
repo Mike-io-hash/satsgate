@@ -4,6 +4,7 @@ node_modules/
 web/connect/node_modules/
 web/connect/dist/
 web/connect/public/config.json
+web/terms/dist/
 *.sqlite3
 __pycache__/
 *.egg-info/
