@@ -276,6 +276,27 @@ def test_t_c_3_7_start_command_and_docker_compose_keep_secrets_out(tmp_path: Pat
     assert "host: 0.0.0.0" not in written
 
 
+def test_m3_start_command_uses_yaml_out(tmp_path: Path) -> None:
+    """A start command that still names satsgate-proxy.yaml fails this test."""
+    _module, http, transport = _core(tmp_path)
+    work = tmp_path / "work"
+    work.mkdir()
+    try:
+        code, body, _out, _err = invoke(work, transport, yaml_out="alt.yaml")
+    finally:
+        _close(http)
+    assert code == 0, body
+    assert "alt.yaml" in body["start_command"]
+    assert "satsgate-proxy.yaml" not in body["start_command"]
+    text = (work / "alt.yaml").read_text(encoding="utf-8")
+    assert "# Start: " in text
+    assert "alt.yaml" in text
+    assert "satsgate-proxy.yaml" not in text
+    source = [step for step in body["next_steps"] if "python -m satsgate_proxy" in step]
+    assert source and "alt.yaml" in source[0]
+    assert "satsgate-proxy.yaml" not in source[0]
+
+
 def test_i3_docker_mounts_the_yaml_out_path(tmp_path: Path) -> None:
     """A compose file that builds proxy/Dockerfile, listens only on loopback, or mounts the default name fails."""
     _module, http, transport = _core(tmp_path)

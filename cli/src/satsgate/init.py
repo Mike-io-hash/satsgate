@@ -26,12 +26,20 @@ from satsgate import files
 DEFAULT_API = "https://api.satsgate.org"
 _LOCAL_HTTP = frozenset({"localhost", "127.0.0.1", "::1"})
 _HTTP_LOGGERS = ("httpx", "httpcore", "httpx2", "httpcore2")
-START_COMMAND = "uvx --env-file .env satsgate-proxy --config satsgate-proxy.yaml"
-FROM_SOURCE = (
-    "From a checkout, until the packages are published: "
-    "pip install -e sdk/python -e proxy && set -a && . ./.env && set +a && "
-    "python -m satsgate_proxy --config satsgate-proxy.yaml"
-)
+def start_command(config: str = "satsgate-proxy.yaml") -> str:
+    return f"uvx --env-file .env satsgate-proxy --config {config}"
+
+
+def from_source(config: str = "satsgate-proxy.yaml") -> str:
+    return (
+        "From a checkout, until the packages are published: "
+        "pip install -e sdk/python -e proxy && set -a && . ./.env && set +a && "
+        f"python -m satsgate_proxy --config {config}"
+    )
+
+
+START_COMMAND = start_command()
+FROM_SOURCE = from_source()
 _SNIPPETS = {
     "fastapi": (("satsgate_fastapi_verify.py", "fastapi_verify.py"),),
     "express": (("satsgate_express_verify.js", "express_verify.js"),),
@@ -254,6 +262,7 @@ def render_yaml(
     route_path: str,
     x402: bool = False,
     public_base: str = "",
+    config: str = "satsgate-proxy.yaml",
 ) -> str:
     """Template for the proxy config. Secrets stay in .env."""
     server = "server:\n  host: 127.0.0.1\n  port: 8080\n"
@@ -264,7 +273,7 @@ def render_yaml(
         "# satsgate-proxy config written by `satsgate init`.\n"
         "# Lightning has no test network. A paid request moves real sats\n"
         "# to this merchant's Lightning Address.\n"
-        f"# Start: {START_COMMAND}\n"
+        f"# Start: {start_command(config)}\n"
         "# Secrets live in .env (SATSGATE_API_KEY and SATSGATE_ORIGIN_SECRET).\n"
         "core:\n"
         f"  base_url: {json.dumps(api_url)}\n"
@@ -867,7 +876,8 @@ def _block_existing_outputs(
     allow_x402: bool,
 ) -> bool:
     """Refuse a foreign YAML or snippet before an account or a key is created."""
-    plain = render_yaml(api_url=api_url, upstream=options.upstream, route_path=options.path)
+    config = options.yaml_out or "satsgate-proxy.yaml"
+    plain = render_yaml(api_url=api_url, upstream=options.upstream, route_path=options.path, config=config)
     owned = {plain}
     if allow_x402:
         owned.add(
@@ -877,6 +887,7 @@ def _block_existing_outputs(
                 route_path=options.path,
                 x402=True,
                 public_base=options.public_url,
+                config=config,
             )
         )
     yaml_path = _yaml_path(root, options)
@@ -935,9 +946,10 @@ def _copy_snippets(run: _Run, root: Path, console: _Console, framework: str) -> 
 
 
 def _fill_next_steps(run: _Run, options: InitOptions) -> None:
+    config = options.yaml_out or "satsgate-proxy.yaml"
     steps = [
-        f"Start the proxy: {START_COMMAND}",
-        FROM_SOURCE,
+        f"Start the proxy: {start_command(config)}",
+        from_source(config),
         "Add the origin check. Set SATSGATE_ORIGIN_SECRET on the origin from .env. "
         "A client that can reach the origin directly must fail closed.",
         "The packaged Caddy snippet is a note. It does not check the signature by itself.",
@@ -957,7 +969,7 @@ def _fill_next_steps(run: _Run, options: InitOptions) -> None:
     if options.docker:
         steps.append("docker compose -f docker-compose.satsgate.yml up")
     run.next_steps = steps
-    run.start_command = START_COMMAND
+    run.start_command = start_command(config)
 
 
 def _finish_success(run: _Run, console: _Console) -> None:
@@ -1157,13 +1169,15 @@ def _execute(options: InitOptions, console: _Console, transport: Any, run: _Run)
                 _fail(run, code=_error_code(exc), step="connect", message=str(exc), exit_code=1, status="failed")
                 return
             _deliver_connect(run, root, console, str(link["connect_url"]), int(link["expires_at"]))
-        plain = render_yaml(api_url=raw_url, upstream=options.upstream, route_path=options.path)
+        config = options.yaml_out or "satsgate-proxy.yaml"
+        plain = render_yaml(api_url=raw_url, upstream=options.upstream, route_path=options.path, config=config)
         yaml_text = render_yaml(
             api_url=raw_url,
             upstream=options.upstream,
             route_path=options.path,
             x402=run.x402,
             public_base=options.public_url,
+            config=config,
         )
         yaml_path = _place_yaml(run, root, options, console, yaml_text, plain=plain)
         if yaml_path is None:
