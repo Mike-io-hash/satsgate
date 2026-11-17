@@ -1,8 +1,6 @@
 # satsgate-sdk (Python)
 
-Minimal Python SDK to integrate **satsgate** (L402 paywall + prepaid payment verifications (credits)) into your backend.
-
-Lightning top-up stays `GET /v1/topup/{plan_id}`. USDC top-up, when the server has a treasury address, is `GET /v1/topup/{plan_id}/x402` with the account key. See `scripts/x402_topup_example.py`. Credits bought either way are not redeemable.
+Python client for **satsgate** model B. A vendor opens an account, holds a prepaid balance in milisatoshis, and charges a live unlock from that balance. The balance is not money and is not redeemable for sats, USDC, or fiat. PyPI publication is forthcoming; install from this repo until then.
 
 ## Install (editable, from this repo)
 
@@ -13,6 +11,28 @@ source .venv/bin/activate
 
 pip install -e sdk/python
 ```
+
+## Account and top-up
+
+`create_account(base_url=...)` calls `POST /v1/accounts` with no API key and an empty body. The response includes `api_key` (shown once), `client_id`, `balance_msat`, `balance_sats`, and `estimated_unlocks_remaining`. A 429 is raised. The client does not retry.
+
+```python
+from satsgate_sdk import SatsgateClient, create_account
+
+opened = create_account(base_url="http://127.0.0.1:8000")
+sg = SatsgateClient(base_url="http://127.0.0.1:8000", api_key=opened["api_key"])
+print(sg.balance()["balance_msat"], sg.balance()["estimated_unlocks_remaining"])
+
+# Lightning: minimum 1,000 sats. The 402 body includes invoice, macaroon,
+# payment_hash, and msat_credit (principal plus any bonus the server computed).
+invoice = sg.topup_lightning(sats=1000)
+
+# USDC: minimum US$1. The 402 body includes PAYMENT-REQUIRED from the response header.
+# Pass payment_signature on a later call to settle. This SDK does not sign.
+offer = sg.topup_usdc(usd="1.00")
+```
+
+`balance()` and `get_client()` return `balance_msat`, `balance_sats`, and `estimated_unlocks_remaining`, plus `free_unlocks_remaining` and `paid_unlocks_estimate` when the server sends them. `list_plans()` returns the model B document.
 
 ## Example
 
@@ -67,13 +87,13 @@ print(sg.ledger(limit=50))
 
 ## Usage policy
 
-`paywall_challenge(..., max_uses=1)` or `access_seconds=3600` records what that payment buys. One credit is still one settled payment. Pass `consume=True` to `paywall_verify` or `poll_paywall` on every buyer request. Each call takes one use, including a retry. The server returns `uses_remaining` and `access_until`. HTTP 401 `token_used_up` or `token_expired` means create a new challenge. The SDK does not cache a challenge that has a policy.
+`paywall_challenge(..., max_uses=1)` or `access_seconds=3600` records what that payment buys. Pass `consume=True` to `paywall_verify` or `poll_paywall` on every buyer request. Each call takes one use, including a retry. The server returns `uses_remaining` and `access_until`. HTTP 401 `token_used_up` or `token_expired` means create a new challenge. The SDK does not cache a challenge that has a policy.
 
 ## Restricted keys
 
 `create_api_key`, `list_api_keys`, and `revoke_api_key` talk to `/v1/api-keys` with the account key (`sg_...`).
 
-A restricted key starts with `sgr_`. It can call `paywall_challenge`, `paywall_verify`, and `poll_paywall`. Top-up, payee changes, key management, balance, client, ledger, and usage calls return HTTP 403 `insufficient_scope`. `resource_prefix` limits the three paywall calls to resources that start with that prefix (HTTP 403 `resource_not_allowed`). A revoked key returns HTTP 401 `api_key_revoked`.
+A restricted key starts with `sgr_`. It can call `paywall_challenge`, `paywall_verify`, `poll_paywall`, and `balance` (including `balance_msat` and `estimated_unlocks_remaining`). It cannot open an account or top up. Payee changes, key management, and other account writes return HTTP 403 `insufficient_scope`. `resource_prefix` limits the paywall calls to resources that start with that prefix (HTTP 403 `resource_not_allowed`). A revoked key returns HTTP 401 `api_key_revoked`.
 
 ## Receipts (0.7.0)
 

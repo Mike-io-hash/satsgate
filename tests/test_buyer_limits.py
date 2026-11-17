@@ -851,7 +851,7 @@ def test_sdk_sends_the_buyer_header(tmp_path):
         sys.path.insert(0, str(sdk_root))
     from satsgate_sdk import SatsgateClient, __version__
 
-    assert __version__ == "0.8.0"
+    assert __version__ == "0.9.0"
     with TestClient(module.app) as http:
         account = _buy_client(http)
         sg = SatsgateClient(base_url="http://testserver", api_key=account)
