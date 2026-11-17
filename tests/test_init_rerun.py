@@ -19,7 +19,13 @@ from init_harness import ADDRESS, API, Closed, Scripted, invoke, posts
 OTHER = "other@pay.example"
 
 
+@pytest.fixture(autouse=True)
+def _restore_free_quota(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SATSGATE_FREE_QUOTA", "500")
+
+
 def _core(tmp_path: Path, **env: str):
+    env.setdefault("SATSGATE_FREE_QUOTA", "500")
     module = _load_app(tmp_path, **env)
     http = TestClient(module.app)
     http.__enter__()
@@ -63,6 +69,7 @@ def test_t_c_5_2_rerun_after_payee_failure_does_not_sign_up_again(tmp_path: Path
     class _Once(httpx.BaseTransport):
         def __init__(self) -> None:
             self.requests = inner.requests
+            self.async_transport = inner.async_transport
             self._failed = False
 
         def handle_request(self, request: httpx.Request) -> httpx.Response:

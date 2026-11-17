@@ -19,7 +19,13 @@ from init_harness import ADDRESS, Closed, RecordingSync, invoke, posts
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _restore_free_quota(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SATSGATE_FREE_QUOTA", "500")
+
+
 def _core(tmp_path: Path, **env: str):
+    env.setdefault("SATSGATE_FREE_QUOTA", "500")
     module = _load_app(tmp_path, **env)
     http = TestClient(module.app)
     http.__enter__()

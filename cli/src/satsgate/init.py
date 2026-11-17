@@ -2,25 +2,43 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
 import secrets
 import sys
 from dataclasses import dataclass, field
+from importlib.resources import files as resource_files
 from pathlib import Path
 from typing import Any, TextIO
 from urllib.parse import urlsplit
 
-from satsgate_proxy.config import ConfigError, key_fingerprint, load_settings
+from satsgate_proxy import __version__ as proxy_version
+from satsgate_proxy.app import build_app
+from satsgate_proxy.config import ConfigError, Settings, key_fingerprint, load_settings
 from satsgate_sdk import SatsgateClient, SatsgateError, create_account
+from starlette.testclient import TestClient
 
 from satsgate import files
 
 DEFAULT_API = "https://api.satsgate.org"
 _LOCAL_HTTP = frozenset({"localhost", "127.0.0.1", "::1"})
-_HTTP_LOGGERS = ("httpx", "httpcore")
+_HTTP_LOGGERS = ("httpx", "httpcore", "httpx2", "httpcore2")
 START_COMMAND = "uvx --env-file .env satsgate-proxy --config satsgate-proxy.yaml"
+FROM_SOURCE = (
+    "From a checkout, until the packages are published: "
+    "pip install -e sdk/python -e proxy && set -a && . ./.env && set +a && "
+    "python -m satsgate_proxy --config satsgate-proxy.yaml"
+)
+_SNIPPETS = {
+    "fastapi": (("satsgate_fastapi_verify.py", "fastapi_verify.py"),),
+    "express": (("satsgate_express_verify.js", "express_verify.js"),),
+    "nginx": (
+        ("satsgate_nginx_verify.js", "nginx_verify.js"),
+        ("satsgate_nginx.conf", "nginx.conf"),
+    ),
+}
 
 
 @dataclass
@@ -59,6 +77,15 @@ class _Run:
     origin_secret: str = ""
     reused_account: bool = False
     terms_url: str | None = None
+    evm_verified: bool = False
+    x402: bool = False
+    connect_url: str = ""
+    connect_file: str | None = None
+    connect_expires: int | None = None
+    route: dict[str, Any] | None = None
+    test_402: dict[str, Any] | None = None
+    start_command: str | None = None
+    next_steps: list[str] = field(default_factory=list)
 
 
 class _Console:
@@ -169,12 +196,16 @@ def _payload(run: _Run) -> dict[str, Any]:
         "api_url": run.api_url,
         "account": run.account,
         "payee_lightning_address": run.payee,
-        "usdc": {"enabled": False, "connect_link_file": None, "expires_at": None},
+        "usdc": {
+            "enabled": run.x402,
+            "connect_link_file": run.connect_file,
+            "expires_at": run.connect_expires,
+        },
         "files": run.files,
-        "route": None,
-        "test_402": None,
-        "start_command": None,
-        "next_steps": [f"Terms: {run.terms_url}"] if run.terms_url else [],
+        "route": run.route,
+        "test_402": run.test_402,
+        "start_command": run.start_command,
+        "next_steps": list(run.next_steps),
         "warnings": list(run.warnings),
         "error": error,
     }
@@ -213,8 +244,19 @@ def _yaml_path(root: Path, options: InitOptions) -> Path:
     return path
 
 
-def render_yaml(*, api_url: str, upstream: str, route_path: str) -> str:
+def render_yaml(
+    *,
+    api_url: str,
+    upstream: str,
+    route_path: str,
+    x402: bool = False,
+    public_base: str = "",
+) -> str:
     """Template for the proxy config. Secrets stay in .env."""
+    server = "server:\n  host: 127.0.0.1\n  port: 8080\n"
+    if x402:
+        server += f"  public_base: {json.dumps(public_base)}\n"
+    extra = "    x402: true\n    x402_mode: test\n" if x402 else ""
     return (
         "# satsgate-proxy config written by `satsgate init`.\n"
         "# Lightning has no test network. A paid request moves real sats\n"
@@ -228,9 +270,7 @@ def render_yaml(*, api_url: str, upstream: str, route_path: str) -> str:
         f"  base_url: {json.dumps(upstream)}\n"
         "origin:\n"
         "  secret_env: SATSGATE_ORIGIN_SECRET\n"
-        "server:\n"
-        "  host: 127.0.0.1\n"
-        "  port: 8080\n"
+        f"{server}"
         "routes:\n"
         "  - name: first\n"
         "    methods: [GET]\n"
@@ -238,7 +278,37 @@ def render_yaml(*, api_url: str, upstream: str, route_path: str) -> str:
         "    price_sats: 10\n"
         "    access: per_request\n"
         "    scope: route\n"
+        f"{extra}"
     )
+
+
+def render_compose() -> str:
+    """Local image build. Secrets stay in env_file, not in this file."""
+    return (
+        "# satsgate-proxy for this project. Secrets are read from .env.\n"
+        "services:\n"
+        "  satsgate-proxy:\n"
+        "    build:\n"
+        "      context: .\n"
+        "      dockerfile: proxy/Dockerfile\n"
+        f"    image: satsgate-proxy:{proxy_version}\n"
+        "    env_file: .env\n"
+        "    read_only: true\n"
+        '    user: "65532:65532"\n'
+        "    ports:\n"
+        '      - "127.0.0.1:8080:8080"\n'
+        "    volumes:\n"
+        "      - ./satsgate-proxy.yaml:/etc/satsgate/proxy.yaml:ro\n"
+    )
+
+
+def probe_path(route_path: str) -> str:
+    if route_path.endswith("/**"):
+        prefix = route_path[:-3]
+        if not prefix.endswith("/"):
+            prefix += "/"
+        return prefix + "check"
+    return route_path
 
 
 def _read_account_key(path: Path) -> str | None:
@@ -509,19 +579,32 @@ def _git_warning(run: _Run, root: Path, console: _Console) -> None:
     _mark(run, root, path, "updated" if current else "created", restricted=True)
 
 
-def _place_yaml(run: _Run, root: Path, options: InitOptions, console: _Console, text: str) -> Path | None:
-    path = _yaml_path(root, options)
+def _place_file(
+    run: _Run,
+    root: Path,
+    path: Path,
+    console: _Console,
+    text: str,
+    *,
+    step: str,
+    mode: int = 0o644,
+    allow_update_from: str | None = None,
+) -> Path | None:
     files.refuse_symlink(path)
     if path.exists():
         current = files.read_text(path)
         if current == text:
             _mark(run, root, path, "unchanged", restricted=True)
             return path
+        if allow_update_from is not None and current == allow_update_from:
+            files.atomic_write(path, text, mode=mode)
+            _mark(run, root, path, "updated", restricted=True)
+            return path
         if not console.human:
             _fail(
                 run,
                 code="file_exists",
-                step="write_yaml",
+                step=step,
                 message=f"{path.name} already exists and was not overwritten.",
                 exit_code=3,
                 status="file_exists",
@@ -533,31 +616,193 @@ def _place_yaml(run: _Run, root: Path, options: InitOptions, console: _Console, 
             _fail(
                 run,
                 code="file_exists",
-                step="write_yaml",
+                step=step,
                 message=f"{path.name} already exists and was not overwritten.",
                 exit_code=3,
                 status="file_exists",
             )
             return None
-        options.yaml_out = chosen
-        return _place_yaml(run, root, options, console, text)
-    ok = files.atomic_write(path, text, mode=0o644)
-    _mark(run, root, path, "created", restricted=ok or True)
+        return _place_file(run, root, Path(chosen) if Path(chosen).is_absolute() else root / chosen, console, text, step=step, mode=mode)
+    files.atomic_write(path, text, mode=mode)
+    _mark(run, root, path, "created", restricted=True)
     return path
 
 
-def _validate_yaml(path: Path, api_key: str, origin_secret: str) -> None:
+def _place_yaml(
+    run: _Run,
+    root: Path,
+    options: InitOptions,
+    console: _Console,
+    text: str,
+    *,
+    plain: str,
+) -> Path | None:
+    path = _yaml_path(root, options)
+    placed = _place_file(
+        run,
+        root,
+        path,
+        console,
+        text,
+        step="write_yaml",
+        allow_update_from=plain if plain != text else None,
+    )
+    if placed is None and console.human and run.exit_code == 0:
+        return None
+    return placed
+
+
+def _validate_yaml(path: Path, api_key: str, origin_secret: str) -> Settings:
     previous = {name: os.environ.get(name) for name in (files.API_KEY, files.ORIGIN_SECRET)}
     os.environ[files.API_KEY] = api_key
     os.environ[files.ORIGIN_SECRET] = origin_secret
     try:
-        load_settings(path)
+        return load_settings(path)
     finally:
         for name, value in previous.items():
             if value is None:
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+
+def _deliver_connect(run: _Run, root: Path, console: _Console, url: str, expires: int) -> None:
+    """Human TTY prints the link once. Every other mode writes a 0600 file and does not print it."""
+    run.connect_expires = int(expires)
+    if console.human and _tty(console.stdout):
+        console.say(url)
+        answer = console.ask("Open the connect link in a browser? [y/N] ")
+        if answer.strip().lower() in {"y", "yes"}:
+            import webbrowser
+
+            webbrowser.open(url)
+        return
+    path = root / ".satsgate" / "connect-link.txt"
+    files.refuse_symlink(path)
+    ok = files.atomic_write(path, url if url.endswith("\n") else url + "\n", mode=0o600)
+    run.connect_file = _rel(root, path)
+    _mark(run, root, path, "created", restricted=ok)
+
+
+def _probe(
+    run: _Run,
+    settings: Settings,
+    proxy_transport: Any,
+    sdk_transport: Any,
+    route_path: str,
+) -> bool:
+    """One unpaid 402 through the in-memory proxy. No verify, no settle, no payment."""
+    app = build_app(settings, transport=proxy_transport)
+    with TestClient(app) as http:
+        response = http.get(probe_path(route_path))
+    challenge = response.headers.get("www-authenticate", "")
+    if response.status_code == 402 and challenge.startswith("L402 "):
+        amount = response.json().get("amount_sats")
+        if int(amount) != 10:
+            _fail(run, code="test_402", step="test_402", message="The test challenge was not 10 sats.", exit_code=1, status="failed")
+            return False
+        rail_x402 = False
+        if run.x402:
+            encoded = response.headers.get("payment-required", "")
+            try:
+                document = json.loads(base64.b64decode(encoded))
+                network = document["accepts"][0]["network"]
+            except (ValueError, KeyError, IndexError, TypeError):
+                network = ""
+            if network != "eip155:84532":
+                _fail(
+                    run,
+                    code="x402_network",
+                    step="test_402",
+                    message="The USDC test offer was not on Base Sepolia.",
+                    exit_code=1,
+                    status="failed",
+                )
+                return False
+            rail_x402 = True
+        run.test_402 = {"ok": True, "rail_lightning": True, "rail_x402": rail_x402, "debited": False}
+        return True
+    if response.status_code == 502:
+        diagnostic = _client(settings.core_base_url, settings.api_key, sdk_transport)
+        try:
+            try:
+                diagnostic.paywall_challenge(resource="route:first", amount_sats=10)
+                code = "paywall_unavailable"
+            except SatsgateError as exc:
+                code = _error_code(exc)
+        finally:
+            diagnostic.close()
+        run.test_402 = {"ok": False, "rail_lightning": False, "rail_x402": False, "debited": False}
+        _fail(
+            run,
+            code=code,
+            step="test_402",
+            message="The test 402 failed. No payment was sent.",
+            exit_code=1,
+            status="failed",
+        )
+        return False
+    _fail(
+        run,
+        code="test_402",
+        step="test_402",
+        message=f"The test request returned HTTP {response.status_code}.",
+        exit_code=1,
+        status="failed",
+    )
+    return False
+
+
+def _copy_snippets(run: _Run, root: Path, console: _Console, framework: str) -> bool:
+    pairs = _SNIPPETS.get(framework, ())
+    planned: list[tuple[Path, str]] = []
+    for dest_name, source_name in pairs:
+        text = (resource_files("satsgate") / "snippets" / source_name).read_text(encoding="utf-8")
+        planned.append((root / dest_name, text))
+    for path, text in planned:
+        if path.is_symlink():
+            _fail(run, code="symlink_refused", step="snippet", message=f"{path.name} is a symlink.", exit_code=3, status="symlink_refused")
+            return False
+        if path.exists() and files.read_text(path) != text:
+            _fail(
+                run,
+                code="file_exists",
+                step="snippet",
+                message=f"{path.name} already exists and was not overwritten.",
+                exit_code=3,
+                status="file_exists",
+            )
+            return False
+    for path, text in planned:
+        if _place_file(run, root, path, console, text, step="snippet") is None:
+            return False
+    return True
+
+
+def _fill_next_steps(run: _Run, options: InitOptions) -> None:
+    steps = [
+        f"Start the proxy: {START_COMMAND}",
+        FROM_SOURCE,
+        "Add the origin check. Set SATSGATE_ORIGIN_SECRET on the origin from .env. "
+        "A client that can reach the origin directly must fail closed.",
+        "The packaged Caddy snippet is a note. It does not check the signature by itself.",
+    ]
+    if run.x402:
+        steps.append(
+            "Pay once on Base Sepolia from a buyer agent (for example satsgate-mcp-pay, "
+            "with the key on the buyer's machine). Test mode is free."
+        )
+        steps.append(f"Buyers need a public URL. server.public_base is {options.public_url}.")
+    else:
+        steps.append("To try USDC, run satsgate init again with --want-usdc.")
+    if run.connect_expires is not None:
+        steps.append("Open the connect link, connect the wallet, then run satsgate init again.")
+    if run.terms_url:
+        steps.append(f"Terms: {run.terms_url}")
+    if options.docker:
+        steps.append("docker compose -f docker-compose.satsgate.yml up")
+    run.next_steps = steps
+    run.start_command = START_COMMAND
 
 
 def _finish_success(run: _Run, console: _Console) -> None:
@@ -576,11 +821,13 @@ def _finish_success(run: _Run, console: _Console) -> None:
             console.say(f"Lightning Address {run.payee}")
         if run.terms_url:
             console.say(f"Terms {run.terms_url}")
+        for step in run.next_steps:
+            console.say(step)
 
 
 def _execute(options: InitOptions, console: _Console, transport: Any, run: _Run) -> None:
     root = Path(options.cwd) if options.cwd is not None else Path.cwd()
-    sdk_transport, _proxy_transport = _split_transport(transport)
+    sdk_transport, proxy_transport = _split_transport(transport)
     raw_url = (options.api_url or os.environ.get("SATSGATE_API_URL") or DEFAULT_API).strip()
     problem = validate_api_url(raw_url)
     run.api_url = raw_url
@@ -679,6 +926,8 @@ def _execute(options: InitOptions, console: _Console, transport: Any, run: _Run)
         terms = peeked.get("terms_url")
         if isinstance(terms, str) and terms:
             run.terms_url = terms
+        run.evm_verified = bool(peeked.get("payee_evm_verified"))
+        run.x402 = run.evm_verified
         stored = (peeked.get("payee_lightning_address") or "").strip()
         if stored and stored != address and not replace_payee and console.human:
             answer = console.ask("Replace the saved Lightning Address? [y/N] ")
@@ -705,15 +954,55 @@ def _execute(options: InitOptions, console: _Console, transport: Any, run: _Run)
         if not _prepare_env(run, root, console, api_key, origin):
             return
         _git_warning(run, root, console)
-        yaml_text = render_yaml(api_url=raw_url, upstream=options.upstream, route_path=options.path)
-        yaml_path = _place_yaml(run, root, options, console, yaml_text)
+        if options.want_usdc and not run.evm_verified:
+            try:
+                link = client.create_connect_link()
+            except SatsgateError as exc:
+                _fail(run, code=_error_code(exc), step="connect", message=str(exc), exit_code=1, status="failed")
+                return
+            _deliver_connect(run, root, console, str(link["connect_url"]), int(link["expires_at"]))
+        plain = render_yaml(api_url=raw_url, upstream=options.upstream, route_path=options.path)
+        yaml_text = render_yaml(
+            api_url=raw_url,
+            upstream=options.upstream,
+            route_path=options.path,
+            x402=run.x402,
+            public_base=options.public_url,
+        )
+        yaml_path = _place_yaml(run, root, options, console, yaml_text, plain=plain)
         if yaml_path is None:
             return
         try:
-            _validate_yaml(yaml_path, api_key, origin)
+            settings = _validate_yaml(yaml_path, api_key, origin)
         except ConfigError as exc:
             _fail(run, code="invalid_yaml", step="write_yaml", message=str(exc), exit_code=1, status="failed")
             return
+        if not _probe(run, settings, proxy_transport, sdk_transport, options.path):
+            return
+        if not _copy_snippets(run, root, console, options.framework or "none"):
+            return
+        if options.docker:
+            compose = _place_file(
+                run,
+                root,
+                root / "docker-compose.satsgate.yml",
+                console,
+                render_compose(),
+                step="write_compose",
+            )
+            if compose is None:
+                return
+        run.route = {
+            "name": "first",
+            "path": options.path,
+            "price_sats": 10,
+            "access": "per_request",
+            "resource": "route:first",
+            "x402": run.x402,
+            "key_preview": key_preview(api_key),
+            "fingerprint": key_fingerprint(api_key),
+        }
+        _fill_next_steps(run, options)
         _finish_success(run, console)
     finally:
         client.close()

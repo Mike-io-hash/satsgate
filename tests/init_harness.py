@@ -15,10 +15,32 @@ ADDRESS = "merchant@pay.example"
 _FORBIDDEN = frozenset({"api.satsgate.org", "gate.satsgate.org"})
 
 
+class RecordingAsync(httpx.AsyncBaseTransport):
+    """Proxy-side transport. Core calls stay in-process. Other hosts are the origin."""
+
+    def __init__(self, app: object) -> None:
+        self._core = httpx.ASGITransport(app=app)
+        self.core_requests: list[httpx.Request] = []
+        self.origin_requests: list[httpx.Request] = []
+        self.origin = None
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.url.host in _FORBIDDEN:
+            raise AssertionError(f"init test called {request.url.host}")
+        if request.url.host == "127.0.0.1" and request.url.port == 9:
+            self.core_requests.append(request)
+            return await self._core.handle_async_request(request)
+        self.origin_requests.append(request)
+        if self.origin is not None:
+            return self.origin(request)
+        raise httpx.ConnectError("origin is not called by the unpaid test")
+
+
 class RecordingSync(httpx.BaseTransport):
     def __init__(self, app_client: TestClient) -> None:
         self._app = app_client
         self.requests: list[httpx.Request] = []
+        self.async_transport = RecordingAsync(app_client.app)
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         if request.url.host in _FORBIDDEN:
@@ -39,7 +61,7 @@ class RecordingSync(httpx.BaseTransport):
 class Bound:
     def __init__(self, sdk: httpx.BaseTransport) -> None:
         self.sdk = sdk
-        self.proxy = None
+        self.proxy = getattr(sdk, "async_transport", None)
 
 
 class Scripted:
@@ -86,10 +108,12 @@ def options(root: Path, **overrides: object) -> InitOptions:
 def invoke(root: Path, transport: RecordingSync, **overrides: object):
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
+    stdout_tty = bool(overrides.pop("stdout_tty", False))
 
     class _Buf:
-        def __init__(self, sink: list[str]) -> None:
+        def __init__(self, sink: list[str], *, tty: bool) -> None:
             self.sink = sink
+            self._tty = tty
 
         def write(self, text: str) -> int:
             self.sink.append(text)
@@ -99,11 +123,11 @@ def invoke(root: Path, transport: RecordingSync, **overrides: object):
             return None
 
         def isatty(self) -> bool:
-            return False
+            return self._tty
 
     stdin = overrides.pop("stdin", Closed())
-    stdout = _Buf(stdout_lines)
-    stderr = _Buf(stderr_lines)
+    stdout = _Buf(stdout_lines, tty=stdout_tty)
+    stderr = _Buf(stderr_lines, tty=False)
     code = run_init(options(root, **overrides), transport=Bound(transport), stdin=stdin, stdout=stdout, stderr=stderr)
     out = "".join(stdout_lines)
     err = "".join(stderr_lines)
