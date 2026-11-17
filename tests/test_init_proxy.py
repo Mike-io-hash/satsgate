@@ -356,6 +356,9 @@ def test_m3_start_command_uses_yaml_out(tmp_path: Path) -> None:
     finally:
         _close(http)
     assert code == 0, body
+    assert body["next_steps"][0].startswith("Start the proxy:")
+    assert "alt.yaml" in body["next_steps"][0]
+    assert "satsgate-proxy.yaml" not in body["next_steps"][0]
     assert "alt.yaml" in body["start_command"]
     assert "satsgate-proxy.yaml" not in body["start_command"]
     text = (work / "alt.yaml").read_text(encoding="utf-8")
