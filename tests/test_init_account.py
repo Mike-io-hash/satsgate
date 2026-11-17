@@ -14,7 +14,7 @@ from satsgate.__main__ import build_parser
 from satsgate.init import looks_like_lightning_address
 from test_x402 import _load_app
 
-from init_harness import ADDRESS, Closed, RecordingSync, invoke, posts
+from init_harness import ADDRESS, Closed, RecordingSync, Scripted, invoke, posts
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -81,21 +81,44 @@ def test_t_c_2_3_stdout_stderr_and_logs_hide_secrets(
     """Printing either key or the origin secret makes this assertion fail."""
     _module, http, transport = _core(tmp_path)
     work = tmp_path / "work"
+    human = tmp_path / "human"
     work.mkdir()
+    human.mkdir()
     caplog.set_level(logging.DEBUG)
+    stdin = Scripted(["merchant@pay.example\n", "n\n", "none\n"], tty=True)
     try:
         code, body, out, err = invoke(work, transport)
+        human_code, _human_body, human_out, human_err = invoke(
+            human,
+            transport,
+            stdin=stdin,
+            stdout_tty=True,
+            json_mode=False,
+            lightning_address=None,
+            want_usdc=None,
+            framework=None,
+        )
     finally:
         _close(http)
     assert code == 0, body
+    assert human_code == 0, human_out
     account = (work / ".satsgate" / "account.env").read_text(encoding="utf-8").split("=", 1)[1].strip()
     env = (work / ".env").read_text(encoding="utf-8")
     api_key = next(line.split("=", 1)[1] for line in env.splitlines() if line.startswith("SATSGATE_API_KEY="))
     origin = next(line.split("=", 1)[1] for line in env.splitlines() if line.startswith("SATSGATE_ORIGIN_SECRET="))
-    blob = out + err + caplog.text
+    human_account = (human / ".satsgate" / "account.env").read_text(encoding="utf-8").split("=", 1)[1].strip()
+    human_env = (human / ".env").read_text(encoding="utf-8")
+    human_api = next(line.split("=", 1)[1] for line in human_env.splitlines() if line.startswith("SATSGATE_API_KEY="))
+    human_origin = next(
+        line.split("=", 1)[1] for line in human_env.splitlines() if line.startswith("SATSGATE_ORIGIN_SECRET=")
+    )
+    blob = out + err + human_out + human_err + caplog.text
     assert account not in blob
     assert api_key not in blob
     assert origin not in blob
+    assert human_account not in blob
+    assert human_api not in blob
+    assert human_origin not in blob
     assert body["account"]["key_preview"].endswith(account[-4:])
     assert len(body["account"]["fingerprint"]) == 12
 
