@@ -13,6 +13,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 from eth_account import Account
 from fastapi.testclient import TestClient
 from starlette.testclient import TestClient as ProxyClient
@@ -52,6 +53,20 @@ def _debits() -> tuple:
             "SELECT COUNT(*), COALESCE(SUM(delta_credits), 0) FROM ledger WHERE reason = 'paywall_verify'"
         ).fetchone()
     return (int(row[0]), int(row[1]))
+
+
+def _compose_service(text: str) -> dict:
+    loaded = yaml.safe_load(text)
+    return loaded["services"]["satsgate-proxy"]
+
+
+def _assert_compose_service(text: str, source: str) -> None:
+    """A volume line that is not valid YAML, or a host port on every interface, fails here."""
+    service = _compose_service(text)
+    assert service["volumes"] == [f"{source}:/etc/satsgate/proxy.yaml:ro"]
+    assert service["ports"] == ["127.0.0.1:8080:8080"]
+    assert service["read_only"] is True
+    assert service["user"] == "65532:65532"
 
 
 def _env_value(work: Path, name: str) -> str:
@@ -262,9 +277,7 @@ def test_t_c_3_7_start_command_and_docker_compose_keep_secrets_out(tmp_path: Pat
     assert "dockerfile: Dockerfile.satsgate-proxy" in compose
     assert "proxy/Dockerfile" not in compose
     assert "host: 0.0.0.0" in compose
-    assert '"./satsgate-proxy.yaml":/etc/satsgate/proxy.yaml:ro' in compose
-    assert 'user: "65532:65532"' in compose
-    assert "read_only: true" in compose
+    _assert_compose_service(compose, "./satsgate-proxy.yaml")
     assert _env_value(work, "SATSGATE_API_KEY") not in compose
     assert _env_value(work, "SATSGATE_ORIGIN_SECRET") not in compose
     assert "docker compose -f docker-compose.satsgate.yml up" in body["next_steps"]
@@ -339,7 +352,7 @@ def test_i3_docker_mounts_the_yaml_out_path(tmp_path: Path) -> None:
         _close(http)
     assert code == 0, body
     compose = (work / "docker-compose.satsgate.yml").read_text(encoding="utf-8")
-    assert '"./alt.yaml":/etc/satsgate/proxy.yaml:ro' in compose
+    _assert_compose_service(compose, "./alt.yaml")
     assert "satsgate-proxy.yaml" not in compose
     assert "proxy/Dockerfile" not in compose
     assert "host: 0.0.0.0" in compose
@@ -347,6 +360,22 @@ def test_i3_docker_mounts_the_yaml_out_path(tmp_path: Path) -> None:
     written = (work / "alt.yaml").read_text(encoding="utf-8")
     assert "host: 127.0.0.1" in written
     assert "host: 0.0.0.0" not in written
+
+
+def test_i3_docker_quotes_a_yaml_path_with_spaces(tmp_path: Path) -> None:
+    """A volume entry that YAML cannot parse fails before the path is checked."""
+    _module, http, transport = _core(tmp_path)
+    work = tmp_path / "work"
+    work.mkdir()
+    name = "my route #1.yaml"
+    try:
+        code, body, _out, _err = invoke(work, transport, docker=True, yaml_out=name)
+    finally:
+        _close(http)
+    assert code == 0, body
+    compose = (work / "docker-compose.satsgate.yml").read_text(encoding="utf-8")
+    _assert_compose_service(compose, "./my route #1.yaml")
+    assert (work / name).is_file()
 
 
 def test_t_c_3_8_packaged_snippets_match_the_proxy_sources() -> None:

@@ -17,6 +17,7 @@ from typing import Any, TextIO
 from urllib.parse import urlsplit
 
 import httpx
+import yaml
 from satsgate_proxy import __version__ as proxy_version
 from satsgate_proxy.app import build_app
 from satsgate_proxy.config import ConfigError, Settings, key_fingerprint, load_settings
@@ -314,20 +315,40 @@ def render_proxy_dockerfile() -> str:
     )
 
 
-def _compose_mount(root: Path, yaml_path: Path) -> str:
+def _compose_source(root: Path, yaml_path: Path) -> str:
     try:
         relative = yaml_path.resolve().relative_to(root.resolve())
-        source = "./" + relative.as_posix()
+        return "./" + relative.as_posix()
     except ValueError:
-        source = yaml_path.resolve().as_posix()
-    return json.dumps(source)
+        return yaml_path.resolve().as_posix()
 
 
 def render_compose(yaml_path: Path, root: Path) -> str:
     """Compose a merchant can build outside this repo. Secrets stay in env_file."""
     image = f"ghcr.io/mike-io-hash/satsgate-proxy:{proxy_version}"
-    mount = _compose_mount(root, yaml_path)
-    return (
+    source = _compose_source(root, yaml_path)
+    document = {
+        "services": {
+            "satsgate-proxy": {
+                "build": {"context": ".", "dockerfile": "Dockerfile.satsgate-proxy"},
+                "image": f"satsgate-proxy:{proxy_version}",
+                "env_file": ".env",
+                "read_only": True,
+                "user": "65532:65532",
+                "ports": ["127.0.0.1:8080:8080"],
+                "tmpfs": ["/tmp"],
+                "volumes": [f"{source}:/etc/satsgate/proxy.yaml:ro"],
+                "entrypoint": [
+                    "/bin/sh",
+                    "-c",
+                    "cp /etc/satsgate/proxy.yaml /tmp/proxy.yaml\n"
+                    "sed -i 's/host: 127.0.0.1/host: 0.0.0.0/' /tmp/proxy.yaml\n"
+                    "exec satsgate-proxy --config /tmp/proxy.yaml\n",
+                ],
+            }
+        }
+    }
+    header = (
         "# satsgate-proxy for this project. Secrets are read from .env.\n"
         f"# D target image: {image}\n"
         "# Until that image is published, build Dockerfile.satsgate-proxy\n"
@@ -336,29 +357,8 @@ def render_compose(yaml_path: Path, root: Path) -> str:
         "# Use host.docker.internal when the app runs on the host.\n"
         "# The merchant YAML keeps host 127.0.0.1 for local uvx. This service\n"
         "# rewrites that listen address to 0.0.0.0 so the published port works.\n"
-        "services:\n"
-        "  satsgate-proxy:\n"
-        "    build:\n"
-        "      context: .\n"
-        "      dockerfile: Dockerfile.satsgate-proxy\n"
-        f"    image: satsgate-proxy:{proxy_version}\n"
-        "    env_file: .env\n"
-        "    read_only: true\n"
-        '    user: "65532:65532"\n'
-        "    ports:\n"
-        '      - "127.0.0.1:8080:8080"\n'
-        "    tmpfs:\n"
-        "      - /tmp\n"
-        "    volumes:\n"
-        f"      - {mount}:/etc/satsgate/proxy.yaml:ro\n"
-        "    entrypoint:\n"
-        "      - /bin/sh\n"
-        "      - -c\n"
-        "      - |\n"
-        "        cp /etc/satsgate/proxy.yaml /tmp/proxy.yaml\n"
-        "        sed -i 's/host: 127.0.0.1/host: 0.0.0.0/' /tmp/proxy.yaml\n"
-        "        exec satsgate-proxy --config /tmp/proxy.yaml\n"
     )
+    return header + yaml.safe_dump(document, sort_keys=False, width=4096)
 
 
 def probe_path(route_path: str) -> str:
