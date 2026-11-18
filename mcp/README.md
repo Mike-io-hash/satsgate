@@ -49,10 +49,8 @@ Claude Desktop or Cursor config:
 {
   "mcpServers": {
     "satsgate": {
-      "command": "python",
-      "args": ["-m", "satsgate_mcp"],
+      "command": "satsgate-mcp",
       "env": {
-        "PYTHONPATH": "/absolute/path/to/satsgate/mcp/src",
         "SATSGATE_MCP_DATA_DIR": "/absolute/path/to/satsgate-mcp-data",
         "SATSGATE_MCP_MAX_PAYMENT_SATS": "100",
         "SATSGATE_MCP_DAILY_MAX_SATS": "500",
@@ -159,9 +157,9 @@ Use a route priced at 1 to 21 sats. Pay from a wallet that is not the payee.
 ### Human QR
 
 ```bash
-pip install -r mcp/requirements.txt
+pip install satsgate-mcp
 export SATSGATE_MCP_DATA_DIR="$HOME/.local/share/satsgate-mcp"
-PYTHONPATH=mcp/src python -m satsgate_mcp.manual 'https://YOUR-PROXY/blog/post'
+satsgate-mcp-pay 'https://YOUR-PROXY/blog/post'
 ```
 
 The process prints the amount, the invoice, a text QR, and the path of a PNG under the data dir. Pay that invoice. It keeps polling until the invoice expires. The wait starts at 2 seconds and grows toward 15 seconds. `--polls N` and `--timeout SECONDS` are optional caps. Status lines start with a UTC timestamp. No NWC URI is required. The macaroon is not printed.
@@ -169,7 +167,7 @@ The process prints the amount, the invoice, a text QR, and the path of a PNG und
 If it stops before the origin body is printed, it prints a command you can paste. That command resumes the same `payment_hash` from the data dir and does not mint a new invoice:
 
 ```bash
-SATSGATE_MCP_DATA_DIR="$HOME/.local/share/satsgate-mcp" python -m satsgate_mcp.manual --resume PAYMENT_HASH
+SATSGATE_MCP_DATA_DIR="$HOME/.local/share/satsgate-mcp" satsgate-mcp-pay --resume PAYMENT_HASH
 ```
 
 If it stays on `payment_pending` until expiry, the invoice was unpaid or the payee has no LUD-21 `verify` URL. Wallet of Satoshi needs the NWC path below.
@@ -180,16 +178,14 @@ If it stays on `payment_pending` until expiry, the invoice was unpaid or the pay
 export SATSGATE_MCP_NWC_URI='nostr+walletconnect://...'
 export SATSGATE_MCP_MAX_PAYMENT_SATS=50
 export SATSGATE_MCP_DAILY_MAX_SATS=200
-PYTHONPATH=mcp/src python -m satsgate_mcp.manual --nwc 'https://YOUR-PROXY/blog/post'
+satsgate-mcp-pay --nwc 'https://YOUR-PROXY/blog/post'
 ```
 
 ### lnget and fetch402 against the proxy
 
 These clients pay the 402 header themselves. They are not the MCP server. CI checks the header shape and does not pay. On your machine:
 
-```bash
-PYTHONPATH=mcp/src python mcp/scripts/mainnet_l402_clients.py 'https://YOUR-PROXY/blog/post'
-```
+The header-shape script lives in the repo. The contributor section below runs it.
 
 That request does not pay. It prints whether the lnget and fetch402 parsers accept the header. Then, to spend sats:
 
@@ -203,3 +199,11 @@ node mcp/scripts/fetch402.mjs 'https://YOUR-PROXY/blog/post'
 lnget and fetch402 retry with `Authorization: L402 <macaroon>:<preimage>`. A phone wallet that does not return a preimage pays the same invoice and retries with `Authorization: L402 <macaroon>` only. Pending must stay on that invoice (`402 payment_pending`), not a second one.
 
 Confirm the origin saw the request and `X-Satsgate-Signature` verifies. A tampered path or a stale `t=` is rejected by the origin snippet.
+
+## For contributors
+
+From a checkout: `PYTHONPATH=mcp/src python -m satsgate_mcp`.
+
+```bash
+PYTHONPATH=mcp/src python mcp/scripts/mainnet_l402_clients.py 'https://YOUR-PROXY/blog/post'
+```

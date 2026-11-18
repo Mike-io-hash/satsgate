@@ -138,6 +138,21 @@ def test_m11_changelog_names_the_terms_and_the_ledger_check() -> None:
     assert "paywall_verify" in entry
 
 
+def test_n5_published_readmes_keep_pythonpath_in_the_contributor_section() -> None:
+    for rel in ("sdk/python/README.md", "proxy/README.md", "mcp/README.md", "cli/README.md"):
+        contributor = False
+        visible: list[str] = []
+        for line in (ROOT / rel).read_text(encoding="utf-8").splitlines():
+            if line.startswith("#"):
+                contributor = "contributor" in line.lower()
+            if not contributor:
+                visible.append(line)
+        assert "PYTHONPATH=" not in "\n".join(visible), rel
+    mcp = (ROOT / "mcp" / "README.md").read_text(encoding="utf-8")
+    assert '"command": "satsgate-mcp"' in mcp
+    assert "satsgate-mcp-pay" in mcp
+
+
 def test_i5_proxy_and_mcp_publish_an_install_section() -> None:
     proxy = (ROOT / "proxy" / "README.md").read_text(encoding="utf-8")
     mcp = (ROOT / "mcp" / "README.md").read_text(encoding="utf-8")
