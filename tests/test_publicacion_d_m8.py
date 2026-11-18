@@ -30,8 +30,10 @@ def _core(tmp_path: Path) -> TestClient:
 
 
 def test_t_d_7_2a_atomic_write_is_owner_only_under_umask_0(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    original = tempfile.mkstemp
+
     def wide_temp(*args, **kwargs):
-        fd, name = tempfile.mkstemp(*args, **kwargs)
+        fd, name = original(*args, **kwargs)
         os.fchmod(fd, 0o666)
         return fd, name
 
