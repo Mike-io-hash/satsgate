@@ -162,6 +162,13 @@ jobs:
           raise SystemExit(subprocess.call([sys.executable, "-m", "pytest", "-q", *args]))
           PY
 
+      - name: Check this build against its own output
+        env:
+          ROW_SUMS: ${{ steps.sums.outputs.sums }}
+        run: |
+          set -euo pipefail
+          python scripts/release/verify_dist.py --dir "${RUNNER_TEMP}/publish-dist" --expect-json "${ROW_SUMS}"
+
       - name: Upload distributions
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

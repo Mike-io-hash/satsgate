@@ -154,6 +154,15 @@ def test_i6_each_hop_is_wired_in_the_parsed_steps() -> None:
     assert "build-venv" not in test_step
 
 
+def test_n2_each_build_row_checks_its_own_output_before_upload() -> None:
+    steps = _publish()["jobs"]["build"]["steps"]
+    check = next(step for step in steps if step.get("name") == "Check this build against its own output")
+    upload = next(i for i, step in enumerate(steps) if "upload-artifact@" in str(step.get("uses", "")))
+    assert steps.index(check) < upload
+    assert check["env"]["ROW_SUMS"] == "${{ steps.sums.outputs.sums }}"
+    assert '--expect-json "${ROW_SUMS}"' in check["run"]
+
+
 def test_b2_repo_steps_have_a_checkout_and_python_steps_have_setup_python() -> None:
     for path in WORKFLOWS:
         workflow = _load(path)
