@@ -32,7 +32,7 @@ def _uses(workflow: dict) -> list[str]:
 
 
 _TOKEN = re.compile(
-    r"&&|\|\||==|!=|\(|\)|,|'(?:\\'|[^'])*'|\"(?:\\\"|[^\"])*\"|[A-Za-z_][A-Za-z0-9_.-]*"
+    r"&&|\|\||==|!=|!|\(|\)|,|'(?:\\'|[^'])*'|\"(?:\\\"|[^\"])*\"|[A-Za-z_][A-Za-z0-9_.-]*"
 )
 
 
@@ -81,8 +81,14 @@ class _If:
             if not self._at(")"):
                 raise AssertionError("missing )")
             return value
+        if self._at("!"):
+            return not self._primary()
         name = self.tokens[self.i]
         self.i += 1
+        if name == "cancelled":
+            if not (self._at("(") and self._at(")")):
+                raise AssertionError("cancelled")
+            return self.env.get("run") == "cancelled"
         if name == "always":
             if not (self._at("(") and self._at(")")):
                 raise AssertionError("always")
@@ -180,7 +186,8 @@ def test_t_d_3_1_publish_workflow_cannot_upload_from_a_pull_request() -> None:
     needed = set(pypi["needs"])
     assert {"smoke-local", "plan", "smoke-testpypi"} <= needed
     expr = pypi["if"]
-    assert "always()" in expr
+    assert "!cancelled()" in expr
+    assert "always()" not in expr
     assert "needs.smoke-local.result == 'success'" in expr
     assert "needs.plan.result == 'success'" in expr
     assert "needs.plan.outputs.rehearse == 'false'" in expr
@@ -196,6 +203,29 @@ def test_t_d_3_1_publish_workflow_cannot_upload_from_a_pull_request() -> None:
         assert isinstance(permissions, dict), name
         assert "write-all" not in permissions.values()
     _publish_allowed(pypi["if"])
+
+
+def test_i_r4_1_a_cancelled_run_does_not_publish_or_verify() -> None:
+    jobs = _load(WORKFLOW)["jobs"]
+    for rehearse, smoke in (("true", "success"), ("false", "skipped")):
+        env = {
+            "needs.build.result": "success",
+            "needs.smoke-local.result": "success",
+            "needs.plan.result": "success",
+            "needs.smoke-testpypi.result": smoke,
+            "needs.publish-testpypi.result": "success",
+            "needs.plan.outputs.rehearse": rehearse,
+            "needs.publish-pypi.result": "success",
+            "run": "cancelled",
+        }
+        assert _If(jobs["smoke-testpypi"]["if"], env).parse() is False
+        assert _If(jobs["publish-pypi"]["if"], env).parse() is False
+        assert _If(jobs["verify-pypi"]["if"], env).parse() is False
+        env["run"] = ""
+        assert _If(jobs["publish-pypi"]["if"], env).parse() is True
+        assert _If(jobs["verify-pypi"]["if"], env).parse() is True
+        if rehearse == "true":
+            assert _If(jobs["smoke-testpypi"]["if"], env).parse() is True
 
 
 def test_package_matrix_matches_the_tree() -> None:

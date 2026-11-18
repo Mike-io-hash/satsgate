@@ -174,10 +174,14 @@ def _needs(job: dict) -> list[str]:
     return list(raw)
 
 
+_STATUS_FUNCTIONS = ("!cancelled()", "success()", "failure()", "always()")
+
+
 def _skippable_on_a_tag(job: dict) -> bool:
     """A tag run can skip this job for a reason other than a failed need."""
     cond = str(job.get("if") or "")
-    if "always()" in cond:
+    # A status function opts the job out of GitHub's implicit success() skip.
+    if any(status in cond for status in _STATUS_FUNCTIONS):
         return False
     rest = cond.replace("startsWith(github.ref, 'refs/tags/')", "").replace("&&", "").strip()
     return bool(rest)
@@ -203,7 +207,8 @@ def test_i_r3_1_a_skipped_rehearsal_does_not_skip_later_tag_jobs() -> None:
         if not _has_skippable_ancestor(name, jobs):
             continue
         cond = str(job.get("if") or "")
-        assert "always()" in cond, name
+        assert "!cancelled()" in cond, name
+        assert "always()" not in cond, name
         assert "startsWith(github.ref, 'refs/tags/')" in cond, name
         for needed in _needs(job):
             assert f"needs.{needed}.result" in cond, (name, needed)
@@ -211,6 +216,15 @@ def test_i_r3_1_a_skipped_rehearsal_does_not_skip_later_tag_jobs() -> None:
                 assert "skipped" in cond or f"needs.{needed}.result == 'success'" in cond
             else:
                 assert f"needs.{needed}.result == 'success'" in cond, (name, needed)
+
+
+def test_i_r4_1_no_tag_job_uses_always() -> None:
+    for path in (ROOT / ".github" / "workflows" / "publish.yml", ROOT / ".github" / "workflows" / "ghcr.yml"):
+        for name, job in _load(path)["jobs"].items():
+            cond = str(job.get("if") or "")
+            if "refs/tags/" not in cond:
+                continue
+            assert "always()" not in cond, f"{path.name}:{name}"
 
 
 def test_n2_each_build_row_checks_its_own_output_before_upload() -> None:
