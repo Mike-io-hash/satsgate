@@ -87,10 +87,14 @@ def test_i2_extra_wheel_or_rewritten_sums_fail(tmp_path: Path) -> None:
     assert verify.verify_root(root, mapping) == [mapping]
 
 
-def test_i2_workflow_anchors_the_build_output_and_builds_in_a_clean_venv() -> None:
-    text = WORKFLOW.read_text(encoding="utf-8")
-    assert "cp incoming/*.whl" not in text
-    assert "build-venv" in text
-    assert "test-venv" in text
-    assert "needs.build.outputs.sums" in text
-    assert text.count("verify_dist.py") >= 4
+def test_i2_dir_expect_json_rejects_rewritten_sums(tmp_path: Path) -> None:
+    import json
+
+    verify = _load()
+    files = {"pkg-0.1.0-py3-none-any.whl": b"wheel", "pkg-0.1.0.tar.gz": b"sdist"}
+    directory = tmp_path / "pkg"
+    mapping = _fill(directory, files)
+    rewritten = dict(mapping)
+    rewritten["pkg-0.1.0.tar.gz"] = "a" * 64
+    assert verify.main(["--dir", str(directory), "--expect-json", json.dumps(rewritten)]) == 1
+    assert verify.main(["--dir", str(directory), "--expect-json", json.dumps(mapping)]) == 0

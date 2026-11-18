@@ -131,6 +131,29 @@ def test_b2_publish_jobs_stage_from_the_build_output_without_a_checkout(tmp_path
     fail("empty map", empty, "{}")
 
 
+def test_i6_each_hop_is_wired_in_the_parsed_steps() -> None:
+    workflow = _publish()
+    jobs = workflow["jobs"]
+    for name in ("publish-testpypi", "publish-pypi"):
+        steps = jobs[name]["steps"]
+        check = next(step for step in steps if step.get("name") == "Check the hashes and stage the distributions")
+        upload = next(i for i, step in enumerate(steps) if "gh-action-pypi-publish@" in str(step.get("uses", "")))
+        assert steps.index(check) < upload
+        assert "needs.build.outputs.sums" in check["env"]["BUILD_SUMS"]
+        assert "SHA256SUMS does not match the build output" in check["run"]
+    smoke = next(step["run"] for step in jobs["smoke-local"]["steps"] if "verify_dist.py" in step.get("run", ""))
+    assert "--expect-json" in smoke
+    assert "needs.build.outputs.sums" in jobs["smoke-local"]["steps"][-1]["env"]["BUILD_SUMS"]
+    build = next(step["run"] for step in jobs["build"]["steps"] if step.get("name") == "Build with the hash-pinned tools")
+    assert '"${buildpy}" -m build' in build
+    assert "python -m build" not in build
+    assert "--require-hashes -r scripts/release/requirements-build.txt" in build
+    assert "requirements.txt" not in build
+    test_step = next(step["run"] for step in jobs["build"]["steps"] if step.get("name") == "Test in a separate environment")
+    assert "test-venv" in test_step
+    assert "build-venv" not in test_step
+
+
 def test_b2_repo_steps_have_a_checkout_and_python_steps_have_setup_python() -> None:
     for path in WORKFLOWS:
         workflow = _load(path)

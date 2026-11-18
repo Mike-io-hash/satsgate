@@ -117,10 +117,23 @@ def test_b1_rejects_a_different_sha_an_extra_file_a_missing_file_and_a_foreign_h
 
 
 def test_b1_workflows_download_with_the_script_and_not_with_pip(tmp_path: Path) -> None:
-    text = WORKFLOW.read_text(encoding="utf-8")
-    assert "pip download" not in text
-    assert "--no-binary" not in text
-    assert text.count("scripts/release/fetch_published.py") >= 2
+    import re
+
+    import yaml
+
+    text = re.sub(r'(?m)^on:', '"on":', WORKFLOW.read_text(encoding="utf-8"), count=1)
+    workflow = yaml.safe_load(text)
+    jobs = {
+        "smoke-testpypi": "testpypi",
+        "verify-pypi": "pypi",
+    }
+    for name, index in jobs.items():
+        script = next(step["run"] for step in workflow["jobs"][name]["steps"] if "fetch_published.py" in step.get("run", ""))
+        assert "pip download" not in script
+        assert "--no-binary" not in script
+        assert f"--index {index}" in script
+        assert '[[ "${code}" != "2" ]]' in script
+        assert script.index('exit "${code}"') < script.index("sleep 10")
     fetch = _load()
     help_proc = __import__("subprocess").run(
         [__import__("sys").executable, str(ROOT / "scripts" / "release" / "fetch_published.py"), "--help"],
