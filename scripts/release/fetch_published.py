@@ -10,11 +10,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import sys
-import urllib.error
 import urllib.parse
-import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
@@ -133,25 +132,38 @@ def fetch(
         (dest / filename).write_bytes(payload)
 
 
-def _default_opener(url: str) -> tuple[int, bytes]:
+def _https_get(url: str, *, allowed: set[str], timeout: int, accept: str | None = None) -> tuple[int, bytes]:
+    """GET one https URL. Redirects are not followed."""
     parsed = urllib.parse.urlsplit(url)
-    if parsed.scheme != "https" or parsed.hostname not in INDEX_HOSTS.values():
-        raise FetchError(f"refusing host {parsed.hostname}")
-    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "satsgate-release"})
+    if parsed.scheme != "https" or parsed.hostname not in allowed or parsed.username or parsed.password:
+        raise FetchError(f"refusing host {parsed.hostname or url}")
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    headers = {"User-Agent": "satsgate-release"}
+    if accept:
+        headers["Accept"] = accept
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        connection = http.client.HTTPSConnection(parsed.hostname, timeout=timeout)
+        try:
+            connection.request("GET", path, headers=headers)
+            response = connection.getresponse()
             return response.status, response.read()
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read()
+        finally:
+            connection.close()
+    except (TimeoutError, OSError) as exc:
+        raise FetchError(exc.__class__.__name__) from exc
+
+
+def _default_opener(url: str) -> tuple[int, bytes]:
+    return _https_get(url, allowed=set(INDEX_HOSTS.values()), timeout=20, accept="application/json")
 
 
 def _default_downloader(url: str) -> bytes:
-    parsed = urllib.parse.urlsplit(url)
-    if parsed.scheme != "https" or parsed.hostname not in FILE_HOSTS.values():
-        raise FetchError(f"refusing host {parsed.hostname}")
-    request = urllib.request.Request(url, headers={"User-Agent": "satsgate-release"})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        return response.read()
+    status, body = _https_get(url, allowed=set(FILE_HOSTS.values()), timeout=60)
+    if status != 200:
+        raise FetchError(f"download returned {status}")
+    return body
 
 
 def main(argv: list[str] | None = None) -> int:
