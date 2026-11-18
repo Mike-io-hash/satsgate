@@ -29,12 +29,21 @@ SATSGATE_ENV=development SATSGATE_DEV_MODE=1 SATSGATE_WALLET_MODE=mock \
 Discovery routes for a running core are `GET /.well-known/satsgate.json` and `GET /openapi.json`.
 The release runbook is [docs/publishing.md](docs/publishing.md).
 
+## From a checkout
+
+```bash
+pip install -e sdk/python -e proxy -e cli
+pip install -r mcp/requirements.txt
+PYTHONPATH=mcp/src python -m satsgate_mcp.manual https://your-proxy.example/blog/post
+docker compose -f proxy/docker-compose.yml up --build
+```
+
 ## Code style
 
 This project prefers:
 - small, readable diffs
 - clear error messages
-- English-only public docs/comments
+- plain public docs and comments
 
 ## Pull requests
 
