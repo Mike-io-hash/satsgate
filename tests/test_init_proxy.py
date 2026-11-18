@@ -293,7 +293,9 @@ def test_n1_rerun_without_want_usdc_keeps_the_x402_config(tmp_path: Path) -> Non
     statement = [step for step in again_body["next_steps"] if "stays on" in step]
     assert statement == [
         "USDC test mode stays on in the existing config. This run does not turn it off. "
-        "To turn it off, delete the YAML and run init again. It is regenerated and the keys are reused."
+        "To turn it off, delete the YAML and run init again. It is regenerated and the keys are reused. "
+        "Manual edits to the YAML are lost. To keep them, remove the route's `x402` and `x402_mode` "
+        "lines and restart the proxy instead."
     ]
 
 
@@ -328,6 +330,36 @@ def test_i4_the_usdc_off_instruction_works_when_followed(tmp_path: Path, monkeyp
     assert settings.routes
     assert all(not route.x402 for route in settings.routes)
     assert "x402" not in (work / "satsgate-proxy.yaml").read_text(encoding="utf-8")
+
+
+def test_n6_removing_the_x402_lines_loads_without_running_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The warning says to delete the two x402 lines and restart. That loads with USDC off."""
+    _module, http, transport = _core(tmp_path)
+    work = tmp_path / "work"
+    work.mkdir()
+    try:
+        code, body, _out, _err = invoke(work, transport)
+        assert code == 0, body
+        _verify_payee(http, _account_key(work), Account.create())
+        turned, turned_body, _out2, _err2 = invoke(work, transport, want_usdc=True)
+        assert turned == 0, turned_body
+        kept, kept_body, _out3, _err3 = invoke(work, transport)
+        assert kept == 0, kept_body
+        instruction = next(step for step in kept_body["next_steps"] if "turn it off" in step)
+        assert "Manual edits to the YAML are lost." in instruction
+        assert "remove the route's `x402` and `x402_mode` lines" in instruction
+        path = work / "satsgate-proxy.yaml"
+        kept_lines = [line for line in path.read_text(encoding="utf-8").splitlines() if "x402" not in line]
+        path.write_text("\n".join(kept_lines) + "\n", encoding="utf-8")
+        env_text = (work / ".env").read_text(encoding="utf-8")
+    finally:
+        _close(http)
+    for line in env_text.splitlines():
+        key, value = line.split("=", 1)
+        monkeypatch.setenv(key, value)
+    settings = load_settings(path)
+    assert settings.routes
+    assert all(not route.x402 and not route.x402_mode for route in settings.routes)
 
 
 def test_t_c_3_7_start_command_and_docker_compose_keep_secrets_out(tmp_path: Path) -> None:
