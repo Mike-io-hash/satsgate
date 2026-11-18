@@ -108,7 +108,7 @@ def v1_admin_x402(x_admin_token: str | None = Header(default=None, alias="X-Admi
     """Whether Base mainnet USDC is on, and whether CDP last advertised exact.
 
     For a server watchdog. The JSON is a fixed set of keys. It does not include
-    credentials. Anonymous /v1 rate limits still apply. Call at most once a minute.
+    credentials. Unauthenticated /v1 rate limits still apply. Call at most once a minute.
     """
     err = _require_admin(x_admin_token)
     if err:

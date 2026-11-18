@@ -2,7 +2,7 @@
 
 ``cost_credits`` is not a fee. A zero cost is the existing test-mode signal:
 no debit and no free-quota slot. Every other live debit uses the formula, or
-the milisat amount stored on the challenge when it was issued.
+the millisat amount stored on the challenge when it was issued.
 """
 
 from __future__ import annotations

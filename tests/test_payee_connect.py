@@ -623,7 +623,7 @@ def test_manifest_lists_the_connect_routes(tmp_path):
     assert endpoints["connect_evm_verify"]["path"] == "/v1/connect/evm/verify"
 
 
-def test_connect_routes_use_the_anonymous_rate_limit(tmp_path):
+def test_connect_routes_use_the_unauthenticated_rate_limit(tmp_path):
     module = _load_app(
         tmp_path,
         SATSGATE_RL_ENABLED="1",

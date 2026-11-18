@@ -129,7 +129,7 @@ def hash_buyer_ip(ip: str, *, secret: str) -> str:
 
 
 def resolve_client_ip(*, peer: str | None, forwarded_for: str | None, trusted_proxies: str) -> str:
-    """Return the address that should own this request's anonymous rate-limit bucket."""
+    """Return the address that should own this request's unauthenticated rate-limit bucket."""
     peer_text = (peer or "").strip() or "unknown"
     if len(peer_text) > 64:
         peer_text = "unknown"

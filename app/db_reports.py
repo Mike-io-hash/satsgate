@@ -266,7 +266,7 @@ def usage_forecast(
     lookback_hours: int = 24,
     now_ts: int | None = None,
 ) -> dict:
-    """Runway in milisatoshis. The same unit is on both sides of the rate.
+    """Runway in millisatoshis. The same unit is on both sides of the rate.
 
     ``current_balance_credits`` is accepted only so an old caller does not crash.
     It is not returned and it is not used as the balance.

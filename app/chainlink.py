@@ -23,7 +23,7 @@ DESCRIPTION_SELECTOR = "0x7284e416"
 FEED_DECIMALS = 8
 RATE_DEN = 10**FEED_DECIMALS
 FUTURE_GRACE_S = 60
-# P-A4, originally proposed by Mike, approved by Ia on 2026-11-13.
+# How far a backup sample may sit from the primary read.
 MEDIAN_BAND_PERCENT = 5
 DESCRIPTION_TEXT = "BTC / USD"
 _WORD = 32

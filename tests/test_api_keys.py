@@ -442,12 +442,12 @@ def test_revoke_is_idempotent_and_stops_the_key(client):
     assert missing.status_code == 404
 
 
-def test_unknown_restricted_prefix_is_not_an_anonymous_topup(client):
+def test_unknown_restricted_prefix_is_not_an_unauthenticated_topup(client):
     before = client.get("/v1/admin/overview", headers={"X-Admin-Token": "test-admin-token"}).json()
     response = client.post("/v1/topup/lightning", json={"sats": 1000}, headers={"X-Api-Key": "sgr_this-key-does-not-exist"})
     assert response.status_code == 401
     assert response.json()["error"] == "invalid_api_key"
-    # An unknown account-key-shaped header still starts an anonymous top-up.
+    # An unknown account-key-shaped header still starts an unauthenticated top-up.
     legacy = client.post("/v1/topup/lightning", json={"sats": 1000}, headers={"X-Api-Key": "sg_not-a-real-key"})
     assert legacy.status_code == 402
     assert before["ok"] is True
@@ -577,7 +577,7 @@ def test_sdk_creates_lists_and_revokes(tmp_path):
         sys.path.insert(0, str(sdk_root))
     from satsgate_sdk import SatsgateClient, __version__
 
-    assert __version__ == "0.10.0"
+    assert __version__ == "0.10.1"
     with TestClient(module.app) as http:
         account = _buy_client(http)
         sg = SatsgateClient(base_url="http://testserver", api_key=account)

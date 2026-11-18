@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 LABEL org.opencontainers.image.title="satsgate-proxy" \
     org.opencontainers.image.licenses="Apache-2.0" \
     org.opencontainers.image.source="https://github.com/Mike-io-hash/satsgate" \
-    org.opencontainers.image.description="Charge AI agents in Lightning and USDC on the same 402. 500 free unlocks per UTC month. Cobrale a agentes de IA en Lightning y USDC, en el mismo 402."
+    org.opencontainers.image.description="Charge AI agents in Lightning and USDC on the same 402. Payments go straight to your wallet. 500 free unlocks a month."
 
 ARG SOURCE_DATE_EPOCH=0
 ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}

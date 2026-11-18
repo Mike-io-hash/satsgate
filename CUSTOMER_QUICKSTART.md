@@ -4,17 +4,16 @@
 
 ```bash
 uvx satsgate init
-pip install satsgate
 ```
 
-From a checkout: `pip install -e sdk/python -e proxy -e cli`.
+or `pip install satsgate`, then `satsgate init`.
 
-This is the path to integrate **satsgate** as a *customer* (agent operator).
+This is the path to integrate **Satsgate** as a *customer* (agent operator).
 
 Notes:
-- **Non-custodial:** your users pay **your** Lightning Address (LNURL-pay). satsgate never holds your funds.
-- **No end-user accounts / no KYC** (via satsgate).
-- Hosted pricing is a prepaid balance in milisatoshis (`balance_msat` in the API). **It does not expire** and it is not redeemable.
+- **Non-custodial:** your users pay **your** Lightning Address (LNURL-pay). Satsgate never holds your funds.
+- **No end-user accounts / no KYC** (via Satsgate).
+- Hosted pricing is a prepaid balance in millisatoshis (`balance_msat` in the API). **It does not expire** and it is not redeemable.
 - The small minimum top-up is there for **anti-abuse** on the hosted API.
 
 Hosted API:
@@ -25,10 +24,10 @@ Hosted API:
 
 ## Prerequisites
 
-- Node.js **18+**
-- An **NWC-enabled** Lightning wallet to pay top-ups (e.g. CoinOS, Alby, Blink, etc.)
-  - You will need a `nostr+walletconnect://...` connection string
-  - Treat it like a password (do not paste it in chats or commit it)
+- Python 3.10+
+- `uv` or `pip`
+
+Node.js and an NWC wallet are optional, for the demo scripts only. Treat an NWC connection string like a password (do not paste it in chats or commit it).
 
 ## 1) Get an API key
 
@@ -46,7 +45,7 @@ If the hosted payee's provider advertises LUD-21 `verify` (Alby does), you can s
 
 Pay the invoice from a **different** wallet than the one that receives it. Paying yourself from the same node (for example Alby Go on the same Alby Hub) usually fails.
 
-USDC top-up uses `POST /v1/topup/usdc` when the operator has set `SATSGATE_TREASURY_EVM_ADDRESS`. While `SATSGATE_X402_CDP` is on, that top-up is Base mainnet USDC only (`eip155:8453`). While it is off, it is Base Sepolia only (`eip155:84532`) and the response says `testing: true`. Prepaid balance is not sold for faucet USDC once mainnet is on. No `PAYMENT-SIGNATURE` yet: `402` and `PAYMENT-REQUIRED`. Retry with `PAYMENT-SIGNATURE` after your wallet signs that exact USDC authorization. The balance grows only after the facilitator settles, and it is not redeemable for USDC. If the treasury variable is unset, the route says `x402_topup_disabled` and Lightning top-up is unchanged. The proxy and the MCP server do not call this route.
+On api.satsgate.org, `POST /v1/topup/usdc` takes Base mainnet USDC (`eip155:8453`). A self-hosted core needs `SATSGATE_TREASURY_EVM_ADDRESS` and `SATSGATE_X402_CDP=1`; otherwise it is Base Sepolia (`testing: true`). Prepaid balance is not sold for faucet USDC once mainnet is on. No `PAYMENT-SIGNATURE` yet: `402` and `PAYMENT-REQUIRED`. Retry with `PAYMENT-SIGNATURE` after your wallet signs that exact USDC authorization. The balance grows only after the facilitator settles, and it is not redeemable for USDC. If the treasury variable is unset, the route says `x402_topup_disabled` and Lightning top-up is unchanged. The proxy and the MCP server do not call this route.
 
 A hosted site that takes USDC starts in test mode. Try on Base Sepolia with your agent first, then switch the site to live. See [`gate/README.md`](./gate/README.md).
 
@@ -80,7 +79,7 @@ curl -s -X PUT https://api.satsgate.org/v1/client/webhook \
   -d '{"url":"https://example.com/satsgate-webhook"}'
 ```
 
-The first response includes `secret` (`whsec_…`) once. A later `PUT` with a new URL keeps that secret and does not return it. Send `"rotate_secret": true` to replace the secret and read the new one once. `GET /v1/client/webhook` returns `url`, `enabled`, `secret_prefix`, and `last_delivery` (or `null`). It never returns the secret. `DELETE /v1/client/webhook` removes it. `POST /v1/client/webhook/test` queues a test event. All four calls use the account key. The operator must have `SATSGATE_SITE_SECRET_KEY` set; without it the save and the test call are `503 webhooks_unavailable` and the secret is not stored. `SATSGATE_WEBHOOKS=0` stops delivery and does not block these calls.
+The first response includes `secret` (`whsec_…`) once. A later `PUT` with a new URL keeps that secret and does not return it. Send `"rotate_secret": true` to replace the secret and read the new one once. `GET /v1/client/webhook` returns `url`, `enabled`, `secret_prefix`, and `last_delivery` (or `null`). It never returns the secret. `DELETE /v1/client/webhook` removes it. `POST /v1/client/webhook/test` queues a test event. All four calls use the account key. If you run the core yourself, set `SATSGATE_SITE_SECRET_KEY` before you save a webhook. Without it the save and the test call are `503 webhooks_unavailable` and the secret is not stored. `SATSGATE_WEBHOOKS=0` stops delivery and does not block these calls.
 
 Changing the URL, rotating the secret, or turning a disabled webhook back on drops queued deliveries for the previous configuration. A POST that has already left Satsgate is not recalled. Those changes, and a 404 or 410 that turns the webhook off, are written to the account ledger without the secret or the URL.
 
@@ -167,9 +166,9 @@ curl -s -X POST https://api.satsgate.org/v1/api-keys \
 
 That key can call the paywall challenge, status, and verify routes for resources starting with `demo/`. It cannot top up, change the payee, manage keys, or read the ledger. Drop the prefix field to allow every resource. Revoke it with `POST /v1/api-keys/{id}/revoke` using the account key. Python: `SatsgateClient.create_api_key`, `list_api_keys`, `revoke_api_key` (satsgate-sdk 0.4.0).
 
-To put that key in front of an API you already have, without writing paywall code, run [`satsgate-proxy`](./proxy/README.md). It is a separate process (version 0.14.1) and uses resource ids `route:<name>` or `site`, so set `resource_prefix` to match those (or omit it). The core in this quickstart stays the hosted API. `x402: true` without `x402_mode` is Base Sepolia. `x402_mode: live` is Base, after the operator has enabled it.
+To put that key in front of an API you already have, without writing paywall code, run [`satsgate-proxy`](./proxy/README.md). It is a separate process (version 0.14.2) and uses resource ids `route:<name>` or `site`, so set `resource_prefix` to match those (or omit it). The core in this quickstart stays the hosted API. `x402: true` without `x402_mode` is Base Sepolia. `x402_mode: live` is Base (on by default on api.satsgate.org).
 
-A buyer-side agent uses [`satsgate-mcp`](https://github.com/Mike-io-hash/satsgate/blob/main/mcp/README.md) (version 0.13.0). Works with core 0.20.3 or later. That process does not create challenges. It pays a Lightning URL the proxy already protects, reads an x402 offer without signing it, and `list_sites` reads the public directory of approved sites, including a USD-priced route. The optional `sgr_` key on the MCP server is only for read-only status and is a different key from the one in the proxy.
+A buyer-side agent uses [`satsgate-mcp`](https://github.com/Mike-io-hash/satsgate/blob/main/mcp/README.md) (version 0.13.1). Works with core 0.20.3 or later. That process does not create challenges. It pays a Lightning URL the proxy already protects, reads an x402 offer without signing it, and `list_sites` reads the public directory of approved sites, including a USD-priced route. The optional `sgr_` key on the MCP server is only for read-only status and is a different key from the one in the proxy.
 
 ## 3) End-to-end test (challenge → pay → unlock)
 
@@ -177,15 +176,15 @@ This script:
 - requests a paywall challenge
 - pays the Lightning invoice via NWC
 - verifies the L402 proof (`expected_resource` is required and must exactly match the challenge `resource`, including case)
-- uses one free quota slot, or debits the locked milisat fee when the quota is gone
+- uses one free quota slot, or debits the locked millisat fee when the quota is gone
 
 Pay that invoice from a **different** wallet than the payee. Alby Go paying an invoice that the same Alby Hub issued usually fails. Use a second wallet for the buyer.
 
-If you pay from a wallet that does not hand you the preimage, poll `GET /v1/paywall/status/{payment_hash}` with the API key and `Authorization: L402 <macaroon>` until `settled` is true. That GET spends the credit when it settles. `POST /v1/paywall/verify` is the preimage alternative. Only the first settled call takes a free slot or debits the locked fee.
+If you pay from a wallet that does not hand you the preimage, poll `GET /v1/paywall/status/{payment_hash}` with the API key and `Authorization: L402 <macaroon>` until `settled` is true. That GET debits the unlock fee when it settles. `POST /v1/paywall/verify` is the preimage alternative. Only the first settled call takes a free slot or debits the locked fee.
 
 `invoice_expires_at` is when the buyer must pay. `claim_until` (and `valid_until` on a new challenge) is when you can still unlock. Those used to differ by hours: the invoice lived about a day and the token died after 10 minutes. They now stay aligned, plus a grace period. `cache_until` on a successful unlock is how long to cache that result when the challenge has no usage policy.
 
-A settled payment debits the prepaid balance in milisatoshis after the free quota. A cheap API call should be a bundle or a time pass, not a new Lightning invoice. On the challenge, send `max_uses` (how many requests) and/or `access_seconds` (how long after settlement). Then each buyer request calls verify or status with `consume=true`. The server stores the counter, so more than one proxy replica shares it. HTTP 401 `token_used_up` or `token_expired` means mint a new challenge. Without those fields, behaviour is unchanged. Python SDK 0.6.0: `paywall_challenge(max_uses=1)` and `paywall_verify(..., consume=True)`. `max_uses: 1` is the right default for a proxy in front of a paid request. A 50-call bundle or a one-hour pass is how you price something cheaper than one unlock.
+A settled payment debits the prepaid balance in millisatoshis after the free quota. A cheap API call should be a bundle or a time pass, not a new Lightning invoice. On the challenge, send `max_uses` (how many requests) and/or `access_seconds` (how long after settlement). Then each buyer request calls verify or status with `consume=true`. The server stores the counter, so more than one proxy replica shares it. HTTP 401 `token_used_up` or `token_expired` means mint a new challenge. Without those fields, behaviour is unchanged. Python SDK 0.6.0: `paywall_challenge(max_uses=1)` and `paywall_verify(..., consume=True)`. `max_uses: 1` is the right default for a proxy in front of a paid request. A 50-call bundle or a one-hour pass is how you price something cheaper than one unlock.
 
 If that proxy is public, send the end buyer's IP in `X-Satsgate-Buyer-Ip` (`paywall_challenge(..., buyer_ip=)`). Satsgate uses it only when your connection comes from `SATSGATE_TRUSTED_PROXIES`. One buyer then gets a small budget (default 10 challenges per minute, and 5 unexpired unpaid challenges at a time on each rail) instead of the whole account budget, and an identical retry within 30 seconds gets the same invoice back. HTTP 429 `buyer_rate_limited` or `too_many_open_challenges_for_buyer` includes `Retry-After`. That wait is the soonest expiry of the challenges that still count. An expired challenge does not count. Lightning and x402 are counted separately. The address is stored only as a truncated hash, and that hash is deleted with the challenge.
 
@@ -202,12 +201,10 @@ Expected:
 
 ## 4) Integrate into your backend (Python)
 
-Install the SDK (from this repo):
+Install the published SDK:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e sdk/python
+pip install satsgate-sdk
 ```
 
 If you want to run the included FastAPI examples locally:

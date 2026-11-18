@@ -119,9 +119,9 @@ def test_t_5_4_1_vendor_name_is_gone_from_the_tree() -> None:
     needles = ("api.coingecko.com", "SATSGATE_COINGECKO_API_KEY", "x_cg_demo_api_key")
     roots = [_ROOT / "app", _ROOT / "gate", _ROOT / "proxy", _ROOT / "sdk", _ROOT / "mcp", _ROOT / "docs"]
     files = [path for root in roots for path in root.rglob("*") if path.is_file()]
-    files.extend([_ROOT / "docker-compose.yml", _ROOT / ".env.example"])
+    files.extend([_ROOT / "docker-compose.yml", _ROOT / ".env.example", _ROOT / "CHANGELOG.md"])
     for path in files:
-        if path.name == "CHANGELOG.md" or "test_public_rate.py" in path.name:
+        if "test_public_rate.py" in path.name:
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         for needle in needles:

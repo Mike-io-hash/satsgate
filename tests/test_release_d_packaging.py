@@ -1,4 +1,4 @@
-"""T-D.1.1 and T-D.1.2. T-D.1.3 lives in test_publicacion_c.py and reuses T-C.1.4."""
+"""T-D.1.1 and T-D.1.2. T-D.1.3 lives in test_release_c.py and reuses T-C.1.4."""
 
 from __future__ import annotations
 

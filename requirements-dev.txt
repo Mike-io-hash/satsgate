@@ -4,6 +4,8 @@ bandit>=1.7.9
 pip-audit>=2.7.0
 build>=1.2.0
 twine>=5.0.0
+# Markdown extra so package README rendering can run in the test job.
+readme-renderer[md]>=46
 # In-process EVM for the EIP-1271 / ERC-6492 payee test. Not imported by the app.
 eth-tester==0.14.0b1
 py-evm==0.12.1b1

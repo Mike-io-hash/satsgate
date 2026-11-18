@@ -1,8 +1,8 @@
-# Deploy Publicación C (core 0.20.3 and the terms cache)
+# Deploy core 0.20.3 and the terms cache
 
-Standing rules for every later deploy: a Caddy change is `docker compose up -d --no-deps --force-recreate caddy`. Do not reload Caddy in place. Never restart Alby Hub. Client 1 is read-only. Take a backup and tag the running image before replacing a container.
+Standing rules for every later deploy: a Caddy change is `docker compose up -d --no-deps --force-recreate caddy`. Do not reload Caddy in place. The Lightning node is not restarted. The reference account is read-only. Take a backup and tag the running image before replacing a container.
 
-This note is for a later deploy. It is not an authorization to deploy. Do not run it from this pull request. Mike runs it only after Ia's separate deploy OK. Auto-approve stays off. Do not change `SATSGATE_TERMS_VERSION`. Do not restart Alby Hub. Do not touch Client 1 except to read the balance in the smoke below. Do not publish packages. There is no proxy on the server to redeploy: proxy 0.14.1 and SDK 0.10.0 reach merchants only through Publicación D.
+This note is for a later deploy. It is not an authorization to deploy. Do not run it from this pull request. The maintainer runs it only after the release approver's separate deploy OK. Auto-approve stays off. Do not change `SATSGATE_TERMS_VERSION`. The Lightning node is not restarted. The reference account is read-only; its balance must not change. Do not publish packages. There is no proxy on the server to redeploy: proxy 0.14.1 and SDK 0.10.0 reach merchants only through the release workflows.
 
 ## Preconditions
 
@@ -10,7 +10,7 @@ This note is for a later deploy. It is not an authorization to deploy. Do not ru
 - A separate deploy OK has been given. The live `satsgate init` run in step 7 needs its own OK, separate from the deploy OK.
 - `SATSGATE_TERMS_VERSION` stays `2026-11-13`.
 - `SATSGATE_SITES_AUTO_APPROVE` stays off.
-- Alby Hub and Client 1 stay untouched.
+- The Lightning node is not restarted, and the reference account stays read-only.
 - Nothing is published. The packages stay in the repo.
 
 ## Steps
@@ -31,26 +31,26 @@ This note is for a later deploy. It is not an authorization to deploy. Do not ru
    - `/connect` is 200.
    - A random path still 301s to GitHub.
    - `GET /v1/rates` has `source=oracle` or `source=fallback` and does not name a rate source.
-   - Client 1's balance, read only, is still 1,152,000 msat.
+   - The reference account is read-only. Its balance must not change.
    - Watchdogs are ok.
    - Do not pay leftover invoices of throwaway clients.
 
 6. **Rollback.** Return to the previous core image (`pre-0.20.3`) and the previous Caddyfile, and recreate Caddy with `docker compose up -d --no-deps --force-recreate caddy` (do not reload Caddy in place). An unchanged compose file does not recreate the container. There is no migration to reverse. Restore the database only if no payment entered after the backup.
 
-## 7. Live `init` run (P-C11)
+## 7. A live `init` check with its own approval
 
-This step needs its own explicit OK from Ia, separate from the deploy OK. Ia picks the Lightning Address beforehand. Mike runs it. It is not part of CI.
+This step needs its own approval, separate from the deploy OK. The release approver picks the Lightning Address beforehand. The maintainer runs it. It is not part of CI.
 
 From the operator's box, not from the server, in a fresh scratch directory:
 
 ```bash
 cd /path/to/the/merged/checkout
 python3 -m venv /tmp/satsgate-init-c
-/tmp/satsgate-init-c/bin/pip install -e sdk/python -e proxy -e cli
-/tmp/satsgate-init-c/bin/satsgate init --json --lightning-address <the address Ia chose>
+# Install this checkout into that venv the way CONTRIBUTING.md describes.
+/tmp/satsgate-init-c/bin/satsgate init --json --lightning-address merchant@pay.example
 ```
 
-The install is from the merged checkout. The command talks to `https://api.satsgate.org`. It creates one throwaway account and uses 1 of the 3 signups allowed for that IP that day. It must not use Client 1.
+The install is from the merged checkout. The command talks to `https://api.satsgate.org`. It creates one throwaway account and uses 1 of the 3 signups allowed for that IP that day. It must not use the reference account.
 
 Check:
 
@@ -60,4 +60,4 @@ Check:
 - the output contains no secret
 - a second run reuses the account and opens zero accounts
 
-Do not pay the invoice. Do not pass `--want-usdc`. Afterward delete the scratch directory from the box. The account stays, the same way clients 4–6 stayed. Record the client id, not the key.
+Do not pay the invoice. Do not pass `--want-usdc`. Afterward delete the scratch directory from the box. The throwaway account stays. Record the client id, not the key.

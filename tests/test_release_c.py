@@ -1,4 +1,4 @@
-"""Publicación C package metadata and the SDK connect link (T-C.1, T-C.4.0)."""
+"""Release C package metadata and the SDK connect link (T-C.1, T-C.4.0)."""
 
 from __future__ import annotations
 
@@ -21,8 +21,7 @@ from test_x402 import _load_app
 ROOT = Path(__file__).resolve().parents[1]
 HEADLINE = (
     "Charge AI agents in Lightning and USDC on the same 402. "
-    "500 free unlocks per UTC month. "
-    "Cobrale a agentes de IA en Lightning y USDC, en el mismo 402."
+    "Payments go straight to your wallet. 500 free unlocks a month."
 )
 _BASE = "http://testserver"
 
@@ -93,16 +92,16 @@ def test_t_c_1_3_wheels_declare_apache_and_cli_license_matches(tmp_path: Path) -
 def test_t_c_1_4_versions_match() -> None:
     """Pinned versions. T-D.1.3 below reuses this instead of copying it."""
     projects = {path: project for path, project in _projects()}
-    assert projects[ROOT / "cli" / "pyproject.toml"]["version"] == "0.1.1"
-    assert '__version__ = "0.1.1"' in _text(ROOT / "cli" / "src" / "satsgate" / "__init__.py")
-    assert projects[ROOT / "sdk" / "python" / "pyproject.toml"]["version"] == "0.10.0"
-    assert '__version__ = "0.10.0"' in _text(ROOT / "sdk" / "python" / "src" / "satsgate_sdk" / "__init__.py")
-    assert projects[ROOT / "proxy" / "pyproject.toml"]["version"] == "0.14.1"
-    assert '__version__ = "0.14.1"' in _text(ROOT / "proxy" / "src" / "satsgate_proxy" / "__init__.py")
+    assert projects[ROOT / "cli" / "pyproject.toml"]["version"] == "0.1.2"
+    assert '__version__ = "0.1.2"' in _text(ROOT / "cli" / "src" / "satsgate" / "__init__.py")
+    assert projects[ROOT / "sdk" / "python" / "pyproject.toml"]["version"] == "0.10.1"
+    assert '__version__ = "0.10.1"' in _text(ROOT / "sdk" / "python" / "src" / "satsgate_sdk" / "__init__.py")
+    assert projects[ROOT / "proxy" / "pyproject.toml"]["version"] == "0.14.2"
+    assert '__version__ = "0.14.2"' in _text(ROOT / "proxy" / "src" / "satsgate_proxy" / "__init__.py")
     assert 'APP_VERSION = "0.20.3"' in _text(ROOT / "app" / "config.py")
     assert '__version__ = "0.15.2"' in _text(ROOT / "gate" / "src" / "satsgate_gate" / "__init__.py")
-    assert projects[ROOT / "mcp" / "pyproject.toml"]["version"] == "0.13.0"
-    assert '__version__ = "0.13.0"' in _text(ROOT / "mcp" / "src" / "satsgate_mcp" / "__init__.py")
+    assert projects[ROOT / "mcp" / "pyproject.toml"]["version"] == "0.13.1"
+    assert '__version__ = "0.13.1"' in _text(ROOT / "mcp" / "src" / "satsgate_mcp" / "__init__.py")
 
 
 def test_t_d_1_3_pyproject_version_equals_dunder_version() -> None:
@@ -135,9 +134,9 @@ def test_t_c_1_6_installed_script_and_module_print_the_version(tmp_path: Path) -
     from satsgate_proxy import __version__ as proxy_version
     from satsgate_sdk import __version__ as sdk_version
 
-    assert satsgate.__version__ == "0.1.1"
-    assert sdk_version == "0.10.0"
-    assert proxy_version == "0.14.1"
+    assert satsgate.__version__ == "0.1.2"
+    assert sdk_version == "0.10.1"
+    assert proxy_version == "0.14.2"
     if shutil.which("python3") is None:
         pytest.skip("cannot create a venv: python3 is not on PATH")
     wheels = tmp_path / "wheels"
@@ -171,9 +170,9 @@ def test_t_c_1_6_installed_script_and_module_print_the_version(tmp_path: Path) -
     assert module.returncode == 0, module.stderr
     assert command.returncode == 0, command.stderr
     assert module.stdout == command.stdout
-    assert module.stdout.startswith("satsgate 0.1.1\n")
-    assert "satsgate-sdk 0.10.0\n" in module.stdout
-    assert "satsgate-proxy 0.14.1\n" in module.stdout
+    assert module.stdout.startswith("satsgate 0.1.2\n")
+    assert "satsgate-sdk 0.10.1\n" in module.stdout
+    assert "satsgate-proxy 0.14.2\n" in module.stdout
 
 
 def test_t_d_7_1_pip_install_failure_is_a_failure(tmp_path: Path) -> None:
@@ -214,7 +213,7 @@ def test_t_c_4_0_create_connect_link_against_the_core(
 
 def test_t_c_8_1_coinbase_price_sentence_is_rejected() -> None:
     """Adding a spot-price sentence to a public README fails the silence check."""
-    from test_publicacion_b import _coinbase_allowed
+    from test_release_b import _coinbase_allowed
 
     bad = "Prices use the Coinbase spot price for your wallet."
     assert _coinbase_allowed(bad) is False
@@ -222,7 +221,7 @@ def test_t_c_8_1_coinbase_price_sentence_is_rejected() -> None:
 
 
 def test_t_c_8_2_silence_list_includes_the_umbrella() -> None:
-    from test_publicacion_b import _silence_files
+    from test_release_b import _silence_files
 
     files = _silence_files()
     assert ROOT / "cli" / "README.md" in files

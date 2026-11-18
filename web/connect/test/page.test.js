@@ -13,7 +13,8 @@ import { utf8ToHex } from '../src/hex.js'
 import { isProjectId } from '../src/project.js'
 import { isEmailConfirmPath, readConnectToken, readEmailToken, takeConnectToken, takeEmailToken } from '../src/token.js'
 
-const SAMPLE = '0x4A9E2CA774BB87110ffF3CB8a250e935cFE52Ce3'
+// EIP-55 address from keccak("satsgate-test-payee")[-20:].
+const SAMPLE = '0x862E9Fd82d2AC9D3938051C29e65Eb9C71923010'
 
 describe('connect token', () => {
   test('reads t from the fragment and rejects anything else', () => {
@@ -166,7 +167,7 @@ describe('personal_sign encoding', () => {
 
 describe('address read-back', () => {
   test('keeps checksum case and groups the hex in blocks of four', () => {
-    assert.equal(formatAddressBlocks(SAMPLE), '0x 4A9E 2CA7 74BB 8711 0ffF 3CB8 a250 e935 cFE5 2Ce3')
+    assert.equal(formatAddressBlocks(SAMPLE), '0x 862E 9Fd8 2d2A C9D3 9380 51C2 9e65 Eb9C 7192 3010')
     assert.throws(() => formatAddressBlocks(SAMPLE.toLowerCase().slice(0, 10)))
   })
 })

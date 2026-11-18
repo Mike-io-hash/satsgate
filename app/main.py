@@ -264,7 +264,7 @@ def _paywall_principal(x_api_key: str | None, resource: str) -> db_keys.Principa
 def _topup_client(x_api_key: str | None) -> db.Client | JSONResponse | None:
     """Client to attach a top-up to.
 
-    Missing or unknown account keys stay anonymous, matching previous behaviour.
+    Missing or unknown account keys stay unauthenticated, matching previous behaviour.
     A restricted key is rejected: it must not buy credits or open a new account.
     """
     if not x_api_key or len(x_api_key) > 512:
@@ -512,7 +512,7 @@ def well_known_satsgate_head(request: Request) -> dict:
 
 
 def _balance_fields(client: db.Client) -> dict:
-    """Seller-facing milisat balance and the standard-rate unlock estimate."""
+    """Seller-facing millisat balance and the standard-rate unlock estimate."""
     from . import quota
     from .pricing import balance_sats_text, estimate_unlocks
 

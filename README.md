@@ -1,37 +1,124 @@
-# satsgate
+# Satsgate
 
 [![CI](https://github.com/Mike-io-hash/satsgate/actions/workflows/ci.yml/badge.svg)](https://github.com/Mike-io-hash/satsgate/actions/workflows/ci.yml)
 
-**Cobrale a agentes de IA en Lightning y USDC, en el mismo 402. La plata va directo a tu billetera. 500 cobros gratis por mes.**
+**Charge AI agents in Lightning and USDC on the same 402. Payments go straight to your wallet. 500 free unlocks a month.**
 
-`satsgate` lets you charge AI agents, APIs, and web apps in Lightning and USDC on the same 402. Open an account without paying. Test mode is free. Live use includes 500 free unlocks per UTC month, then 2 sats per unlock with a 10% cap.
+Satsgate is a paywall for an HTTP API or a remote MCP server. The buyer pays the seller's wallet directly, in Lightning or in USDC on Base, on the same 402. Satsgate keeps a prepaid service balance for the seller and debits a fee after the free quota.
 
-## Fastest path: `satsgate init`
+Fastest path: `satsgate init`
 
 ```bash
 uvx satsgate init
-pip install satsgate
 ```
 
-From a checkout: `pip install -e sdk/python -e proxy -e cli`.
+## Who it is for
 
-The merchant flow from a cold start:
+- You run an API or a remote MCP server and want agents to pay per request.
+- You are an agent setting this up for your owner. Use `satsgate init --json`. It does not prompt.
+- You are a buyer agent. Use `satsgate-mcp` to read a 402, pay, and fetch.
 
-1. Open an account with `POST /v1/accounts` (empty body). The `sg_` key is returned once. Top up any amount with `POST /v1/topup/lightning` (`{"sats": N}`, minimum 1,000) or `POST /v1/topup/usdc` (`{"usd": "1.00"}`, minimum US$1). Pay, then poll `GET /v1/topup/status/{payment_hash}` for Lightning.
-2. Register the Lightning Address that receives your users' payments with `POST /v1/client/payee`. The first `POST /v1/paywall/challenge` that includes `payee_lightning_address` saves it too (`payee_saved: true`). Change it later with `POST /v1/client/payee`.
-3. `POST /v1/paywall/challenge` and give that invoice to your user. A proxy or MCP server should use a restricted key for this step (see [Restricted API keys](#restricted-api-keys)).
-4. When they have paid, unlock with `GET /v1/paywall/status/{payment_hash}` (any wallet, when the payee advertises LUD-21) or `POST /v1/paywall/verify` (preimage). A live unlock is free until the monthly quota is used, then it debits the locked milisat fee. A repeat spends 0.
+## Why Satsgate
 
-Challenge plus status (or verify) is the per-purchase pair, after the account has a payee and, past the free quota, prepaid balance.
+- No node to run. Payouts go to a Lightning Address. LUD-21 lets the buyer pay from any wallet.
+- No custody. The buyer pays the seller's wallet. Satsgate does not hold, receive, forward, or refund that payment.
+- Lightning and USDC on the same 402, with L402 and x402 v2. Works with Lightning Labs `lnget` and Alby `fetch402`. The client table is in [docs/api.md](docs/api.md).
+- Plug in the proxy, or call the API. The core, the proxy, the SDK, and the buyer MCP are open source.
+- No KYC. Payments are not private: Lightning and USDC payments are visible on the networks that move them.
 
-It’s a hosted + self-hostable FastAPI service that gives you:
+## Quickstart
 
-- **L402 paywall primitives** (invoice + macaroon, preimage or LUD-21 confirmation)
-- **Prepaid balance in milisatoshis** (`balance_msat`). It does not expire. The free quota does, on the first of each UTC month.
-- **Usage & reporting** (ledger, daily series, forecast). The forecast does not recommend a pack.
-- **Roadmap (active)**: new wallet backends, integrations, and production hardening
+Published packages only. `pip install satsgate` is an alternative to `uvx`, not a second step.
 
-Your users pay **your** Lightning Address (LNURL-pay). satsgate is **non-custodial** (we never hold your funds) and doesn’t require end-user accounts or KYC.
+```bash
+uvx satsgate init
+```
+
+```bash
+pip install satsgate
+satsgate init
+```
+
+An agent passes `--json` and `--lightning-address merchant@pay.example`.
+
+Start the proxy:
+
+```bash
+uvx --env-file .env satsgate-proxy --config satsgate-proxy.yaml
+```
+
+Docker, after `init` writes the compose file:
+
+```bash
+satsgate init --docker
+docker compose -f docker-compose.satsgate.yml up
+```
+
+The image is `ghcr.io/mike-io-hash/satsgate-proxy:0.14.x`. The compose file pins the proxy version you installed.
+
+Copy an origin HMAC check with `--framework fastapi`, `express`, or `nginx`. A client that can reach the origin directly must fail closed.
+
+Try an unpaid request. The proxy answers 402. Paying that invoice sends real sats to the Lightning Address you set.
+
+Optional USDC test mode: `satsgate init --want-usdc`, then open the connect link (`https://satsgate.org/connect`). Test mode offers USDC on Base Sepolia.
+
+`init` writes `satsgate-proxy.yaml` (secrets stay in `.env`):
+
+```yaml
+core:
+  base_url: "https://api.satsgate.org"
+  api_key_env: SATSGATE_API_KEY
+upstream:
+  base_url: "http://127.0.0.1:3000"
+origin:
+  secret_env: SATSGATE_ORIGIN_SECRET
+server:
+  host: 127.0.0.1
+  port: 8080
+routes:
+  - name: first
+    methods: [GET]
+    path: "/paid/**"
+    price_sats: 10
+    access: per_request
+    scope: route
+```
+
+## How it works
+
+```
+buyer
+  |  402  (L402, and x402 when USDC is on)
+  v
+self-hosted proxy    hosted gate    your own call to the API
+  |
+  v
+seller Lightning Address, or the seller's address on Base
+```
+
+Satsgate debits the seller's prepaid service balance after the free quota: with the proxy, only after the origin returns 2xx; on the hosted gate, when the receipt is issued.
+
+Three ways to integrate:
+
+1. Self-hosted proxy in front of an HTTP API you already run.
+2. The Python SDK, if you mint challenges in your own code.
+3. The hosted gate, which sells a signed receipt for an approved site.
+
+### Hosted gate (x402)
+
+The hosted gate at `https://gate.satsgate.org` is in closed beta. Sites are approved manually. The buyer pays the seller's wallet, then repeats the request at the seller with `Satsgate-Receipt`. See [docs/api.md](docs/api.md).
+
+## Pricing
+
+The buyer pays the seller's wallet directly. The seller loads a prepaid service balance (Lightning, or USDC on Base converted at the BTC/USD rate at load time) kept in millisatoshis. Each paid unlock debits the model B service fee. The balance is not money, not transferable, not redeemable, and it does not expire.
+
+- Test mode is free.
+- The first 500 paid unlocks per UTC month are free, shared by accounts that pay out to the same address.
+- After that, 2 sats per unlock, capped at 10% of the item price.
+- USDC items have a floor of US$0.001. That floor covers the facilitator's per-transaction cost only.
+- Top up from 1,000 sats or US$1.
+- Loading the balance adds 10% from 100,000 sats, and 20% from 1,000,000 sats.
+- If the free quota and the balance are both empty, buyers get `502 paywall_unavailable`.
 
 ## USDC payments: Base network only
 
@@ -39,576 +126,91 @@ USDC payments use Base only. Ethereum mainnet, Polygon, Solana, Arbitrum, and an
 
 | Network | Network id | Circle USDC contract | Status |
 | --- | --- | --- | --- |
-| Base Sepolia (testnet) | `eip155:84532` | [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e) | Testing. A site in test mode offers only this USDC, through `https://x402.org/facilitator`. It is not a network for real buyers. |
-| Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | Live when the operator sets `SATSGATE_X402_CDP=1` and both CDP credentials. A site in live mode offers only this USDC, through the Coinbase CDP facilitator. |
+| Base Sepolia (testnet) | `eip155:84532` | [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e) | Testing. Not a network for real buyers. |
+| Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | Live mode (on by default on api.satsgate.org; a self-hosted core needs `SATSGATE_X402_CDP=1` and CDP credentials, see [self-hosting](docs/self-hosting.md)). |
 
-Merchants: `payTo` must be an address you control on Base. The USDC is paid to that address on the one network that site is in. A 402 never lists both. The EIP-712 domain name in `extra` follows that contract: `USDC` on Base Sepolia and `USD Coin` on Base. Both use version `2`. Try on Base Sepolia with your agent first, then switch the site to live. Buyers: USDC sent on another network will not be accepted. A balance on Ethereum, Polygon, Solana, or Arbitrum does not pay a Satsgate 402.
+`payTo` must be an address you control on Base. The USDC moves from the buyer to that address. Satsgate does not hold a buyer wallet and does not run its own facilitator.
 
-A new site leaves x402 off and the mode unset. Turning x402 on without a mode stores `test`. That default is deliberate: a merchant does not take real USDC until they set `x402_mode` to `live`. Live is rejected while the operator switch is off. Test mode is labeled `testing: true` on the API response. The resource description says it is Base Sepolia, not Base mainnet.
-
-Satsgate never custodies, receives, forwards, or refunds buyer funds. The USDC moves from the buyer to the merchant's `payTo`. Satsgate does not hold a buyer wallet and does not run its own facilitator.
-
-Hosted beta: https://api.satsgate.org (start in [`CUSTOMER_QUICKSTART.md`](./CUSTOMER_QUICKSTART.md)). Minimum Lightning top-up: **1,000 sats**. Minimum USDC top-up: **US$1**. Prepaid balance does not expire.
-
-No LLM in the hot path: satsgate is a lightweight, low-latency “cashier/turnstile” that sits in front of your agent.
-
-## Beta
-
-This project is currently in **beta**. See [`BETA.md`](./BETA.md).
-
-## Customer quickstart
-
-If you're integrating satsgate as a **customer** (agent operator), start here:
-
-- [`CUSTOMER_QUICKSTART.md`](./CUSTOMER_QUICKSTART.md)
-
-## Status
-
-- Hosted health: https://api.satsgate.org/health
-- Hosted manifest: https://api.satsgate.org/.well-known/satsgate.json
-
-See [`STATUS.md`](./STATUS.md).
-
-## Support
-
-- Support: [`SUPPORT.md`](./SUPPORT.md)
-- Contributing: [`CONTRIBUTING.md`](./CONTRIBUTING.md)
-- Changelog: [`CHANGELOG.md`](./CHANGELOG.md)
-- Security: [`SECURITY.md`](./SECURITY.md)
-- x402 design: [`docs/x402-design.md`](./docs/x402-design.md)
-
-## Manifest (.well-known)
-
-- `GET /.well-known/satsgate.json` → machine-readable manifest (endpoints + auth + pricing)
-- `GET /openapi.json` → OpenAPI
-
-## Wallet backends
-
-Configured via env vars:
-
-- `SATSGATE_WALLET_MODE=mock` (recommended for local testing)
-  - invoices are simulated
-  - DEV helper: `/dev/mock/pay/{payment_hash}` returns the `preimage`
-
-- `SATSGATE_WALLET_MODE=lnaddr`
-  - generates **real** invoices via your **Lightning Address** (LNURL-pay)
-  - requires: `SATSGATE_LIGHTNING_ADDRESS=user@domain`
-  - checks the BOLT11 amount, network, `description_hash` (LUD-06), expiry, and payment hash before issuing a challenge
-  - if the provider advertises LUD-21 `verify`, settlement is confirmed there too, including without the payer returning a preimage. Providers that omit it (Wallet of Satoshi) stay preimage-only
-
-`GET /health` returns `{"ok": true, "version": "0.20.3"}` and nothing else. Works with core 0.20.3 or later.
-
-## Prepaid balance (milisatoshis)
-
-The balance field is `balance_msat`. It does not expire. The 500 free unlocks reset on the first of each UTC month.
-
-Endpoints:
-
-- `POST /v1/accounts` → open an account. The `sg_` key is returned once.
-- `GET /v1/plans` → model B (quota, 2 sats, 10% cap, US$0.001 floor, bonus tiers). Not a pack list.
-- `POST /v1/topup/lightning` with `{"sats": N}` → 402 invoice for exactly N sats (minimum 1,000).
-- `POST /v1/topup/usdc` with `{"usd": "1.00"}` → 402 USDC payment for a free amount (minimum US$1), when the treasury address is set.
-- `GET /v1/topup/status/{payment_hash}` with `Authorization: L402 <macaroon>` → poll until the invoice settles, then credit `balance_msat`.
-- `GET /v1/balance` with `X-Api-Key: ...` → `balance_msat`, `balance_sats`, and the unlock estimate. An `sgr_` key can read this.
-- `GET /v1/client` with `X-Api-Key: ...` → client info (Lightning payee, and `payee_evm_address` / `payee_evm_verified` when set)
-- `POST /v1/client/payee` with `X-Api-Key: ...` → register client payee (Lightning Address)
-- `POST /v1/client/payee/evm/challenge` then `POST /v1/client/payee/evm` with the account key → prove an EVM address with an EIP-191 signature (x402 `payTo`; nothing is written on chain)
-
-Restricted keys (account key only):
-
-- `POST /v1/api-keys` with `X-Api-Key: sg_...` → create a restricted key (`sgr_...`, shown once)
-- `GET /v1/api-keys` → list restricted keys (no secrets). `include_revoked=true` includes revoked rows
-- `POST /v1/api-keys/{key_id}/revoke` → revoke a restricted key
-
-Hosted sites (closed beta):
-
-- `POST /v1/sites` → register a site. The origin HMAC secret is returned once
-- `GET /v1/sites/mine`, `GET /v1/sites/{slug}`, `PATCH /v1/sites/{slug}`, `DELETE /v1/sites/{slug}`
-- `POST /v1/sites/{slug}/rotate-secret` → replace the origin secret, shown once
-- `POST /v1/sites/{slug}/routes`, `PATCH` and `DELETE /v1/sites/{slug}/routes/{route_id}`
-- `GET /v1/sites` → public directory of approved sites that opted in. No owner, origin, or secret
-- `POST /v1/admin/sites/{slug}/approve` and `/disable` with `X-Admin-Token`
-
-Reporting:
-
-- `GET /v1/ledger` with `X-Api-Key: ...` → ledger entries in milisatoshis (`delta_msat`). Paywall debits include `api_key_id`, `api_key_label`, `api_key_prefix`, and `resource` (`api_key_id` is null when the account key spent it)
-- `GET /v1/usage/summary?since_hours=24` with `X-Api-Key: ...` → usage summary. `summary.by_api_key` groups paywall debits by the key that spent them (null `api_key_id` is the account key)
-- `GET /v1/usage/daily?days=30` with `X-Api-Key: ...` → daily series (UTC)
-- `GET /v1/usage/forecast` with `X-Api-Key: ...` → runway in milisatoshis. It does not recommend a purchase.
-
-## What an unlock costs
-
-The first 500 successful live unlocks in a UTC month are free, shared by accounts that pay out to the same Lightning Address or the same verified EVM address. After that, the merchant pays a prepaid fee: 2 sats, capped at 10% of the item, with a US$0.001 floor on USDC items only. The fee is locked when the challenge is issued. The buyer still pays the item price to the merchant.
-
-A 10-sat Lightning item is a 1-sat fee (10%). A 21-sat item is 2 sats. A USDC item uses the same cap plus the floor. One settled payment is one unlock, not one HTTP call. A cheap call can be a bundle or a time pass (`max_uses` or `access_seconds`).
-
-## Paywall (for your customers)
-
-These are the endpoints your **customers** (agent operators) integrate:
-
-- `POST /v1/paywall/challenge` with `X-Api-Key: ...` → returns `invoice + macaroon` for a resource
-  - `invoice_expires_at` is when the Lightning invoice stops being payable (often about 24 hours from the payee's provider)
-  - `claim_until` is when satsgate will still accept a first unlock: that invoice expiry plus a grace period (default 1 hour), and never later than 48 hours after the challenge was created
-  - `valid_until` matches `claim_until` on a newly minted token. It is the macaroon expiry caveat. The merchant chooses how long the buyer may use the product
-  - `cache_until` is the hint for how long to cache a successful unlock. On this response it matches `claim_until`
-  - `ttl_seconds`, when sent, is the minimum time the invoice must stay payable. It does not shorten the macaroon below the invoice
-  - `payee_saved: true` means this call stored `payee_lightning_address`. Later challenges use it. `payee_mismatch` means a different address was sent after that save. Change the saved address with `POST /v1/client/payee`
-- `POST /v1/paywall/verify` with `X-Api-Key: ...` + `Authorization: L402 ...` and **`expected_resource` (required)**
-  - `expected_resource` must exactly match the challenge `resource` (case-sensitive). A mismatch is HTTP 401 `resource mismatch`, and the body includes the issued `resource` when the macaroon belongs to this API key
-  - verifies the preimage, or the stored LUD-21 URL when the header is `L402 <macaroon>` with no preimage
-  - checks that the token was issued to **this client**, for **this** resource, amount, payee, and invoice. Any of that client's keys can unlock it, unless the key has a `resource_prefix` the resource does not start with
-  - debits the prepaid balance once per `payment_hash` after the free quota. `cost_credits`, if sent, is ignored. `charged_credits` is 1 when that debit happened and 0 otherwise. `new_balance` is milisatoshis. Later uses of the same payment do not debit again
-  - `consume: true` atomically takes one use when the challenge set `max_uses` and/or `access_seconds`. Omit it, or send false, to check without taking a use
-- `GET /v1/paywall/status/{payment_hash}` with the same API key and macaroon. **This GET debits the prepaid balance when it first settles.** Verify is the other call that can settle the same payment. `charged_credits` is 0 while pending and on every repeat. `consume=true` takes one use here too
-
-`POST /v1/paywall/verify` and `GET /v1/paywall/status/{payment_hash}` share one debit per `payment_hash`. Use either one.
-
-| State | `POST /v1/paywall/verify` | `GET /v1/paywall/status/{payment_hash}` |
-| --- | --- | --- |
-| Invoice not settled yet (LUD-21, no preimage) | HTTP 402, `error: payment_pending`, `status: pending`, `charged_credits: 0` | HTTP 200, `status: pending`, `settled: false`, `charged_credits: 0` |
-| No LUD-21 URL and no preimage | HTTP 401 `preimage_required` | HTTP 401 `preimage_required` |
-| LUD-21 disagrees after a preimage was sent | HTTP 401 `lud21_not_settled` | HTTP 401 `lud21_not_settled` |
-| Bad macaroon, wrong client, or `resource mismatch` | HTTP 401 | HTTP 401 |
-| Claim window has closed and this payment was not unlocked yet | HTTP 401 `invoice expired` | HTTP 401 `invoice expired` |
-| Not enough prepaid balance | HTTP 402 | HTTP 402 |
-| Settled (first time) | HTTP 200, `charged_credits` is 1 when the balance was debited | HTTP 200, same debit |
-| Settled again | HTTP 200, `charged_credits: 0` | HTTP 200, `charged_credits: 0` |
-| `consume=true` and the use counter is exhausted | HTTP 401 `token_used_up` | HTTP 401 `token_used_up` |
-| `consume=true` and the access window has ended | HTTP 401 `token_expired` | HTTP 401 `token_expired` |
-
-The 402-vs-200 difference for "not paid yet" stays so existing clients keep working. Both bodies say which code the other route uses.
-
-On a successful unlock, `valid_until` remains the macaroon `exp` caveat (older clients cache with it). `claim_until` is the server deadline for a first unlock. `cache_until` is how long to cache that successful result so you do not call again. A token minted before 0.4.2 can have `valid_until` in the past while `claim_until` is still open. Cache with `cache_until`.
-
-Tokens are version 2 (`token_version` on the challenge). A token minted for one client never verifies for another. v1 tokens are rejected. See the 0.4.2 notes in [`CHANGELOG.md`](./CHANGELOG.md).
-
-## What one payment buys
-
-With no `max_uses` and no `access_seconds`, a settled payment can be verified again until the challenge row is cleaned up (about a day for an Alby invoice). That is the previous behaviour, and it is still the default. Behind a proxy, that one payment would cover every call in that window.
-
-Set a policy on `POST /v1/paywall/challenge` when the proxy should decide what the buyer paid for:
-
-| Policy | Meaning |
-| --- | --- |
-| `{"max_uses": 1}` | One payment, one request. The server also ends the grant 7 days after settlement. |
-| `{"max_uses": 50}` | A bundle of 50 requests, same 7-day cap when `access_seconds` is omitted. |
-| `{"access_seconds": 3600}` | A time pass. The clock starts at settlement, not at challenge creation. |
-| both | The buyer needs a remaining use and an open window. |
-| neither | Unlimited re-verify, as before. |
-
-`access_seconds` must be from 1 to the server cap. The cap is `SATSGATE_PAYWALL_ACCESS_CAP_SECONDS` (default `604800`, seven days, and it cannot be set higher). Lower it if you want shorter passes. You do not have to set it.
-
-The proxy takes a use by sending `consume=true` on verify or status. That update is one database transaction, so two replicas cannot both take the last use. A check without `consume` still works and returns `uses_remaining` and `access_until` without changing the counter. `uses_remaining` is null when there is no `max_uses`. `access_until` is null until the payment settles, then it is the deadline. `consumed` is true when this call took a use. Each `consume=true` takes one use, including a retry after a lost response.
-
-When the grant is over, `consume=true` returns HTTP 401 `token_used_up` or `token_expired`. Create a new challenge. Credits were already charged once, on the first settled unlock, and are not charged again for these errors.
-
-Do not cache a policy grant locally for `cache_until`. That hint is for challenges with no policy. The Python SDK skips its cache when a policy is present or when `consume=true`. Call the server on each buyer request.
-
-A restricted key can set this policy on the challenges it creates, and `resource_prefix` still applies.
+## Buyer side: `satsgate-mcp`
 
 ```bash
-curl -s -X POST https://api.satsgate.org/v1/paywall/challenge \
-  -H 'Content-Type: application/json' \
-  -H 'X-Api-Key: sgr_...RESTRICTED_KEY...' \
-  -d '{"resource":"blog/post","amount_sats":21,"max_uses":1}'
+pip install satsgate-mcp
 ```
 
-## Buyer limits
-
-`POST /v1/paywall/challenge` is per merchant. Without a buyer address, one caller can use the whole account budget (`SATSGATE_RL_MAX_CHALLENGE`, default 30 per minute, and `SATSGATE_MAX_OPEN_CHALLENGES_PER_CLIENT`, default 100) and each of those calls asks the payee's LNURL provider for an invoice.
-
-A proxy that holds a restricted key can send the end buyer's address:
-
-```bash
-curl -s -X POST https://api.satsgate.org/v1/paywall/challenge \
-  -H 'Content-Type: application/json' \
-  -H 'X-Api-Key: sgr_...RESTRICTED_KEY...' \
-  -H 'X-Satsgate-Buyer-Ip: 203.0.113.10' \
-  -d '{"resource":"blog/post","amount_sats":21,"max_uses":1}'
-```
-
-The header is used only when the TCP connection comes from `SATSGATE_TRUSTED_PROXIES` (the same list as `X-Forwarded-For`). Any other caller can send the header and it is ignored, so the request behaves as before. `buyer_ip_accepted: false` on the response means the address was not used. A trusted peer that sends a value which is not one IP gets HTTP 400 `invalid_buyer_ip`.
-
-The address is not stored. Satsgate keeps an HMAC of the truncated form (IPv4 /24, IPv6 /64), keyed by the macaroon secret, on the challenge row. That digest is deleted with the row, on the same cleanup as every other challenge. `1.2.3.4` and `1.2.3.50` share a bucket. `1.2.4.1` does not.
-
-| Limit | Default | Env |
-| --- | --- | --- |
-| New challenges per buyer per `SATSGATE_RL_WINDOW_SECONDS` | 10 | `SATSGATE_BUYER_CHALLENGE_MAX` (`0` disables) |
-| Unpaid challenges still inside the offer window, per rail | 5 | `SATSGATE_BUYER_MAX_OPEN_CHALLENGES` (`0` disables) |
-| Bucket | the whole client | `SATSGATE_BUYER_LIMIT_SCOPE=client`, or `key` for a separate budget per restricted key |
-| Reuse an identical pending challenge | 30 seconds | `SATSGATE_CHALLENGE_REUSE_SECONDS` (`0` disables) |
-
-Over the rate: HTTP 429 `buyer_rate_limited`. Too many unpaid challenges still inside the offer window on one rail: HTTP 429 `too_many_open_challenges_for_buyer`. Lightning invoices and x402 offers each have that budget, so five open invoices do not block an x402 offer. An expired challenge does not count. An unpaid Lightning invoice also stops counting after `SATSGATE_X402_OFFER_SECONDS` (clamped to 60–300), even when the invoice itself is still payable. `Retry-After` is the soonest of those slot ends. The account cap is HTTP 429 `too_many_open_challenges` with the same rule. Paying a challenge frees the unpaid slot. It does not reset the rate window. The per-minute rate still counts new challenges on both rails together. The per-client rate limit still applies on top of the buyer limits.
-
-Reuse returns the same invoice and payment hash when the buyer, resource, amount, usage policy, payee, and key match an unpaid challenge from the last few seconds. `reused: true`. The macaroon is signed again for that invoice (it carries a new token id) and either copy verifies. A retry does not call the LNURL provider and does not count as a new challenge. Memo and `ttl_seconds` are not part of that match. Callers that omit the buyer header never receive someone else's invoice this way.
-
-The Docker Caddyfile deletes `X-Satsgate-Buyer-Ip` from public requests, because Caddy itself is the trusted peer. Let the header through only from the paywall proxy's address. Python SDK 0.6.0: `paywall_challenge(..., buyer_ip="203.0.113.10")`.
-
-## Restricted API keys
-
-The key from top-up (`sg_...`) is the account key. It can top up, change the payee, read the ledger, and mint other keys. A proxy or MCP server that only needs to sell access should not hold that key: if it leaked, the holder could point payouts at another Lightning Address.
-
-Create a restricted key with the account key. The full secret starts with `sgr_` and is returned once. Store only its hash. Up to 50 active restricted keys per client. Revoked keys stay in the list when you ask for them, so ledger rows can still name them.
-
-```bash
-curl -s -X POST https://api.satsgate.org/v1/api-keys \
-  -H 'Content-Type: application/json' \
-  -H 'X-Api-Key: sg_...ACCOUNT_KEY...' \
-  -d '{"label":"blog-proxy","resource_prefix":"blog/"}'
-```
-
-`resource_prefix` is optional. When it is set, challenge, status, and verify accept only resources that start with it (case-sensitive, same rule as `expected_resource`). Use a trailing slash (`blog/`) when you want a path boundary. `blog` also matches `blogger`.
-
-| Call | Account key `sg_` | Paywall key `sgr_` (default) |
-| --- | --- | --- |
-| `POST /v1/paywall/challenge` | yes | yes, and it cannot save or change the payee |
-| `POST /v1/paywall/verify` and `GET /v1/paywall/status/{payment_hash}` | yes | yes |
-| Top-up, payee, balance, client, ledger, usage, create/list/revoke keys | yes | HTTP 403 `insufficient_scope` |
-| Resource outside the key's prefix | yes | HTTP 403 `resource_not_allowed` |
-| After revoke | — | HTTP 401 `api_key_revoked` |
-
-Omit `scope` and the key stays `paywall`, which is the row above. `{"scope":"sites:read"}` or `{"scope":"sites:write"}` is for the hosted site registry below. Those keys cannot create challenges, and `resource_prefix` is rejected on them.
-
-A restricted key is still the same client. It spends that client's credits, and a challenge minted by one key can be unlocked by another key of that client when the resource is allowed. The paywall debit records which key did it.
-
-Set the payee with the account key before the proxy creates challenges. There is nothing new to configure. Restarting on 0.5.0 applies the migration.
-
-## Hosted sites (closed beta)
-
-Core stores the site. `satsgate-gate` (version 0.15.2, in [`gate/`](./gate/README.md)) charges at `https://gate.satsgate.org/<slug>/<path>` and returns a signed receipt. It does not call, relay, or serve the origin. The buyer repeats the request at `redeem_url` with the header `Satsgate-Receipt`. Works with core 0.20.3 or later. The self-hosted proxy is 0.14.1. satsgate-mcp is 0.13.0 and follows that receipt when the host is allowed. The connect page stays 0.17.0. Lightning goes to the merchant's Lightning Address. USDC goes to the merchant's verified address on the one network that site is in: Base Sepolia in test mode, Base when the site is live and the operator has enabled CDP. On this gate, the prepaid balance is debited when the receipt is issued. Test mode stores the receipt and does not debit. Self-hosted `/v1/paywall/*` still debits on settle and still forwards from the proxy. Satsgate does not hold the sats or the USDC and does not refund buyers.
-
-```bash
-curl -sI https://gate.satsgate.org/my-shop/blog/post
-# 402, Link: <https://origin.example/blog/post>; rel="satsgate-redeem"
-# JSON includes delivery=receipt, redeem_url, receipt_header, seller_host
-
-curl -sD - -o /dev/null -X POST https://gate.satsgate.org/my-shop/blog/post \
-  -H 'Authorization: L402 <macaroon>:<preimage>'
-# 200, Satsgate-Receipt: <compact JWT>, body.receipt is the same token
-```
-
-The receipt payload (the middle segment) looks like this. `kid` in the header is the first 16 hex characters of SHA-256 of the site secret. `amt` is `{"sats": 21}` or `{"usd_atomic": 10000, "network": "eip155:8453"}`.
+or `pip install "satsgate[mcp]"`.
 
 ```json
 {
-  "iss": "https://gate.satsgate.org",
-  "aud": "my-shop",
-  "sub": "/blog/post",
-  "jti": "rcp_abcdefghijklmnopqrstuv",
-  "iat": 1700000000,
-  "exp": 1700086400,
-  "res": "gate:my-shop:/blog/post",
-  "rail": "lightning",
-  "amt": {"sats": 21},
-  "uses": 1,
-  "ph": "<payment hash, or the x402 nonce without 0x>"
+  "mcpServers": {
+    "satsgate": {
+      "command": "satsgate-mcp",
+      "env": {
+        "SATSGATE_MCP_MAX_PAYMENT_SATS": "100",
+        "SATSGATE_MCP_DAILY_MAX_SATS": "500"
+      }
+    }
+  }
 }
 ```
 
-A seller checks it with the SDK. The secret stays on the seller.
+Paying also needs `SATSGATE_MCP_NWC_URI` or the USD caps in that env block. Wallet setup is in [mcp/README.md](mcp/README.md).
 
-```python
-from satsgate_sdk.receipts import SatsgateReceiptMiddleware, SqliteReceiptStore
+`satsgate-mcp --help` lists the environment variables it reads and exits. `--version` prints the package version. With no arguments it speaks MCP on stdio.
 
-app = SatsgateReceiptMiddleware(
-    app,
-    site="my-shop",
-    secret=os.environ["SATSGATE_SITE_SECRET"],
-    store=SqliteReceiptStore("/data/receipts.sqlite3"),
-)
-```
+## Packages
 
-```bash
-curl -s -X POST https://api.satsgate.org/v1/sites \
-  -H 'Content-Type: application/json' \
-  -H 'X-Api-Key: sg_...ACCOUNT_KEY...' \
-  -d '{"slug":"my-shop","display_name":"My Shop","origin_url":"https://origin.example","listed":false}'
-```
+| Package | Where |
+| --- | --- |
+| `satsgate` | [PyPI](https://pypi.org/project/satsgate/) 0.1.x |
+| `satsgate-sdk` | [PyPI](https://pypi.org/project/satsgate-sdk/) 0.10.x |
+| `satsgate-proxy` | [PyPI](https://pypi.org/project/satsgate-proxy/) 0.14.x and [GHCR](https://github.com/Mike-io-hash/satsgate/pkgs/container/satsgate-proxy) |
+| `satsgate-mcp` | [PyPI](https://pypi.org/project/satsgate-mcp/) 0.13.x |
 
-The response includes `origin_secret` once. It is the HMAC key the seller uses to verify `Satsgate-Receipt`. Store it on the origin. Core keeps ciphertext in sqlite, encrypted with `SATSGATE_SITE_SECRET_KEY` (`openssl rand -hex 32`). The public API does not return the secret again. `POST /v1/sites/{slug}/rotate-secret` replaces it and clears `origin_verified_at`. The gate does not receive the secret. A receipt the buyer already paid for is rebuilt with the current secret when they present the same payment.
+OpenAPI: [https://api.satsgate.org/openapi.json](https://api.satsgate.org/openapi.json). Works with core 0.20.3 or later.
 
-`origin_url` must be https, with no userinfo, query, or fragment. Hostnames are resolved at registration and again on `POST /v1/sites/{slug}/verify-origin`. Private, loopback, link-local, CGNAT (`100.64.0.0/10`), and metadata addresses are rejected, including when any DNS answer is in those ranges. The hosted gate does not connect to the origin.
+## Status
 
-Routes take `price_sats` or a USD price, optional `max_uses`, and optional `access_seconds`. On the hosted gate a missing `max_uses` is one use and a missing `access_seconds` is `SATSGATE_RECEIPT_SECONDS`. A self-hosted paywall challenge still stays open when both policy fields are omitted. Slugs are lowercase `[a-z0-9-]`, 3 to 40 characters, and a reserved-word list blocks names such as `admin` and `api`.
+Beta. Tested end-to-end on mainnet with small amounts.
 
-New sites start `pending`. `GET /v1/sites` lists only `approved` sites with `listed: true`. It returns `name`, `slug`, `url` (the gate URL), `description`, and `routes` (`price_currency`, `price_sats` or `price_usd_atomic`, `max_uses`, `access_seconds`). It does not return the owner, the origin, the secret, or an EVM `payTo`. `list_sites` in satsgate-mcp reads that directory by default. `SATSGATE_MCP_REGISTRY` can still point at a local file or another URL instead. Approve and disable with `X-Admin-Token` when `SATSGATE_ADMIN_TOKEN` is set. Without that env var those admin routes answer 404.
+Open to everyone: accounts, the self-hosted proxy, the SDK, and the buyer MCP.
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `SATSGATE_SITE_SECRET_KEY` | unset | 64 hex characters. Required to create or rotate a site secret. Unset does not stop the process. |
-| `SATSGATE_SITES_AUTO_APPROVE` | off | `1` approves a new site only after a successful origin check, acceptance of the current `SATSGATE_TERMS_VERSION`, and an account that is not suspended. Empty terms with this switch on refuses to boot. Leave it off. |
-| `SATSGATE_RECEIPT_SECONDS` | 86400 | Receipt lifetime when the route sets no `access_seconds`. Clamped to 60–86400 and to the paywall access cap. |
-| `SATSGATE_TERMS_VERSION` | empty | Effective date of the terms. Production is already `2026-11-13`. Do not change it here. |
-| `SATSGATE_TERMS_URL` | empty | https page linked from the API and the gate 402 when set. Deploy sets `https://satsgate.org/terms`. Empty in Compose. |
-| `SATSGATE_ABUSE_CONTACT` | empty | Bare email. Shown on `GET /` of the gate when set. |
-| `SATSGATE_GEOBLOCK_COUNTRIES` | empty | ISO codes refused on signups and quotes. Empty skips the lookup. |
-| `SATSGATE_GEOIP_DB` | `/data/geoip/dbip-country-lite.mmdb` | DB-IP Country Lite. Required only when the country list is set. |
-| `SATSGATE_OFAC_EVM_FILE` | `/data/ofac/ofac_evm.txt` | Local EVM addresses from the OFAC SDN list. Missing file fails open. |
-| `SATSGATE_SITES_MAX_PER_ACCOUNT` | 3 | Sites per account, including disabled ones. |
-| `SATSGATE_SITES_MAX_ROUTES` | 20 | Routes per site. |
-| `SATSGATE_GATE_PUBLIC_BASE` | `https://gate.satsgate.org` | https origin used in public `url` values. No path. |
-| `SATSGATE_GATE_TOKEN` | unset | Shared with the gate container. Unset means `/internal/gate/*` is 404. |
-| `SATSGATE_GATE_PEERS` | empty (Compose sets `172.28.0.4`) | When set, only that TCP peer may present the gate token. |
+The hosted gate is closed beta. Sites are approved manually.
 
-Current deploy notes are at the top of `CHANGELOG.md` (core 0.20.3 and gate 0.15.2). The 0.13.0 notes follow. Copy `satsgate.sqlite3` before you restart. Restart to serve 0.13.0. The 0.12.0 startup adds columns and rebuilds `site_routes` (see below). 0.13.0 does not add another table. Current API keys, credits, and Lightning challenges keep working if you do not set the new variables. Set `SATSGATE_SITE_SECRET_KEY` before the first site is created, and keep that value. Losing it makes stored secrets unreadable. Rotation still works and issues a new secret. Leave `SATSGATE_GATE_TOKEN` unset until the gate container is deployed. The public API host rejects `/internal/*` in Caddy either way.
+Not built yet:
 
-### x402 on Base Sepolia (0.12.0)
+- Per-tool pricing for remote MCP servers. Today a price applies to a route and method, so every tool call on `/mcp` costs the same.
+- A TypeScript SDK.
 
-The rest of this subsection describes gate 0.12.0. Current hosted-gate behaviour is the receipt model above. The self-hosted proxy is no longer Lightning only.
+## Security and trust
 
-A site can take USDC on Base Sepolia as well as Lightning. x402 is off until the merchant turns it on. The hosted gate 0.12.0 puts both enabled rails on one 402. At that version the self-hosted proxy was still Lightning only. Core builds the `PAYMENT-REQUIRED` document, checks a `PAYMENT-SIGNATURE`, and asks the public facilitator to verify and settle. The gate does not call the facilitator and does not hold a key. Satsgate never signs or broadcasts a transaction. On x402, one merchant credit is charged only after the origin returns 2xx and the facilitator settles. On the hosted gate, Lightning does the same: the credit is taken only after the origin returns 2xx. Proxy 0.12.0 and later take the Lightning credit only after the origin returns 2xx, the same as the gate. The merchant pays a Satsgate credit only for a successful delivery. Buyer sats go to the merchant's own node when the invoice is paid, before the origin runs. Any remedy for a failed origin is between the buyer and the merchant. Satsgate does not custody those sats and does not refund buyers.
+The account key (`sg_`) is shown once. Rotate it yourself. A restricted key (`sgr_`) cannot change the payout address. An alert email and a signed webhook report payout changes. The proxy debits the unlock fee only after the origin returns 2xx.
 
-The account key sets the receiving address. `POST /v1/client/payee/evm/challenge` with `{"address":"0x..."}` returns a message. The merchant signs that exact text (EIP-191, `personal_sign`) and posts `{"address","signature"}` to `POST /v1/client/payee/evm`. A wrong signature does not replace a stored address. `PATCH /v1/sites/{slug}` with `{"rail_x402": true}` is account-key only and requires that verified address. `{"rail_lightning": false, "rail_x402": false}` is rejected.
+Customer quickstart, including key rotation: [CUSTOMER_QUICKSTART.md](CUSTOMER_QUICKSTART.md#rotate-the-account-key).
 
-A route has one price. `{"path":"/blog/post","price_sats":21}` stays Lightning. `{"path":"/blog/post","price_currency":"usd","price_usd_atomic":10000}` is 0.01 USDC (6 decimals) and is the only shape this release will offer over x402. Sending both amounts is `400 price_conflict`. There is no sats-to-USD conversion yet.
+Report a security issue as described in [SECURITY.md](SECURITY.md).
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `SATSGATE_X402_FACILITATOR_URL` | `https://x402.org/facilitator` | https facilitator base. No userinfo, query, or fragment. Core calls `POST /verify` and `POST /settle`. |
-| `SATSGATE_X402_NETWORK` | `eip155:84532` | Base Sepolia only. Any other value, including Base mainnet `eip155:8453`, refuses to boot. |
-| `SATSGATE_X402_OFFER_SECONDS` | 60 | Offer lifetime. Config accepts 15 to 300. Gate routes and USDC top-up clamp it to 60–300. A Lightning invoice uses its own expiry. |
-| `SATSGATE_X402_PAYEE_CHALLENGE_SECONDS` | 1800 | Payee signature window. Values outside 300–3600 are clamped. |
-| `SATSGATE_PAYEE_CONNECT_SECONDS` | 3600 | Connect-link lifetime. Values outside 600–86400 are clamped. |
-| `SATSGATE_CONNECT_PUBLIC_BASE` | `https://satsgate.org/connect` | https URL with the page path. The token is appended as a fragment. |
+## Documentation
 
-Deployment of 0.12.0: stop the process, copy the sqlite file, then start. That migration adds six `payee_evm_*` columns on `clients` (existing rows stay empty), `rail_lightning` (default on) and `rail_x402` (default off) on `sites`, rebuilds `site_routes` so an existing row keeps its sats price, and creates `payment_offers` and `x402_authorizations`. You do not need a new secret. Leave the three x402 variables unset unless you are pointing at another testnet facilitator. The current gate ignores USD routes, so a mixed site's Lightning routes keep working and a USD path is not served until a later gate release.
+- [docs/api.md](docs/api.md)
+- [docs/self-hosting.md](docs/self-hosting.md)
+- [docs/x402-design.md](docs/x402-design.md)
+- [CUSTOMER_QUICKSTART.md](CUSTOMER_QUICKSTART.md)
+- [cli/README.md](cli/README.md)
+- [sdk/python/README.md](sdk/python/README.md)
+- [proxy/README.md](proxy/README.md)
+- [mcp/README.md](mcp/README.md)
+- [Terms](https://satsgate.org/terms)
+- [CHANGELOG.md](CHANGELOG.md)
+- [BETA.md](BETA.md)
+- [STATUS.md](STATUS.md)
+- Health: https://api.satsgate.org/health
+- Manifest: https://api.satsgate.org/.well-known/satsgate.json
 
-### Rates
+## Contributing and support
 
-`GET /v1/rates` is public. It returns the effective BTC/USD quote: `pair`, `value`, `fetched_at`, `status` (`ok` or `unavailable`), and `source` (`oracle` or `fallback`) when a quote is usable. It does not list where the number came from.
+Support: [SUPPORT.md](SUPPORT.md). Development setup: [CONTRIBUTING.md](CONTRIBUTING.md). Source: [https://github.com/Mike-io-hash/satsgate](https://github.com/Mike-io-hash/satsgate).
 
-The quote is an on-chain BTC/USD price, with an internal backup when that price is missing or unusable. Satsgate does not convert, hold, or forward funds. The merchant is paid whatever the buyer sends on the rail they use.
+## License
 
-When both rails are on and the quote is fresh, the challenge locks the other currency on the offer. Derived sats round up to the next sat. Derived USDC rounds up to the next 0.000001 USDC, and a result below $0.001 is left off. A missing quote offers only the main currency. `GET /v1/sites/mine` shows that live quote as `derived`. The public directory does not, because it moves.
+Apache-2.0. See [LICENSE](LICENSE).
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `SATSGATE_RATES_ENABLED` | on | `0` skips the background refresh. |
-| `SATSGATE_RATES_REFRESH_SECONDS` | 60 | How often the quote is refreshed (15 to 600). |
-| `SATSGATE_RATES_STALE_SECONDS` | 180 | After this, the internal backup is not used to price a challenge. The primary read stays fresh for 3,600 seconds. |
-| `SATSGATE_RATES_SOURCE_TIMEOUT_SECONDS` | 2 | Timeout for one source (0.5 to 5). |
-| `SATSGATE_RATES_OUTLIER_BPS` | 200 | Drop a backup sample this far from the others. 200 is 2%. |
-| `SATSGATE_BASE_RPC_URL` | `https://mainnet.base.org` | Primary Base RPC for the on-chain quote and for smart-wallet checks. |
-| `SATSGATE_BASE_RPC_FALLBACK_URL` | empty | Optional second Base RPC. Same https rules. Used only when the primary does not answer. |
-| `SATSGATE_ACCOUNTING_RATE_CACHE_S` | 60 | How long a quote is reused. |
-| `SATSGATE_ACCOUNTING_RATE_STALE_S` | 3600 | How old the primary read may be. |
-| `SATSGATE_ACCOUNTING_RATE_TIMEOUT_S` | 3 | Timeout for one primary read. |
-
-No new table. Copy `satsgate.sqlite3` before restarting onto 0.13.0 anyway. Lightning is unchanged when the quote is not used.
-
-### Hosted gate x402 (gate 0.12.0)
-
-The gate offers Lightning, x402, or both, matching the site. A Lightning-only 402 is the 0.11.0 body and `WWW-Authenticate`, and it has no `PAYMENT-REQUIRED`. An x402 offer uses scheme `exact` on `eip155:84532`, the Base Sepolia USDC contract, and `payTo` equal to the verified address. The amount is the route's USD price, or the sats price converted with the effective quote and locked on that challenge. The gate does not cache the converted amount.
-
-`PAYMENT-SIGNATURE` is checked by core (verify, then the origin, then settle). Both payment headers on one request is `400 one_rail_only`. The origin does not see `PAYMENT-SIGNATURE`. A USDC payment is signed with `X-Satsgate-Paid-Usd-Atomic`. The payment-hash header is the EIP-3009 nonce, because the transaction id does not exist until settle, and settle runs after the origin.
-
-Enable it with the account key, not a restricted `sgr_` key. Set `payTo` to an address you control on Base. Gate 0.12.0 offered Base Sepolia. Current mode choice is in [USDC payments: Base network only](#usdc-payments-base-network-only).
-
-1. `POST /v1/client/payee/evm/challenge` with `{"address":"0x..."}`. The response is an EIP-191 message. Nothing is written on chain.
-2. Sign that exact text with `personal_sign` and `POST /v1/client/payee/evm` with `{"address","signature"}`. A bad signature does not replace a stored address.
-
-Or create a one-time connect link with `POST /v1/client/payee/evm/connect` and open it in a browser.
-
-3. `PATCH /v1/sites/{slug}` with `{"rail_x402": true}`. Lightning can stay true. Both false is rejected.
-4. Price the route in sats or in USD (`price_usd_atomic`, 6 decimals, 1 to 100000000). One main price per route.
-
-Core 0.14.2 and proxy 0.12.0 add no migration and no new environment variable. Rebuild the proxy image and the core image. The gate stays 0.13.0. An old proxy that still omits `charge=false` debits a Lightning credit before the origin. `GET /healthz` on the gate reports `0.13.0`. Keep the facilitator at `https://x402.org/facilitator`. Route payments still go to the merchant's verified address. An x402 offer, and the cap slot of an unpaid Lightning quote, last `SATSGATE_X402_OFFER_SECONDS` clamped to 60–300 seconds. The Lightning invoice itself is not shortened. The treasury variable below is only for Satsgate USDC top-ups. The private Sepolia check, including the merchant test address, is in [`gate/README.md`](./gate/README.md).
-
-Core 0.15.1 fixes the EIP-712 domain name. Base Sepolia offers stay `extra.name` `USDC`. Base mainnet offers and mainnet USDC top-ups use `USD Coin`, which is what that USDC contract returns from `name()`. `GET /health` reports `0.15.1`. No migration. Rebuild the core image. The gate stays 0.14.0, the proxy stays 0.13.0, and satsgate-mcp stays 0.11.0.
-
-Core 0.15.0 adds Base mainnet USDC behind `SATSGATE_X402_CDP` (default `0`). The hosted gate is 0.14.0. The proxy is 0.13.0. satsgate-mcp stays 0.11.0. Startup adds `sites.x402_mode` (`''`, `test`, or `live`). Copy `satsgate.sqlite3` before you restart. There is no schema rollback: turning the switch off does not drop the column.
-
-To enable mainnet, on the core service only (the gate container must not receive these):
-
-```bash
-SATSGATE_X402_CDP=1
-SATSGATE_X402_CDP_KEY_ID=organizations/.../apiKeys/...
-SATSGATE_X402_CDP_KEY_SECRET=...   # CDP Secret API key, the base64 value shown once
-```
-
-Leave `SATSGATE_X402_NETWORK` at `eip155:84532`. That variable is the public facilitator network. Setting it to `eip155:8453` still refuses to boot. Restart core. A missing or unusable credential logs `USDC mainnet disabled` and does not print the value. Sepolia and Lightning still start.
-
-Rollback: set `SATSGATE_X402_CDP=0` and restart core. Live sites stop offering USDC. If Lightning is also on, the 402 is Lightning only. If x402 is the only rail, the challenge is `400 x402_mainnet_disabled`. Test mode and Lightning keep working. USDC top-up follows the mode that is still enabled. The column stays.
-
-A site chooses one mode with the account key (not an `sgr_` key):
-
-```bash
-curl -s -X PATCH https://api.satsgate.org/v1/sites/SLUG \
-  -H 'Content-Type: application/json' \
-  -H 'X-Api-Key: sg_...' \
-  -d '{"rail_x402":true}'
-```
-
-That stores `test` when the mode was unset. Then, after the switch is on:
-
-```bash
-curl -s -X PATCH https://api.satsgate.org/v1/sites/SLUG \
-  -H 'Content-Type: application/json' \
-  -H 'X-Api-Key: sg_...' \
-  -d '{"x402_mode":"live"}'
-```
-
-Try on Base Sepolia with your agent first, then switch the site to live. The self-hosted proxy sets `x402_mode: test` or `x402_mode: live` on the route. `x402: true` without a mode means test.
-
-USDC top-ups (`POST /v1/topup/usdc`) are mainnet-only while the switch is on, and Sepolia-only while it is off. Prepaid balance is not sold for faucet USDC once real USDC is on. A merchant route can stay in test mode while top-ups are on mainnet.
-
-Watch the facilitator without printing a secret. The anonymous `/v1` limit is 60 requests a minute per IP, and the handler caches the CDP check for 60 seconds, so call it at most once a minute:
-
-```bash
-curl -fsS -H "X-Admin-Token: $SATSGATE_ADMIN_TOKEN" https://api.satsgate.org/v1/admin/x402
-```
-
-Alert only when `mainnet_enabled` is true and `cdp.supported_ok` is not true. Port 8000 is not published. Caddy fronts 80 and 443. The body is not on `/health` and not in the manifest.
-
-Core 0.14.3 stores `api_key_id` on a new x402 ledger debit when settle was called with a restricted `sgr_` key. The hosted gate still uses `GATE_TOKEN`, so those debits stay null. Existing rows stay null. That release added no column. Proxy 0.12.1 logs `key fp` and a 12-character SHA-256 fingerprint of the API key at startup. It does not log a prefix of the key. satsgate-mcp 0.11.0 reads an x402 402 and does not sign it.
-
-The gate resource string is `gate:<slug>:<path>` and must be at most 200 characters, which is the paywall resource limit. A longer route is stored and is not served.
-
-### USDC top-up
-
-`POST /v1/topup/lightning` sells any amount of sats. `POST /v1/topup/usdc` sells a free USDC amount, paid to Satsgate, minimum US$1. The account key (`sg_...`) is required. A restricted `sgr_` key is rejected. The prepaid balance is closed-loop: it is not transferable and it is not redeemable for sats or USDC.
-
-The credited milisatoshis are the USDC amount converted at the accounting rate and locked on the offer, then the per-top-up bonus. A missing or stale accounting rate is `503 rate_unavailable` on this route only. Lightning top-up still works.
-
-No `PAYMENT-SIGNATURE` yet: `402` and the header `PAYMENT-REQUIRED` (x402 v2, scheme `exact`, network `eip155:84532`, Base Sepolia USDC, `payTo` the treasury). The body repeats `x402.amount`, `x402.payTo`, and `x402.network`. The header is canonical. `maxTimeoutSeconds` is `SATSGATE_X402_OFFER_SECONDS` clamped into 60–300 seconds (the default is 60).
-
-With `PAYMENT-SIGNATURE`: core checks payTo, amount, asset, and network against the stored offer, then `POST /verify` and `POST /settle` on the facilitator. Credits are added only after settle returns a transaction. The response includes `PAYMENT-RESPONSE` with `success`, `transaction`, `network`, and `payer`. `tx` repeats `transaction`. One EIP-3009 nonce grants the top-up once. A replay is `409 x402_replay`. A second request still in flight is `409 x402_in_progress`. The ledger row has reason `topup_x402`, the tx hash in `ref`, plus `network` and `amount_usd_atomic`.
-
-If `SATSGATE_TREASURY_EVM_ADDRESS` is unset, empty, or not a 20-byte address, this route answers `400 x402_topup_disabled` and Lightning top-up is unchanged. The process still boots. The SDK method is `topup_usdc`. `scripts/x402_topup_example.py` is retired.
-
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `SATSGATE_TREASURY_EVM_ADDRESS` | unset | Satsgate's own Base payTo for USDC top-ups. Unset or invalid turns this rail off. Not used for merchant route payments. |
-
-Startup adds columns. It does not add a table. Copy `satsgate.sqlite3` before restart if you want a rollback point. Restart the core image. The gate does not change. Leave the facilitator at `https://x402.org/facilitator`. Do not run a Satsgate facilitator.
-
-## No-code proxy
-
-`satsgate-proxy` (version 0.14.1, in [`proxy/`](./proxy/README.md)) sits in front of an HTTP API you already run. The default `mode: paywall` is unchanged: buyers talk to the proxy, the proxy calls this core with a restricted `sgr_` key, and the origin checks an HMAC. `mode: receipt` does not call core and does not need an `sgr_` key. The buyer pays the hosted gate, then calls the proxy with `Satsgate-Receipt`. The proxy checks the receipt and forwards a 2xx to the origin with the same HMAC.
-
-An unpaid request is **402** with `WWW-Authenticate: L402 macaroon="...", invoice="..."` (macaroon before invoice, standard base64), which lnget and Alby `fetch402` already parse. The JSON body carries `amount_sats`, `payment_hash`, `invoice_expires_at`, and a hint for wallets that do not return a preimage. A route with `x402: true` adds `PAYMENT-REQUIRED` on that same 402. `Authorization: L402 <macaroon>:<preimage>` confirms the payment. `Authorization: L402 <macaroon>` polls status. The credit is taken after the origin returns 2xx. Pending stays on that invoice (`402 payment_pending`, `Retry-After`). A used, expired, or wrong-route token is a fresh 402, not 401.
-
-The self-hosted proxy is 0.14.1. `GET /healthz` on the proxy reports `0.14.1`. Core health is `0.20.3`. In `mode: paywall` the proxy confirms payment, calls the origin, and debits only after a 2xx, on Lightning and on x402. A failed origin reports no debit. The same `PAYMENT-SIGNATURE` can be retried after that failure. Set `x402: true` on a route, and `server.public_base` to the URL buyers pay, to offer USDC as well. `x402: true` without `x402_mode` is test (Base Sepolia). `x402_mode: live` is Base, and only while the operator switch is on. Try on Base Sepolia with your agent first, then switch the site to live. Startup logs `key fp` and a SHA-256 fingerprint of the restricted key, not any part of the key. An x402 settle through this proxy records that key's id on the ledger debit. The proxy does not sell prepaid balance. Top up on the core, with Lightning or with `POST /v1/topup/usdc`.
-
-Config is YAML: upstream base URL, routes (`per_request`, `uses:N`, `pass:<seconds>`, scope `route` or `site`), free paths, body limits, and an origin secret from the environment. `pricing.sats_per_credit` in an old file is ignored. Cheap calls should be bundles or passes.
-
-The proxy sends `X-Satsgate-Buyer-Ip` when it has a real buyer address. Hosted `https://api.satsgate.org` uses that header only if the proxy's egress IP is in `SATSGATE_TRUSTED_PROXIES` and the edge does not strip it. Otherwise per-buyer limits do not apply and the per-client caps still do.
-
-The proxy signs `X-Satsgate-Signature: t=<unix>, v1=<hmac-sha256>` over `{unix}|{METHOD}|{raw path and query}|{payment_hash}` on the request to the origin. Snippets for FastAPI, Express, nginx, and a Caddy network gate are in `proxy/snippets/`. The credit and the use are taken only after that response is 2xx. For USDC, settle runs after that 2xx. If the origin fails, nothing is taken, and the buyer retries the same macaroon or signature. Lightning sats already reached the merchant when the invoice was paid. Any remedy for that failed origin is between the buyer and the merchant. Satsgate does not refund buyers.
-
-```bash
-export SATSGATE_API_KEY='sgr_...'
-export SATSGATE_ORIGIN_SECRET="$(openssl rand -hex 32)"
-docker compose -f proxy/docker-compose.yml up --build
-```
-
-Full steps, the signature, and a mainnet checklist are in [`proxy/README.md`](./proxy/README.md).
-
-## Buyer MCP
-
-`satsgate-mcp` (version 0.13.0, in [`mcp/`](https://github.com/Mike-io-hash/satsgate/blob/main/mcp/README.md)) is a separate process an agent runs over stdio. Works with core 0.20.3 or later. It is a client. It does not change the core.
-
-`discover` and `quote` request a URL and read the 402. Lightning still returns the price in sats, `max_uses`, `access_seconds`, and expiry. An x402 offer adds the `PAYMENT-REQUIRED` accepts: network, asset, atomic amount, human USDC, `payTo`, resource, scheme, and expiry. The amount is whatever the 402 locked. This process does not recompute it. `pay_and_fetch` with mode `human` returns the invoice and a QR when Lightning is offered, including when x402 is on the same 402. With no Lightning wallet connected, a person can pay that invoice from a phone and the agent continues through `check_payment`. Mode `nwc` pays Lightning from `SATSGATE_MCP_NWC_URI` in the environment, never from a tool argument, and only inside `SATSGATE_MCP_MAX_PAYMENT_SATS` and `SATSGATE_MCP_DAILY_MAX_SATS`. USDC uses a separate pair, `SATSGATE_MCP_MAX_PAYMENT_USD` and `SATSGATE_MCP_DAILY_MAX_USD`. Both must be set before a `PAYMENT-SIGNATURE` is forwarded. This process holds no buyer key and does not sign. The agent retries `pay_and_fetch` with `payment_signature` from an external wallet. A token with uses or time left is reused. `token_used_up` comes back as a new quote unless `SATSGATE_MCP_AUTO_PAY` is on and the new invoice is inside the budget.
-
-An optional `sgr_` key enables read-only `challenge_status` and `credits_balance`. The key cannot top up or change the payee. Nothing in the x402 path asks for an account key. `list_sites` reads `GET /v1/sites` on the core URL: approved, listed sites, each with a gate URL and route prices. A USD-only route is included, with `price_currency` and `price_usd_atomic`. Set `SATSGATE_MCP_REGISTRY` to a JSON file or another URL only when that directory should be replaced.
-
-Core health is `0.20.3`. `GET /health` reports `0.20.3`. The MCP package is 0.13.0. Works with core 0.20.3 or later and gate 0.15.2 or later. It still cannot top up. Buying prepaid balance with USDC is `POST /v1/topup/usdc` on the core with the account key, not an MCP tool. While `SATSGATE_X402_CDP` is on, that top-up is Base mainnet USDC only. While it is off, it stays on Base Sepolia.
-
-```bash
-pip install -r mcp/requirements.txt
-PYTHONPATH=mcp/src python -m satsgate_mcp.manual https://your-proxy.example/blog/post
-```
-
-That command shows a QR and polls. It does not set a wallet. NWC and the mainnet lnget / fetch402 steps are in [`mcp/README.md`](./mcp/README.md).
-
-## Pay from any wallet, then poll
-
-When the payee's LNURL provider returns a LUD-21 `verify` URL (Alby does):
-
-1. `POST /v1/topup/lightning` with `{"sats": 1000}` and read `invoice`, `macaroon`, and `payment_hash` from the 402.
-2. Pay that invoice in any Lightning wallet. You do not need the preimage.
-3. Poll `GET /v1/topup/status/{payment_hash}` with `Authorization: L402 <macaroon>` until `settled` is true.
-4. Save `api_key` from that response. A later poll succeeds but does not show the key again.
-
-The Python SDK helpers are `SatsgateClient.poll_topup` and `SatsgateClient.poll_paywall`. If the provider did not send `verify`, the status call returns `preimage_required` and the `L402 <macaroon>:<preimage>` flow is still the way to finish.
-
-The top-up macaroon stays valid until the invoice's `expires_at`, plus a grace period (default 1 hour) so a buyer can finish polling after paying near the end of the invoice, and never longer than 48 hours. A buyer can pay at any point while the invoice itself is still valid. `SATSGATE_TOKEN_TTL_SECONDS` does not apply to top-ups. A top-up token minted before 0.4.1, whose caveat expires after 10 minutes, is still accepted inside that same window when the pending row is unpaid, as long as the caller presents that macaroon and a preimage or a settled LUD-21 check. Past the window the response is `invoice expired` and nothing is credited.
-
-Paywall challenges use the same shape of window (`SATSGATE_PAYWALL_CLAIM_GRACE_SECONDS`, `SATSGATE_PAYWALL_TOKEN_TTL_CAP_SECONDS`, same defaults). A buyer can pay the paywall invoice at any point while that invoice is payable, then the merchant can unlock until `claim_until`. A paywall token minted before 0.4.2, whose caveat expires after 10 minutes, is still accepted inside that window when the caller presents the macaroon and a preimage or a settled LUD-21 check. `SATSGATE_TOKEN_TTL_SECONDS` is only the minimum invoice lifetime (and the dev-ticket macaroon TTL). Dev-ticket macaroons still use that TTL.
-
-## L402 client compatibility
-
-Challenges use `WWW-Authenticate: L402 macaroon="<standard base64>", invoice="<bolt11>"`. `Authorization` accepts `L402` and the legacy `LSAT` prefix, in the form `<macaroon>:<64-hex-preimage>`.
-
-| Client | What it does with the challenge | Status |
-| --- | --- | --- |
-| lnget (Lightning Labs) | Parses the header, unmarshals a real macaroon, reads the payment hash from the L402 v0 identifier, pays, retries with `L402 <macaroon>:<preimage>` | Works. The macaroon is libmacaroons V2, standard base64 (Aperture's credential grammar is `[A-Za-z0-9+/=]+`, not url-safe). |
-| Alby `fetch402` (`@getalby/lightning-tools`) | Treats the macaroon as an opaque string, pays, retries with `L402 <token>:<preimage>` | Works. The macaroon is re-rolled if its base64 would contain the substrings `L402` or `LSAT`, which that parser strips from the whole header. |
-| Aperture as a verifying proxy | Expects its own service and capability caveats | Does not accept satsgate tokens. Our caveats are the v2 bindings (`v`, `kid`, `purpose`, `cid`, `ph`, `res`, `amt`, `payee_h`, `inv_h`, `exp`), not Aperture's. |
-
-Tokens issued before 0.4.0 were signed JSON in url-safe base64. This server still verifies those. lnget cannot unmarshal them. A top-up or paywall token whose `exp` has passed still completes while its stored invoice window is open. Dev tickets do not.
-
-## Scripts
-
-- `python client_mock_demo.py` (mock L402 demo)
-- `node client_nwc_demo.mjs` (pays `/v1/tickets` using NWC)
-- `POST /v1/topup/lightning` with `{"sats": 1000}` (top up prepaid balance via Lightning)
-- `node client_paywall_credit_demo.mjs <resource> <amount_sats>` (challenge + pay + verify; spends 1 payment verification / credit)
-
-## SDK (Python)
-
-- `sdk/python` (package `satsgate-sdk`)
-  - install locally: `pip install -e sdk/python`
-  - FastAPI examples:
-    - Minimal: `sdk/python/examples/fastapi_demo/main.py`
-    - Reference integration: `sdk/python/examples/fastapi_reference/`
-
-## Quickstart (local)
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# .env.example is production-shaped and will refuse to boot until you set a
-# real secret. For local mock mode:
-export SATSGATE_ENV=development
-export SATSGATE_DEV_MODE=1
-export SATSGATE_WALLET_MODE=mock
-export SATSGATE_MACAROON_SECRET=local-dev-only
-
-uvicorn app.main:app --reload --port 8000
-```
-
-`/dev/mock/pay/{payment_hash}` is available only in that local configuration.
-
-## Docker (recommended for deployment)
-
-This repo includes a minimal Docker setup with **Caddy** (TLS) and a persistent SQLite volume.
-
-1) Copy env file:
-
-```bash
-cp .env.example .env
-```
-
-2) Edit `.env` and set at least:
-
-- `SATSGATE_HOSTNAME=api.yourdomain.com`
-- `SATSGATE_ENV=production`
-- `SATSGATE_MACAROON_SECRET=$(openssl rand -hex 32)`
-- `SATSGATE_WALLET_MODE=lnaddr`
-- `SATSGATE_LIGHTNING_ADDRESS=user@domain`
-- `SATSGATE_DEV_MODE=0`
-
-The stack pins Caddy at `172.28.0.2` and the app at `172.28.0.3`, and only trusts forwarded headers from Caddy. Do not set `SATSGATE_TRUSTED_PROXIES=*` or uvicorn `--forwarded-allow-ips *`.
-
-3) Start:
-
-```bash
-docker compose up -d --build
-```
-
-Notes:
-- Your DNS must point `SATSGATE_HOSTNAME` to your server IP.
-- Ports **80** and **443** must be open for Caddy/Let’s Encrypt.

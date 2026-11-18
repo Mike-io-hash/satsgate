@@ -1,0 +1,73 @@
+{
+  "denylist": [
+    "cobrale",
+    "cobros",
+    "cobro",
+    "plata",
+    "billetera",
+    "gratis",
+    "comision",
+    "publicacion",
+    "bitacora",
+    "terminos",
+    "tasa",
+    "segun",
+    "tambien",
+    "para",
+    "pero",
+    "del",
+    "los",
+    "las",
+    "una",
+    "por",
+    "mes",
+    "cuenta",
+    "saldo",
+    "vendedor",
+    "comprador",
+    "encargo",
+    "ahora",
+    "hoy",
+    "sin"
+  ],
+  "path_fragments": ["publicacion", "terminos", "tasa"],
+  "banned_phrases": ["anonymous", "commission", "battle tested", "battle-tested", "wavelength"],
+  "address_digests": [
+    "ece85aad5d3c4ac4f0ca8e1e402967f8e0e3909eb2f81e67a6780cb029be7e00",
+    "c177a342818e8b4d54a3e7e8f36856257139ae74e52dcea0ef5904a0d83991d2"
+  ],
+  "mutation_samples": {
+    "accent": "caf\u00e9",
+    "token": "cobrale",
+    "internal_name": "Ia",
+    "review_id": "P-C11",
+    "banned_word": "anonymous"
+  },
+  "allowlist": [
+    {
+      "file": "web/connect/test/page.test.js",
+      "line": 130,
+      "reason": "Locale identifier on a date-format assertion."
+    },
+    {
+      "file": "web/connect/test/page.test.js",
+      "line": 94,
+      "reason": "Negative check that connect copy does not use a retired word."
+    },
+    {
+      "file": "web/connect/test/page.test.js",
+      "line": 218,
+      "reason": "Negative check that connect copy does not use a retired word."
+    },
+    {
+      "file": "tests/test_pricing_topup.py",
+      "line": 121,
+      "reason": "Negative check that the README does not use a retired word."
+    },
+    {
+      "file": "tests/test_release_d_docs.py",
+      "line": 118,
+      "reason": "Negative check that published package text does not use retired words."
+    }
+  ]
+}

@@ -100,7 +100,7 @@ def test_t_d_2_1_check_tag(tmp_path: Path) -> None:
     pyproject = broken / "cli/pyproject.toml"
     pyproject.write_text(
         pyproject.read_text(encoding="utf-8").replace(
-            "satsgate-sdk>=0.10.0,<0.11",
+            "satsgate-sdk>=0.10.1,<0.11",
             "satsgate-sdk>=9.0.0,<9.1",
         ),
         encoding="utf-8",

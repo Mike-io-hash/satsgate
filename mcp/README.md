@@ -1,8 +1,10 @@
 # satsgate-mcp
 
+Charge AI agents in Lightning and USDC on the same 402. Payments go straight to your wallet. 500 free unlocks a month.
+
 A buyer-side MCP server. An agent (Claude Desktop, Cursor, or any stdio MCP client) can see the price of a Satsgate-paywalled URL, pay it, and read the response.
 
-This package is version **0.13.0**. It talks to whatever URL returned the 402. Works with core 0.20.3 or later. The self-hosted proxy is **0.14.1**. Works with gate 0.15.2 or later. On a gate host (`SATSGATE_MCP_GATE_HOSTS`, default `gate.satsgate.org`) `pay_and_fetch` pays the gate, keeps the receipt, and repeats the request at `redeem_url` when that host is on the allowlist. The receipt is not logged. A stored receipt is returned by `challenge_status`. The body sent to a gate host is not forwarded. A 402 may offer Lightning, x402 (USDC on Base), or both. One 402 lists one USDC network. `list_sites` includes a public route priced only in USD, with `price_currency` and `price_usd_atomic`. This process cannot buy Satsgate credits, and it does not hold a buyer private key. An account tops up on the core with `POST /v1/topup/lightning` or `POST /v1/topup/usdc`. While `SATSGATE_X402_CDP` is on, USDC top-up is Base mainnet only. While it is off, it is Base Sepolia. The USDC path is not an MCP tool.
+This package is version **0.13.1**. It talks to whatever URL returned the 402. Works with core 0.20.3 or later. The self-hosted proxy is **0.14.2**. Works with gate 0.15.2 or later. On a gate host (`SATSGATE_MCP_GATE_HOSTS`, default `gate.satsgate.org`) `pay_and_fetch` pays the gate, keeps the receipt, and repeats the request at `redeem_url` when that host is on the allowlist. The receipt is not logged. A stored receipt is returned by `challenge_status`. The body sent to a gate host is not forwarded. A 402 may offer Lightning, x402 (USDC on Base), or both. One 402 lists one USDC network. `list_sites` includes a public route priced only in USD, with `price_currency` and `price_usd_atomic`. This process cannot load a seller's prepaid service balance, and it does not hold a buyer private key. An account tops up on the core with `POST /v1/topup/lightning` or `POST /v1/topup/usdc`. On api.satsgate.org a USDC top-up is Base mainnet USDC (a self-hosted core needs `SATSGATE_X402_CDP=1`; see [self-hosting](https://github.com/Mike-io-hash/satsgate/blob/main/docs/self-hosting.md)). The USDC path is not an MCP tool.
 
 ## Install
 
@@ -10,9 +12,9 @@ This package is version **0.13.0**. It talks to whatever URL returned the 402. W
 pip install satsgate-mcp
 ```
 
-The console script is `satsgate-mcp`.
+or `pip install "satsgate[mcp]"`.
 
-From a checkout: `pip install -e mcp`.
+The console script is `satsgate-mcp`. `satsgate-mcp --help` prints the environment variables it reads and exits. `satsgate-mcp --version` prints `satsgate-mcp` and the version. With no arguments it speaks MCP on stdio.
 
 ## USDC payments: Base network only
 
@@ -21,7 +23,7 @@ USDC payments use Base only. Ethereum mainnet, Polygon, Solana, Arbitrum, and an
 | Network | Network id | Circle USDC contract | Status |
 | --- | --- | --- | --- |
 | Base Sepolia (testnet) | `eip155:84532` | [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e) | Testing. A site in test mode offers only this USDC. It is not a network for real buyers. |
-| Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | Live when the operator sets `SATSGATE_X402_CDP=1` and both CDP credentials. A site in live mode offers only this USDC. |
+| Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | Live mode (on by default on api.satsgate.org; a self-hosted core needs `SATSGATE_X402_CDP=1` and CDP credentials, [self-hosting](https://github.com/Mike-io-hash/satsgate/blob/main/docs/self-hosting.md)). A site in live mode offers only this USDC. |
 
 Merchants: `payTo` must be an address you control on Base. The USDC is paid to that address on the one network that site is in. Try on Base Sepolia with your agent first, then switch the site to live. Buyers: USDC sent on another network will not be accepted. A balance on Ethereum, Polygon, Solana, or Arbitrum does not pay a Satsgate 402.
 
@@ -41,7 +43,7 @@ export SATSGATE_MCP_DAILY_MAX_SATS=500
 satsgate-mcp
 ```
 
-`satsgate-mcp` speaks MCP over stdio. Logs go to stderr. From a checkout: `pip install -e mcp`.
+`satsgate-mcp` speaks MCP over stdio. Logs go to stderr.
 
 Claude Desktop or Cursor config:
 
@@ -104,7 +106,7 @@ Supported accepts are Circle USDC on Base Sepolia (`eip155:84532`, the network t
 
 This server holds no buyer private key. It does not sign, submit, custody, forward, or refund USDC, and it does not run a facilitator. Satsgate does not either. When `payable` is true, the `payment` object is what an external wallet has to pay. Call `pay_and_fetch` again with `payment_signature` set to that `PAYMENT-SIGNATURE`: one line, no spaces, at most 8192 bytes. Do not send an L402 `Authorization` on the same request. An empty `payment_signature` stays on the Lightning path.
 
-The gate or proxy runs verify, then the origin, then settle. A 2xx returns the body and, when the server sent one, `payment_response` with `success`, `transaction`, `tx`, `network`, and `payer`. The raw header is not returned. If the origin fails, nothing is settled and no merchant credit is taken. The tool says so, sets `retry_same_payment_signature` true, and the same header can be sent again while the offer is valid. `bad_signature` and `expired` need a new signature. `x402_replay` was already settled, so sending it again does not fetch the resource. `x402_rejected` is either a failed verify (new signature) or a failed settle of a header you already sent (retry that same header). Local USD spend is recorded only after a 2xx, and the signature is not written to sqlite and is not logged.
+The gate or proxy runs verify, then the origin, then settle. A 2xx returns the body and, when the server sent one, `payment_response` with `success`, `transaction`, `tx`, `network`, and `payer`. The raw header is not returned. If the origin fails, nothing is settled and the seller's prepaid service balance is not debited. The tool says so, sets `retry_same_payment_signature` true, and the same header can be sent again while the offer is valid. `bad_signature` and `expired` need a new signature. `x402_replay` was already settled, so sending it again does not fetch the resource. `x402_rejected` is either a failed verify (new signature) or a failed settle of a header you already sent (retry that same header). Local USD spend is recorded only after a 2xx, and the signature is not written to sqlite and is not logged.
 
 Both `SATSGATE_MCP_MAX_PAYMENT_USD` and `SATSGATE_MCP_DAILY_MAX_USD` must be set or the tool will not proceed. `0` refuses every positive amount. Unset or over the cap, `discover` still returns the parsed requirements with `payable: false`. `pay_and_fetch` then refuses and does not send the header. The sats caps do not apply to USDC. An over-cap USDC amount does not block paying the Lightning invoice on the same 402.
 
@@ -183,11 +185,9 @@ satsgate-mcp-pay --nwc 'https://YOUR-PROXY/blog/post'
 
 ### lnget and fetch402 against the proxy
 
-These clients pay the 402 header themselves. They are not the MCP server. CI checks the header shape and does not pay. On your machine:
+These clients pay the 402 header themselves. They are not the MCP server.
 
-The header-shape script lives in the repo. The contributor section below runs it.
-
-That request does not pay. It prints whether the lnget and fetch402 parsers accept the header. Then, to spend sats:
+A header-shape check that does not pay is in the contributors' section below. To spend sats:
 
 ```bash
 lnget 'https://YOUR-PROXY/blog/post'

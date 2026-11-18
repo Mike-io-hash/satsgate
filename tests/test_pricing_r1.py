@@ -321,9 +321,9 @@ def test_t_5_10a_estimate_and_buyer_body(tmp_path, monkeypatch):
         created = http.post("/v1/accounts", json={})
         key = created.json()["api_key"]
         with sqlite3.connect(module.config.DB_PATH) as conn:
-            conn.execute("UPDATE clients SET balance_msat = 1152000")
+            conn.execute("UPDATE clients SET balance_msat = 1000000")
         body = http.get("/v1/balance", headers={"X-Api-Key": key}).json()
-        assert body["estimated_unlocks_remaining"] == 1_076
+        assert body["estimated_unlocks_remaining"] == 1_000
         minted = http.post(
             "/v1/api-keys",
             headers={"X-Api-Key": key},
@@ -331,8 +331,8 @@ def test_t_5_10a_estimate_and_buyer_body(tmp_path, monkeypatch):
         )
         restricted = minted.json()["api_key"]
         same = http.get("/v1/balance", headers={"X-Api-Key": restricted}).json()
-        assert same["estimated_unlocks_remaining"] == 1_076
-        assert same["paid_unlocks_estimate"] == 576
+        assert same["estimated_unlocks_remaining"] == 1_000
+        assert same["paid_unlocks_estimate"] == 500
         denied = http.post("/v1/client/api-key/rotate", headers={"X-Api-Key": restricted})
         assert denied.status_code == 403
         refund = http.post(

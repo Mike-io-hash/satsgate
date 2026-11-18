@@ -47,7 +47,7 @@ SPECS: tuple[dict[str, str], ...] = (
         "package_dir": "cli",
         "dist_name": "satsgate",
         "module": "satsgate",
-        "tests": "tests/test_init_*.py tests/test_publicacion_c.py",
+        "tests": "tests/test_init_*.py tests/test_release_c.py",
         "commands": "satsgate --version|satsgate init --help",
     },
 )
