@@ -71,6 +71,7 @@ def test_t_d_3_1_publish_workflow_cannot_upload_from_a_pull_request() -> None:
 
     testpypi = jobs["publish-testpypi"]
     pypi = jobs["publish-pypi"]
+    assert set(testpypi["needs"]) == {"build", "smoke-local", "plan"}
     assert testpypi["environment"] == "testpypi"
     assert pypi["environment"] == "pypi"
     assert "startsWith(github.ref, 'refs/tags/')" in testpypi["if"]
