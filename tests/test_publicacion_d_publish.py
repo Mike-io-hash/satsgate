@@ -112,6 +112,7 @@ def _publish_allowed(expr: str) -> None:
             for smoke in results:
                 for rehearse in ("true", "false"):
                     env = {
+                        "needs.build.result": "success",
                         "needs.smoke-local.result": smoke_local,
                         "needs.plan.result": plan,
                         "needs.smoke-testpypi.result": smoke,

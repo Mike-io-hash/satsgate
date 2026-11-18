@@ -73,6 +73,26 @@ def _fetch(tmp_path: Path, files: dict[str, bytes], body: bytes, *, index: str =
     return dest, downloaded
 
 
+def test_index_urls_stay_on_their_own_hosts() -> None:
+    fetch = _load()
+    assert fetch.INDEX_HOSTS == {"pypi": "pypi.org", "testpypi": "test.pypi.org"}
+    assert fetch.FILE_HOSTS == {
+        "pypi": "files.pythonhosted.org",
+        "testpypi": "test-files.pythonhosted.org",
+    }
+    assert fetch.release_url("testpypi", "satsgate-sdk", "0.10.0") == (
+        "https://test.pypi.org/pypi/satsgate-sdk/0.10.0/json"
+    )
+    assert fetch.release_url("pypi", "satsgate-sdk", "0.10.0") == "https://pypi.org/pypi/satsgate-sdk/0.10.0/json"
+
+
+def test_default_downloader_retries_a_server_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    fetch = _load()
+    monkeypatch.setattr(fetch, "_https_get", lambda *_args, **_kwargs: (503, b""))
+    with pytest.raises(fetch.NotReady, match="503"):
+        fetch._default_downloader("https://files.pythonhosted.org/packages/ab/pkg.whl")
+
+
 def test_b1_exact_published_set_matches_the_build(tmp_path: Path) -> None:
     files = {"pkg-0.1.0-py3-none-any.whl": b"wheel-bytes", "pkg-0.1.0.tar.gz": b"sdist-bytes"}
     dest, urls = _fetch(tmp_path, files, _body("testpypi", files))

@@ -119,6 +119,7 @@ def test_t_d_6_4_usdc_test_mode_can_be_turned_off() -> None:
     for text in (source, readme):
         assert "delete the YAML and run init again" in text or "delete the YAML and run `init` again" in text
         assert "It is regenerated and the keys are reused." in text
+        assert "Manual edits to the YAML are lost." in text
         assert "x402: false" not in text
         assert "delete the route's x402 keys" not in text
 

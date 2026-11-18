@@ -309,12 +309,18 @@ jobs:
               raise SystemExit("empty map")
           expect = raw
           src, dst = pathlib.Path("incoming"), pathlib.Path("dist")
+          for path in src.iterdir():
+              if not path.is_file():
+                  raise SystemExit(f"not a regular file: {path.name}")
           found = {}
           for line in (src / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
               if not line.strip():
                   continue
               digest, name = line.split()
-              found[pathlib.Path(name).name] = digest
+              filename = pathlib.Path(name).name
+              if filename in found:
+                  raise SystemExit(f"duplicate sum: {filename}")
+              found[filename] = digest
           if found != expect:
               raise SystemExit("SHA256SUMS does not match the build output")
           present = {path.name for path in src.iterdir() if path.is_file() and path.name != "SHA256SUMS"}
@@ -336,7 +342,13 @@ jobs:
 
   smoke-testpypi:
     needs: [build, plan, publish-testpypi]
-    if: startsWith(github.ref, 'refs/tags/') && needs.plan.outputs.rehearse == 'true'
+    if: >-
+      always() &&
+      startsWith(github.ref, 'refs/tags/') &&
+      needs.plan.outputs.rehearse == 'true' &&
+      needs.build.result == 'success' &&
+      needs.plan.result == 'success' &&
+      needs.publish-testpypi.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -409,6 +421,7 @@ jobs:
     if: >-
       always() &&
       startsWith(github.ref, 'refs/tags/') &&
+      needs.build.result == 'success' &&
       needs.smoke-local.result == 'success' &&
       needs.plan.result == 'success' &&
       (needs.plan.outputs.rehearse == 'false' && needs.smoke-testpypi.result == 'skipped' ||
@@ -441,12 +454,18 @@ jobs:
               raise SystemExit("empty map")
           expect = raw
           src, dst = pathlib.Path("incoming"), pathlib.Path("dist")
+          for path in src.iterdir():
+              if not path.is_file():
+                  raise SystemExit(f"not a regular file: {path.name}")
           found = {}
           for line in (src / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
               if not line.strip():
                   continue
               digest, name = line.split()
-              found[pathlib.Path(name).name] = digest
+              filename = pathlib.Path(name).name
+              if filename in found:
+                  raise SystemExit(f"duplicate sum: {filename}")
+              found[filename] = digest
           if found != expect:
               raise SystemExit("SHA256SUMS does not match the build output")
           present = {path.name for path in src.iterdir() if path.is_file() and path.name != "SHA256SUMS"}
@@ -467,7 +486,12 @@ jobs:
 
   verify-pypi:
     needs: [build, plan, publish-pypi]
-    if: startsWith(github.ref, 'refs/tags/') && needs.publish-pypi.result == 'success'
+    if: >-
+      always() &&
+      startsWith(github.ref, 'refs/tags/') &&
+      needs.build.result == 'success' &&
+      needs.plan.result == 'success' &&
+      needs.publish-pypi.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read

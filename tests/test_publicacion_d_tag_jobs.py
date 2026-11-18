@@ -130,6 +130,19 @@ def test_b2_publish_jobs_stage_from_the_build_output_without_a_checkout(tmp_path
     _incoming(empty, files)
     fail("empty map", empty, "{}")
 
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    nested_map = _incoming(nested, files)
+    (nested / "incoming" / "extra-dir").mkdir()
+    fail("subdirectory", nested, __import__("json").dumps(nested_map))
+
+    duplicate = tmp_path / "duplicate"
+    duplicate.mkdir()
+    duplicate_map = _incoming(duplicate, files)
+    sums = (duplicate / "incoming" / "SHA256SUMS").read_text(encoding="utf-8")
+    (duplicate / "incoming" / "SHA256SUMS").write_text(sums + sums, encoding="utf-8")
+    fail("duplicate sum", duplicate, __import__("json").dumps(duplicate_map))
+
 
 def test_i6_each_hop_is_wired_in_the_parsed_steps() -> None:
     workflow = _publish()
@@ -152,6 +165,52 @@ def test_i6_each_hop_is_wired_in_the_parsed_steps() -> None:
     test_step = next(step["run"] for step in jobs["build"]["steps"] if step.get("name") == "Test in a separate environment")
     assert "test-venv" in test_step
     assert "build-venv" not in test_step
+
+
+def _needs(job: dict) -> list[str]:
+    raw = job.get("needs") or []
+    if isinstance(raw, str):
+        return [raw]
+    return list(raw)
+
+
+def _skippable_on_a_tag(job: dict) -> bool:
+    """A tag run can skip this job for a reason other than a failed need."""
+    cond = str(job.get("if") or "")
+    if "always()" in cond:
+        return False
+    rest = cond.replace("startsWith(github.ref, 'refs/tags/')", "").replace("&&", "").strip()
+    return bool(rest)
+
+
+def _has_skippable_ancestor(name: str, jobs: dict) -> bool:
+    seen: set[str] = set()
+    stack = list(_needs(jobs[name]))
+    while stack:
+        current = stack.pop()
+        if current in seen or current not in jobs:
+            continue
+        seen.add(current)
+        if _skippable_on_a_tag(jobs[current]):
+            return True
+        stack.extend(_needs(jobs[current]))
+    return False
+
+
+def test_i_r3_1_a_skipped_rehearsal_does_not_skip_later_tag_jobs() -> None:
+    jobs = _publish()["jobs"]
+    for name, job in jobs.items():
+        if not _has_skippable_ancestor(name, jobs):
+            continue
+        cond = str(job.get("if") or "")
+        assert "always()" in cond, name
+        assert "startsWith(github.ref, 'refs/tags/')" in cond, name
+        for needed in _needs(job):
+            assert f"needs.{needed}.result" in cond, (name, needed)
+            if _skippable_on_a_tag(jobs[needed]):
+                assert "skipped" in cond or f"needs.{needed}.result == 'success'" in cond
+            else:
+                assert f"needs.{needed}.result == 'success'" in cond, (name, needed)
 
 
 def test_n2_each_build_row_checks_its_own_output_before_upload() -> None:

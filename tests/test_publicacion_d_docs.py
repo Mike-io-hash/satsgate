@@ -75,6 +75,7 @@ _VERSION_PATTERNS = (
     re.compile(r"\bis \*\*(\d+\.\d+\.\d+)\*\*"),
     re.compile(r'"version": "(\d+\.\d+\.\d+)"'),
     re.compile(r"Core is \**(\d+\.\d+\.\d+)\**"),
+    re.compile(r"(?:core|gate) (\d+\.\d+\.\d+) or later"),
 )
 
 
@@ -147,7 +148,7 @@ def test_n5_published_readmes_keep_pythonpath_in_the_contributor_section() -> No
                 contributor = "contributor" in line.lower()
             if not contributor:
                 visible.append(line)
-        assert "PYTHONPATH=" not in "\n".join(visible), rel
+        assert "PYTHONPATH" not in "\n".join(visible), rel
     mcp = (ROOT / "mcp" / "README.md").read_text(encoding="utf-8")
     assert '"command": "satsgate-mcp"' in mcp
     assert "satsgate-mcp-pay" in mcp
