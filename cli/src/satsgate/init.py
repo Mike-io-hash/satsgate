@@ -962,8 +962,7 @@ def _fill_next_steps(run: _Run, options: InitOptions) -> None:
         if run.kept_usdc:
             steps.append(
                 "USDC test mode stays on in the existing config. This run does not turn it off. "
-                "To turn it off, edit the YAML (x402: false on the route, or delete the route's x402 keys) "
-                "and run init again, or delete the YAML and re-run (it is regenerated; keys are reused)."
+                "To turn it off, delete the YAML and run init again. It is regenerated and the keys are reused."
             )
         steps.append(
             "Pay once on Base Sepolia from a buyer agent (for example satsgate-mcp-pay, "

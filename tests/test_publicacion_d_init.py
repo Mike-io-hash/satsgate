@@ -117,9 +117,10 @@ def test_t_d_6_4_usdc_test_mode_can_be_turned_off() -> None:
     source = (ROOT / "cli" / "src" / "satsgate" / "init.py").read_text(encoding="utf-8")
     readme = (ROOT / "cli" / "README.md").read_text(encoding="utf-8")
     for text in (source, readme):
-        assert "x402: false" in text
-        assert "delete the route's x402 keys" in text
-        assert "keys are reused" in text
+        assert "delete the YAML and run init again" in text or "delete the YAML and run `init` again" in text
+        assert "It is regenerated and the keys are reused." in text
+        assert "x402: false" not in text
+        assert "delete the route's x402 keys" not in text
 
 
 def test_existing_proxy_dockerfile_is_not_deleted(tmp_path: Path) -> None:

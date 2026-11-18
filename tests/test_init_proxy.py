@@ -293,9 +293,41 @@ def test_n1_rerun_without_want_usdc_keeps_the_x402_config(tmp_path: Path) -> Non
     statement = [step for step in again_body["next_steps"] if "stays on" in step]
     assert statement == [
         "USDC test mode stays on in the existing config. This run does not turn it off. "
-        "To turn it off, edit the YAML (x402: false on the route, or delete the route's x402 keys) "
-        "and run init again, or delete the YAML and re-run (it is regenerated; keys are reused)."
+        "To turn it off, delete the YAML and run init again. It is regenerated and the keys are reused."
     ]
+
+
+def test_i4_the_usdc_off_instruction_works_when_followed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The next step says to delete the YAML and run init again. Doing that turns test mode off."""
+    _module, http, transport = _core(tmp_path)
+    work = tmp_path / "work"
+    work.mkdir()
+    try:
+        code, body, _out, _err = invoke(work, transport)
+        assert code == 0, body
+        _verify_payee(http, _account_key(work), Account.create())
+        turned, turned_body, _out2, _err2 = invoke(work, transport, want_usdc=True)
+        assert turned == 0, turned_body
+        kept, kept_body, _out3, _err3 = invoke(work, transport)
+        assert kept == 0, kept_body
+        instruction = next(step for step in kept_body["next_steps"] if "turn it off" in step)
+        assert "delete the YAML and run init again" in instruction
+        assert "x402: false" not in instruction
+        env_before = (work / ".env").read_text(encoding="utf-8")
+        # Follow the instruction literally.
+        (work / "satsgate-proxy.yaml").unlink()
+        again, again_body, _out4, _err4 = invoke(work, transport)
+    finally:
+        _close(http)
+    assert again == 0, again_body
+    assert (work / ".env").read_text(encoding="utf-8") == env_before
+    for line in env_before.splitlines():
+        key, value = line.split("=", 1)
+        monkeypatch.setenv(key, value)
+    settings = load_settings(work / "satsgate-proxy.yaml")
+    assert settings.routes
+    assert all(not route.x402 for route in settings.routes)
+    assert "x402" not in (work / "satsgate-proxy.yaml").read_text(encoding="utf-8")
 
 
 def test_t_c_3_7_start_command_and_docker_compose_keep_secrets_out(tmp_path: Path) -> None:

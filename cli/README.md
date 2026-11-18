@@ -46,7 +46,7 @@ USDC payments use Base only. Ethereum mainnet, Polygon, Solana, Arbitrum, and an
 
 `--want-usdc` mints a one-time connect link when the EVM payee is not verified yet. A terminal prints the link once and can open it. Otherwise it is written to `.satsgate/connect-link.txt` and is not printed. After the payee is verified, a later run sets `x402: true` and `x402_mode: test`. The unpaid 402 then includes a Base Sepolia offer. Paying that offer is a later step for a buyer agent (`satsgate-mcp-pay`), with the key on the buyer's machine. Test mode is free.
 
-To turn USDC test mode off, edit the YAML (`x402: false` on the route, or delete the route's x402 keys) and run `init` again, or delete the YAML and re-run (it is regenerated; keys are reused).
+To turn USDC test mode off, delete the YAML and run `init` again. It is regenerated and the keys are reused.
 
 Lightning has no test network. A paid Lightning request moves real sats to the merchant's own address.
 
