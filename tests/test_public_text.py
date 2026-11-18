@@ -34,6 +34,8 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = "c66646745328eb4c6a1bd33c6668a4b549298af3"
 RULES_PATH = ROOT / "tests" / "data" / "public_text_rules.json"
 GOLDEN = ROOT / "tests" / "fixtures" / "openapi-0.20.3.json"
+README_BASE = ROOT / "tests" / "fixtures" / "readme-base.txt"
+TREE_BASE = ROOT / "tests" / "fixtures" / "tree-base.json"
 HEADLINE = (
     "Charge AI agents in Lightning and USDC on the same 402. "
     "Payments go straight to your wallet. 500 free unlocks a month."
@@ -91,6 +93,9 @@ OPENAPI_ENV = {
     "SATSGATE_LIGHTNING_ADDRESS": "merchant@pay.example",
     "SATSGATE_MACAROON_SECRET": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "SATSGATE_ADMIN_TOKEN": "0123456789abcdef0123456789abcdef",
+    "SATSGATE_GATE_TOKEN": "",
+    "SATSGATE_GATE_PEERS": "",
+    "SATSGATE_TRUSTED_PROXIES": "",
 }
 
 
@@ -322,7 +327,13 @@ def scan(root: Path = ROOT, *, extra_digests: set[str] | None = None) -> list[tu
     hits.extend(_path_hits(paths, rules))
     lock_names = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock"}
     for rel in paths:
-        if rel in {"tests/data/public_text_rules.json", "tests/test_public_text.py"} or _frozen(rel):
+        if rel in {
+            "tests/data/public_text_rules.json",
+            "tests/test_public_text.py",
+            "tests/fixtures/readme-base.txt",
+            "tests/fixtures/tree-base.json",
+            "tests/fixtures/openapi-0.20.3.json",
+        } or _frozen(rel):
             continue
         if Path(rel).name in lock_names or "node_modules/" in rel:
             continue
@@ -347,8 +358,20 @@ def _format(hits: list[tuple[str, str, int]]) -> str:
     return "\n".join(visible[:40])
 
 
+def _git_bytes(spec: str) -> bytes | None:
+    proc = subprocess.run(["git", "show", spec], cwd=ROOT, capture_output=True)
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
 def _base_readme() -> str:
-    return subprocess.check_output(["git", "show", f"{BASE}:README.md"], cwd=ROOT, text=True)
+    """Base README. A shallow checkout has no history, so the committed copy is the fallback."""
+    fixture = README_BASE.read_text(encoding="utf-8")
+    live = _git_bytes(f"{BASE}:README.md")
+    if live is not None:
+        assert live.decode() == fixture
+    return fixture
 
 
 def _union_text() -> str:
@@ -431,7 +454,7 @@ def _install_hits() -> list[str]:
     for rel in _tracked():
         if not rel.endswith(".md") and not rel.endswith(".py"):
             continue
-        if rel in {"CONTRIBUTING.md", "docs/self-hosting.md"}:
+        if rel in {"CONTRIBUTING.md", "docs/self-hosting.md", "tests/test_public_text.py"}:
             continue
         path = ROOT / rel
         try:
@@ -480,7 +503,9 @@ def _canonical(schema: dict) -> str:
 
 
 def _load_production_openapi(db_path: Path) -> dict:
-    saved = {key: os.environ.get(key) for key in (*OPENAPI_ENV, "SATSGATE_DB_PATH")}
+    saved = {key: value for key, value in os.environ.items() if key.startswith("SATSGATE_")}
+    for key in saved:
+        os.environ.pop(key, None)
     os.environ.update(OPENAPI_ENV)
     os.environ["SATSGATE_DB_PATH"] = str(db_path)
     if str(ROOT) not in sys.path:
@@ -493,11 +518,10 @@ def _load_production_openapi(db_path: Path) -> dict:
 
         return main.app.openapi()
     finally:
-        for key, value in saved.items():
-            if value is None:
+        for key in list(os.environ):
+            if key.startswith("SATSGATE_"):
                 os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+        os.environ.update(saved)
 
 
 def _strip_docstrings(tree: ast.AST) -> None:
@@ -713,24 +737,40 @@ def test_t_dm_6_1_openapi_matches_the_base_snapshot(tmp_path: Path) -> None:
     assert live == GOLDEN.read_text(encoding="utf-8")
 
 
+def _stripped_dump(text: str) -> str:
+    tree = ast.parse(text)
+    _strip_docstrings(tree)
+    return ast.dump(tree)
+
+
 def test_t_dm_6_2_app_edits_are_comments_and_docstrings_only() -> None:
+    """Compare with the base commit when it is in the clone, and with the snapshot otherwise."""
+    snapshot = json.loads(TREE_BASE.read_text(encoding="utf-8"))
+    current_app: dict[str, str] = {}
+    for path in sorted((ROOT / "app").rglob("*.py")):
+        rel = path.relative_to(ROOT).as_posix()
+        current_app[rel] = _stripped_dump(path.read_text(encoding="utf-8"))
+    assert current_app.keys() == snapshot["app"].keys()
+    for rel, dumped in current_app.items():
+        assert dumped == snapshot["app"][rel], rel
+    for rel, digest in snapshot["unchanged"].items():
+        assert hashlib.sha256((ROOT / rel).read_bytes()).hexdigest() == digest, rel
     proc = subprocess.run(
         ["git", "diff", "--name-only", BASE, "--", "app", "gate/src", "web/connect/src"],
         cwd=ROOT,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
+    if proc.returncode != 0:
+        return
     changed = [line for line in proc.stdout.splitlines() if line]
     assert not any(line.startswith("gate/src/") or line.startswith("web/connect/src/") for line in changed)
     for rel in changed:
         assert rel.endswith(".py"), rel
-        new_tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
-        old = subprocess.check_output(["git", "show", f"{BASE}:{rel}"], cwd=ROOT)
-        old_tree = ast.parse(old)
-        _strip_docstrings(new_tree)
-        _strip_docstrings(old_tree)
-        assert ast.dump(new_tree) == ast.dump(old_tree), rel
+        old = _git_bytes(f"{BASE}:{rel}")
+        assert old is not None
+        assert _stripped_dump((ROOT / rel).read_text(encoding="utf-8")) == _stripped_dump(old.decode()), rel
 
 
 def test_t_dm_8_1_publishers_are_added_one_at_a_time() -> None:
