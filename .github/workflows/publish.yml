@@ -68,6 +68,8 @@ jobs:
     permissions:
       contents: read
       actions: write
+    outputs:
+      sums: ${{ steps.sums.outputs.sums }}
     strategy:
       fail-fast: false
       matrix:
@@ -83,21 +85,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install build tools and test dependencies
-        run: |
-          set -euo pipefail
-          python -m pip install -U pip
-          python -m pip install -r requirements.txt -r requirements-dev.txt -r proxy/requirements.txt -r mcp/requirements.txt -r gate/requirements.txt
-          python -m pip install --require-hashes --force-reinstall -r scripts/release/requirements-build.txt
-
-      - name: Build, check, and test
+      - name: Build with the hash-pinned tools
         env:
           PKG: ${{ matrix.package_dir }}
-          DIST: ${{ matrix.dist_name }}
-          VER: ${{ matrix.version }}
-          TESTS: ${{ matrix.tests }}
         run: |
           set -euo pipefail
+          python -m venv "${RUNNER_TEMP}/build-venv"
+          buildpy="${RUNNER_TEMP}/build-venv/bin/python"
+          "${buildpy}" -m pip install --require-hashes -r scripts/release/requirements-build.txt
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           export SOURCE_DATE_EPOCH
           export TZ=UTC
@@ -106,13 +101,39 @@ jobs:
           second="${RUNNER_TEMP}/build-b"
           out="${RUNNER_TEMP}/publish-dist"
           mkdir -p "${first}" "${second}" "${out}"
-          python -m build --no-isolation --outdir "${first}" "${PKG}"
-          python -m build --no-isolation --outdir "${second}" "${PKG}"
-          python scripts/release/repro_check.py "${first}" "${second}"
+          "${buildpy}" -m build --no-isolation --outdir "${first}" "${PKG}"
+          "${buildpy}" -m build --no-isolation --outdir "${second}" "${PKG}"
+          "${buildpy}" scripts/release/repro_check.py "${first}" "${second}"
           cp "${first}"/*.whl "${first}"/*.tar.gz "${out}/"
-          python -m twine check --strict "${out}"/*.whl "${out}"/*.tar.gz
-          python scripts/release/audit_dist.py "${out}"
-          python - <<'PY'
+          "${buildpy}" -m twine check --strict "${out}"/*.whl "${out}"/*.tar.gz
+          "${buildpy}" scripts/release/audit_dist.py "${out}"
+          (
+            cd "${out}"
+            sha256sum ./*.whl ./*.tar.gz > SHA256SUMS
+          )
+
+      - name: Record SHA256SUMS
+        id: sums
+        run: |
+          set -euo pipefail
+          json="$(python scripts/release/verify_dist.py --dir "${RUNNER_TEMP}/publish-dist" --format json)"
+          {
+            echo "sums<<EOF"
+            printf '%s\n' "${json}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Test in a separate environment
+        env:
+          PKG: ${{ matrix.package_dir }}
+          TESTS: ${{ matrix.tests }}
+        run: |
+          set -euo pipefail
+          python -m venv "${RUNNER_TEMP}/test-venv"
+          testpy="${RUNNER_TEMP}/test-venv/bin/python"
+          "${testpy}" -m pip install -U pip
+          "${testpy}" -m pip install -r requirements.txt -r requirements-dev.txt -r proxy/requirements.txt -r mcp/requirements.txt -r gate/requirements.txt
+          "${testpy}" - <<'PY'
           import os
           import pathlib
           import subprocess
@@ -127,7 +148,7 @@ jobs:
           if lines:
               raise SystemExit(subprocess.call([sys.executable, "-m", "pip_audit", "-r", str(req)]))
           PY
-          python - <<'PY'
+          "${testpy}" - <<'PY'
           import glob
           import os
           import shlex
@@ -142,10 +163,6 @@ jobs:
               args.extend(matched)
           raise SystemExit(subprocess.call([sys.executable, "-m", "pytest", "-q", *args]))
           PY
-          (
-            cd "${out}"
-            sha256sum ./*.whl ./*.tar.gz > SHA256SUMS
-          )
 
       - name: Upload distributions
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -189,11 +206,10 @@ jobs:
           MODULE: ${{ matrix.module }}
           COMMANDS: ${{ matrix.commands }}
           KIND: ${{ matrix.kind }}
+          BUILD_SUMS: ${{ needs.build.outputs.sums }}
         run: |
           set -euo pipefail
-          while IFS= read -r sums; do
-            (cd "$(dirname "${sums}")" && sha256sum -c SHA256SUMS)
-          done < <(find all-dist -name SHA256SUMS -type f)
+          python scripts/release/verify_dist.py --root all-dist --expect-json "${BUILD_SUMS}"
           mode="pr"
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             mode="tag"
@@ -273,11 +289,11 @@ jobs:
           path: incoming
 
       - name: Check the hashes and stage the distributions
+        env:
+          BUILD_SUMS: ${{ needs.build.outputs.sums }}
         run: |
           set -euo pipefail
-          (cd incoming && sha256sum -c SHA256SUMS)
-          mkdir -p dist
-          cp incoming/*.whl incoming/*.tar.gz dist/
+          python scripts/release/verify_dist.py --dir incoming --expect-json "${BUILD_SUMS}" --copy-to dist
 
       - name: Publish to TestPyPI
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
@@ -313,8 +329,10 @@ jobs:
         env:
           DIST: ${{ needs.plan.outputs.dist_name }}
           VER: ${{ needs.plan.outputs.version }}
+          BUILD_SUMS: ${{ needs.build.outputs.sums }}
         run: |
           set -euo pipefail
+          python scripts/release/verify_dist.py --dir incoming --expect-json "${BUILD_SUMS}"
           got="${RUNNER_TEMP}/from-testpypi"
           ready=0
           for _ in $(seq 1 30); do
@@ -354,7 +372,7 @@ jobs:
             --commands "${commands}"
 
   publish-pypi:
-    needs: [smoke-local, plan, smoke-testpypi]
+    needs: [build, smoke-local, plan, smoke-testpypi]
     if: >-
       always() &&
       startsWith(github.ref, 'refs/tags/') &&
@@ -375,11 +393,11 @@ jobs:
           path: incoming
 
       - name: Check the hashes and stage the distributions
+        env:
+          BUILD_SUMS: ${{ needs.build.outputs.sums }}
         run: |
           set -euo pipefail
-          (cd incoming && sha256sum -c SHA256SUMS)
-          mkdir -p dist
-          cp incoming/*.whl incoming/*.tar.gz dist/
+          python scripts/release/verify_dist.py --dir incoming --expect-json "${BUILD_SUMS}" --copy-to dist
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
@@ -387,7 +405,7 @@ jobs:
           packages-dir: dist
 
   verify-pypi:
-    needs: [plan, publish-pypi]
+    needs: [build, plan, publish-pypi]
     if: startsWith(github.ref, 'refs/tags/') && needs.publish-pypi.result == 'success'
     runs-on: ubuntu-latest
     permissions:
@@ -415,8 +433,10 @@ jobs:
           DIST: ${{ needs.plan.outputs.dist_name }}
           VER: ${{ needs.plan.outputs.version }}
           REHEARSE: ${{ needs.plan.outputs.rehearse }}
+          BUILD_SUMS: ${{ needs.build.outputs.sums }}
         run: |
           set -euo pipefail
+          python scripts/release/verify_dist.py --dir incoming --expect-json "${BUILD_SUMS}"
           got="${RUNNER_TEMP}/from-pypi"
           ready=0
           for _ in $(seq 1 30); do
