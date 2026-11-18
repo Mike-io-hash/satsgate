@@ -533,8 +533,9 @@ def test_destination_limit_is_three_a_day(tmp_path):
 def test_templates_shorten_escape_and_name_support(tmp_path):
     _load_app(tmp_path, **_env())
     templates = importlib.import_module("app.email_templates")
-    address = "0x4A9E2CA774BB87110ffF3CB8a250e935cFE52Ce3"
-    assert templates.shorten_evm(address) == "0x4A9E…2Ce3"
+    # EIP-55 address from keccak("satsgate-test-payee")[-20:].
+    address = "0x862E9Fd82d2AC9D3938051C29e65Eb9C71923010"
+    assert templates.shorten_evm(address) == "0x862E…3010"
     assert templates.shorten_lightning("merchant@pay.example") == "merc…@pay.example"
     stamp = templates.format_utc(1_761_773_520)
     assert stamp.endswith(" UTC")
@@ -551,7 +552,7 @@ def test_templates_shorten_escape_and_name_support(tmp_path):
     subject, text, html = templates.render("payee_evm_changed", client_id=12, params=params)
     assert subject == "Satsgate: your USDC payout address changed"
     assert "Account #12" in text
-    assert "0x4A9E…2Ce3" in text
+    assert "0x862E…3010" in text
     assert "none" in text
     assert "connect page" in text
     assert "USDC was turned off on your sites." in text
@@ -563,7 +564,7 @@ def test_templates_shorten_escape_and_name_support(tmp_path):
     ofac_subject, ofac_text, _ofac_html = templates.render(
         "payee_ofac_flagged",
         client_id=12,
-        params={"address": "0x4A9E…2Ce3", "at": 1_761_773_520},
+        params={"address": "0x862E…3010", "at": 1_761_773_520},
     )
     assert ofac_subject == "Satsgate: a payout address was blocked"
     assert "sanctions list" in ofac_text

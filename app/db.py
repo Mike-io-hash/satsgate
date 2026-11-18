@@ -773,7 +773,7 @@ def add_topup(
     `created_at`. Rows with no expiry still age out after a day.
 
     Raises ValueError('too_many_pending_topups') when this IP already has too
-    many unpaid top-ups. That caps anonymous invoice spam.
+    many unpaid top-ups. That caps unauthenticated invoice spam.
     """
     now = int(time.time()) if now is None else int(now)
     from .signup import SignupLimited, consume_signup, release_expired_anonymous

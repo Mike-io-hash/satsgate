@@ -20,7 +20,7 @@ _ELLIPSIS = "…"
 
 
 def shorten_evm(address: str) -> str:
-    """First 6 and last 4 characters of the checksum form: ``0x4A9E…2Ce3``."""
+    """First 6 and last 4 characters of the checksum form: ``0x862E…3010``."""
     text = str(address)
     if len(text) < 10:
         return text

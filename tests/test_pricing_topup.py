@@ -117,8 +117,8 @@ def test_t_5_11_and_12_terms_and_headline() -> None:
     ):
         assert phrase in lowered, phrase
     readme = (root / "README.md").read_text(encoding="utf-8")
-    assert "Cobrale a agentes de IA en Lightning y USDC, en el mismo 402. La plata va directo a tu billetera. 500 cobros gratis por mes." in readme
-    assert "anónimo" not in readme.lower()
+    assert "Charge AI agents in Lightning and USDC on the same 402. Payments go straight to your wallet. 500 free unlocks a month." in readme
+    assert "anonymous" not in readme.lower()
     quick = (root / "CUSTOMER_QUICKSTART.md").read_text(encoding="utf-8")
     import re
 

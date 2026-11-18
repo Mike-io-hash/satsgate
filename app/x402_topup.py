@@ -440,7 +440,7 @@ def issue_amount(*, client_id: int, usd_atomic: int, resource_url: str) -> dict:
 
 
 def settle_amount(*, client_id: int, encoded: str) -> dict:
-    """Settle a free-amount USDC top-up. The credited milisatoshis were locked on the offer."""
+    """Settle a free-amount USDC top-up. The credited millisatoshis were locked on the offer."""
     plan = Plan(id="usdc", title="USDC top-up", price_sats=0, credits=0)
     result = settle(client_id=client_id, plan=plan, encoded=encoded)
     result.pop("plan", None)

@@ -1,4 +1,4 @@
-# Deploy Publicación A (core 0.20.1)
+# Deploy core 0.20.1
 
 This note is for a later deploy. It is not an authorization to deploy. The coding change does not SSH, set production environment, restart anything, or publish packages.
 

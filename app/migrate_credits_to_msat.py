@@ -1,4 +1,4 @@
-"""Convert prepaid credits to milisatoshis. 1 credit = 2,000 msat.
+"""Convert prepaid credits to millisatoshis. 1 credit = 2,000 msat.
 
 Run this only against a path you pass in. It never opens ``SATSGATE_DB_PATH``
 and it never opens a production file on its own. Production apply is manual,
@@ -9,7 +9,7 @@ after a backup and a dry-run on a copy, and only with a separate OK.
     python -m app.migrate_credits_to_msat --db PATH --reverse
 
 A second apply after a successful conversion is a no-op (``already_migrated``).
-Reverse divides by 2,000 only while every milisat value is still a multiple of
+Reverse divides by 2,000 only while every millisat value is still a multiple of
 2,000. After any other movement, restore the backup instead.
 """
 
@@ -127,7 +127,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
 
 
 def _diverged(conn: sqlite3.Connection) -> str | None:
-    """Refuse to overwrite a database that already moved milisatoshis on its own."""
+    """Refuse to overwrite a database that already moved millisatoshis on its own."""
     if "balance_msat" not in _columns(conn, "clients"):
         return None
     for client in conn.execute("SELECT id, credits, balance_msat FROM clients"):

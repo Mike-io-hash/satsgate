@@ -438,8 +438,6 @@ def _base_rpc_url() -> str:
 
 def _base_rpc_fallback_url() -> str:
     """Optional second Base RPC. Empty means the primary URL is the only one.
-
-    Originally proposed by Mike as P-A3, approved by Ia on 2026-11-13.
     """
     raw = os.environ.get("SATSGATE_BASE_RPC_FALLBACK_URL", "").strip()
     if not raw:

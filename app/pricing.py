@@ -1,4 +1,4 @@
-"""Model B prices. Integer milisatoshis only. One formula for every live debit.
+"""Model B prices. Integer millisatoshis only. One formula for every live debit.
 
 Fees round down. Top-up credits, including the bonus, round up. Both favour
 the seller. Buyer-facing USD quotes stay in ``app.rates`` and are not computed

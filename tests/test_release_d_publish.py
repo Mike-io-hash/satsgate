@@ -244,9 +244,9 @@ def test_package_matrix_matches_the_tree() -> None:
         "satsgate-mcp",
         "satsgate",
     ]
-    assert rows[0]["version"] == "0.10.0"
-    assert rows[1]["version"] == "0.14.1"
-    assert rows[2]["version"] == "0.13.0"
+    assert rows[0]["version"] == "0.10.1"
+    assert rows[1]["version"] == "0.14.2"
+    assert rows[2]["version"] == "0.13.1"
     legacy = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "release" / "package_matrix.py"), "--tag", "v0.2.0"],
         check=False,

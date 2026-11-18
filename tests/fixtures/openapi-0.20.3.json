@@ -1,0 +1,3545 @@
+{
+  "components": {
+    "schemas": {
+      "ApiKeyCreateIn": {
+        "properties": {
+          "label": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "resource_prefix": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When set, this key can only challenge, check, and verify resources that start with this prefix. The comparison is case-sensitive. Omit it to allow any resource.",
+            "title": "Resource Prefix"
+          },
+          "scope": {
+            "default": "paywall",
+            "description": "paywall (default), sites:read, or sites:write. Omit it to keep a paywall key.",
+            "maxLength": 32,
+            "title": "Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "title": "ApiKeyCreateIn",
+        "type": "object"
+      },
+      "ClientPayeeIn": {
+        "properties": {
+          "payee_lightning_address": {
+            "maxLength": 200,
+            "minLength": 3,
+            "title": "Payee Lightning Address",
+            "type": "string"
+          }
+        },
+        "required": [
+          "payee_lightning_address"
+        ],
+        "title": "ClientPayeeIn",
+        "type": "object"
+      },
+      "EvmPayeeChallengeIn": {
+        "properties": {
+          "address": {
+            "maxLength": 42,
+            "minLength": 42,
+            "title": "Address",
+            "type": "string"
+          }
+        },
+        "required": [
+          "address"
+        ],
+        "title": "EvmPayeeChallengeIn",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "LightningTopupIn": {
+        "properties": {
+          "sats": {
+            "maximum": 10000000.0,
+            "minimum": 1.0,
+            "title": "Sats",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sats"
+        ],
+        "title": "LightningTopupIn",
+        "type": "object"
+      },
+      "PaywallChallengeIn": {
+        "properties": {
+          "access_seconds": {
+            "anyOf": [
+              {
+                "maximum": 604800.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Seconds of access starting when the payment first settles. The server caps this (SATSGATE_PAYWALL_ACCESS_CAP_SECONDS, default 7 days). A max_uses bundle that omits this still ends at that cap.",
+            "title": "Access Seconds"
+          },
+          "amount_sats": {
+            "maximum": 10000000.0,
+            "minimum": 1.0,
+            "title": "Amount Sats",
+            "type": "integer"
+          },
+          "max_uses": {
+            "anyOf": [
+              {
+                "maximum": 100000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How many consume=true calls this payment covers. Omit it, and omit access_seconds, to keep the previous unlimited re-verify behaviour.",
+            "title": "Max Uses"
+          },
+          "memo": {
+            "anyOf": [
+              {
+                "maxLength": 250,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memo"
+          },
+          "payee_lightning_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Lightning Address that will receive the payment (user@domain). If omitted, the client's registered payee is used (see /v1/client/payee).",
+            "title": "Payee Lightning Address"
+          },
+          "resource": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Resource",
+            "type": "string"
+          },
+          "resource_url": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Public http(s) URL the buyer will pay. Required when x402 is true.",
+            "title": "Resource Url"
+          },
+          "ttl_seconds": {
+            "anyOf": [
+              {
+                "maximum": 86400.0,
+                "minimum": 30.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Minimum seconds the Lightning invoice must stay payable. Does not shorten the macaroon. claim_until follows the invoice expiry plus grace, capped. Omit it to use SATSGATE_TOKEN_TTL_SECONDS as that minimum.",
+            "title": "Ttl Seconds"
+          },
+          "x402": {
+            "default": false,
+            "description": "Also attach an x402 USDC offer for resource_url. Requires a verified EVM payee. Lightning is still issued.",
+            "title": "X402",
+            "type": "boolean"
+          },
+          "x402_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "test or live. Omitted with x402 true means test (Base Sepolia). live offers only Base and requires the operator CDP switch. The two networks are never in the same 402.",
+            "title": "X402 Mode"
+          }
+        },
+        "required": [
+          "amount_sats",
+          "resource"
+        ],
+        "title": "PaywallChallengeIn",
+        "type": "object"
+      },
+      "PaywallChargeIn": {
+        "properties": {
+          "cost_credits": {
+            "default": 1,
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "title": "Cost Credits",
+            "type": "integer"
+          },
+          "expected_resource": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Expected Resource",
+            "type": "string"
+          },
+          "payment_hash": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Payment Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_resource",
+          "payment_hash"
+        ],
+        "title": "PaywallChargeIn",
+        "type": "object"
+      },
+      "PaywallVerifyIn": {
+        "properties": {
+          "charge": {
+            "default": true,
+            "description": "When true, debit on this call, which is what proxy 0.8.0 does before it forwards. When false, confirm the payment and leave the credit. POST /v1/paywall/charge debits after the origin returns 2xx.",
+            "title": "Charge",
+            "type": "boolean"
+          },
+          "consume": {
+            "default": false,
+            "description": "When true, atomically take one use of this payment. Required to enforce max_uses or access_seconds. False leaves the counter unchanged and still settles a first unlock.",
+            "title": "Consume",
+            "type": "boolean"
+          },
+          "cost_credits": {
+            "default": 1,
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "title": "Cost Credits",
+            "type": "integer"
+          },
+          "expected_resource": {
+            "description": "Must exactly match the resource from POST /v1/paywall/challenge. The comparison is case-sensitive.",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Expected Resource",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_resource"
+        ],
+        "title": "PaywallVerifyIn",
+        "type": "object"
+      },
+      "PaywallX402In": {
+        "properties": {
+          "payment_signature": {
+            "maxLength": 12000,
+            "minLength": 1,
+            "title": "Payment Signature",
+            "type": "string"
+          },
+          "resource": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Resource",
+            "type": "string"
+          },
+          "resource_url": {
+            "maxLength": 500,
+            "minLength": 8,
+            "title": "Resource Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "resource",
+          "resource_url",
+          "payment_signature"
+        ],
+        "title": "PaywallX402In",
+        "type": "object"
+      },
+      "RouteCreateIn": {
+        "properties": {
+          "access_seconds": {
+            "anyOf": [
+              {
+                "maximum": 604800.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Access Seconds"
+          },
+          "max_uses": {
+            "anyOf": [
+              {
+                "maximum": 100000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Uses"
+          },
+          "path": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          },
+          "price_currency": {
+            "anyOf": [
+              {
+                "maxLength": 8,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Currency"
+          },
+          "price_sats": {
+            "anyOf": [
+              {
+                "maximum": 10000000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Sats"
+          },
+          "price_usd_atomic": {
+            "anyOf": [
+              {
+                "maximum": 100000000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Usd Atomic"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "RouteCreateIn",
+        "type": "object"
+      },
+      "RouteUpdateIn": {
+        "properties": {
+          "access_seconds": {
+            "anyOf": [
+              {
+                "maximum": 604800.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Access Seconds"
+          },
+          "max_uses": {
+            "anyOf": [
+              {
+                "maximum": 100000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Uses"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "price_currency": {
+            "anyOf": [
+              {
+                "maxLength": 8,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Currency"
+          },
+          "price_sats": {
+            "anyOf": [
+              {
+                "maximum": 10000000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Sats"
+          },
+          "price_usd_atomic": {
+            "anyOf": [
+              {
+                "maximum": 100000000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Usd Atomic"
+          }
+        },
+        "title": "RouteUpdateIn",
+        "type": "object"
+      },
+      "SignupIn": {
+        "additionalProperties": false,
+        "description": "Empty object only. Personal data is refused.",
+        "properties": {},
+        "title": "SignupIn",
+        "type": "object"
+      },
+      "SiteCreateIn": {
+        "properties": {
+          "accept_terms": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accept Terms"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 300,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "display_name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
+          "listed": {
+            "default": false,
+            "title": "Listed",
+            "type": "boolean"
+          },
+          "origin_url": {
+            "maxLength": 300,
+            "minLength": 8,
+            "title": "Origin Url",
+            "type": "string"
+          },
+          "slug": {
+            "maxLength": 40,
+            "minLength": 3,
+            "title": "Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "display_name",
+          "origin_url"
+        ],
+        "title": "SiteCreateIn",
+        "type": "object"
+      },
+      "SiteUpdateIn": {
+        "properties": {
+          "accept_terms": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accept Terms"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 300,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "maxLength": 80,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "listed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Listed"
+          },
+          "origin_url": {
+            "anyOf": [
+              {
+                "maxLength": 300,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin Url"
+          },
+          "rail_lightning": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rail Lightning"
+          },
+          "rail_x402": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rail X402"
+          },
+          "x402_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Exclusive USDC mode. test offers only Base Sepolia. live offers only Base and requires the operator CDP switch. A new site leaves this unset. Turning x402 on without a mode stores test.",
+            "title": "X402 Mode"
+          }
+        },
+        "title": "SiteUpdateIn",
+        "type": "object"
+      },
+      "UsdcTopupIn": {
+        "additionalProperties": false,
+        "properties": {
+          "usd": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usd"
+          },
+          "usd_atomic": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usd Atomic"
+          }
+        },
+        "title": "UsdcTopupIn",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "satsgate",
+    "version": "0.20.3"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/.well-known/satsgate.json": {
+      "get": {
+        "description": "Machine-readable manifest for discovery (agents/frameworks).\n\nNote: this does not replace OpenAPI; it complements it with pricing, auth, and links.",
+        "operationId": "well_known_satsgate_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Well Known Satsgate Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Well Known Satsgate"
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health"
+      }
+    },
+    "/v1/accounts": {
+      "post": {
+        "description": "Open an account. The sg_ key is returned once. No invoice and no personal data.",
+        "operationId": "v1_accounts_v1_accounts_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/SignupIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Accounts"
+      }
+    },
+    "/v1/api-keys": {
+      "get": {
+        "description": "List this client's restricted keys. Secrets are never included.",
+        "operationId": "v1_api_keys_list_v1_api_keys_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "include_revoked",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Revoked",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Api Keys List"
+      },
+      "post": {
+        "description": "Create a restricted key. The account key is required. The secret is returned once.",
+        "operationId": "v1_api_keys_create_v1_api_keys_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApiKeyCreateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Api Keys Create"
+      }
+    },
+    "/v1/api-keys/{key_id}/revoke": {
+      "post": {
+        "description": "Revoke a restricted key. Repeating this call stays revoked.",
+        "operationId": "v1_api_keys_revoke_v1_api_keys__key_id__revoke_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key_id",
+            "required": true,
+            "schema": {
+              "title": "Key Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Api Keys Revoke"
+      }
+    },
+    "/v1/balance": {
+      "get": {
+        "operationId": "v1_balance_v1_balance_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Balance"
+      }
+    },
+    "/v1/client": {
+      "get": {
+        "operationId": "v1_client_v1_client_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Client"
+      }
+    },
+    "/v1/client/alert-email": {
+      "delete": {
+        "description": "Remove the confirmed address and any pending one. The account key is required.",
+        "operationId": "v1_client_alert_email_delete_v1_client_alert_email_delete",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Client Alert Email Delete"
+      },
+      "put": {
+        "description": "Set or replace the pending alert address. The account key is required.",
+        "operationId": "v1_client_alert_email_put_v1_client_alert_email_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Client Alert Email Put"
+      }
+    },
+    "/v1/client/api-key/rotate": {
+      "post": {
+        "description": "Replace the account key now. Empty body. Only the current account key in X-Api-Key.\n\nX-Connect-Token, an sgc_ session, a restricted sgr_ key, and X-Admin-Token are not accepted.\nThe old key stops working as soon as this commits. There is no grace period.\n200 returns ``api_key`` (shown once) and ``prefix`` (the first 8 characters).\nA restricted key is 403 insufficient_scope. A lost race is 401 invalid_api_key.\nShares the account security limit (``SATSGATE_RL_MAX_SECURITY`` per\n``SATSGATE_RL_WINDOW_SECONDS``, keyed by client id) with webhook writes.",
+        "operationId": "v1_client_api_key_rotate_v1_client_api_key_rotate_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Client Api Key Rotate"
+      }
+    },
+    "/v1/client/payee": {
+      "post": {
+        "operationId": "v1_client_set_payee_v1_client_payee_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClientPayeeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Client Set Payee"
+      }
+    },
+    "/v1/client/payee/evm": {
+      "post": {
+        "description": "Verify the signed message and save one EVM payTo. A bad signature does not change the stored address.",
+        "operationId": "v1_client_evm_payee_v1_client_payee_evm_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Client Evm Payee"
+      }
+    },
+    "/v1/client/payee/evm/challenge": {
+      "post": {
+        "description": "Ask for an EIP-191 message. Nothing is written on chain and the stored address does not change.",
+        "operationId": "v1_client_evm_challenge_v1_client_payee_evm_challenge_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvmPayeeChallengeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Client Evm Challenge"
+      }
+    },
+    "/v1/client/payee/evm/connect": {
+      "post": {
+        "description": "Mint a one-time browser link. The account key is not sent to the page.",
+        "operationId": "v1_client_evm_connect_v1_client_payee_evm_connect_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Client Evm Connect"
+      }
+    },
+    "/v1/client/webhook": {
+      "delete": {
+        "description": "Remove the webhook and drop deliveries that have not been posted. Account key only.",
+        "operationId": "v1_client_webhook_delete_v1_client_webhook_delete",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Client Webhook Delete"
+      },
+      "get": {
+        "description": "Read the webhook. Account key only. Never returns the signing secret.\n\n``secret_prefix`` is the start of the ``whsec_`` value. ``last_delivery`` is\n``{\"status\", \"at\"}`` or null. No webhook is ``url: null`` and ``enabled: false``.",
+        "operationId": "v1_client_webhook_get_v1_client_webhook_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Client Webhook Get"
+      },
+      "put": {
+        "description": "Create or replace the security webhook. Account key only.\n\n200 is ``ok``, ``url``, and ``enabled``. ``secret`` (``whsec_…``) is present\nonly on the first create or when ``rotate_secret`` is true. Replacing only\nthe URL keeps the secret and omits it. 503 ``webhooks_unavailable`` when\n``SATSGATE_SITE_SECRET_KEY`` is unset. ``SATSGATE_WEBHOOKS=0`` stops the\nsender thread and does not block this call. The URL is not echoed in errors.",
+        "operationId": "v1_client_webhook_put_v1_client_webhook_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "rotate_secret": {
+                    "description": "When true, replace the whsec_ signing secret and return it once.",
+                    "type": "boolean"
+                  },
+                  "url": {
+                    "description": "https URL with no username or password. Public addresses only.",
+                    "maxLength": 300,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "url"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Client Webhook Put"
+      }
+    },
+    "/v1/client/webhook/test": {
+      "post": {
+        "description": "Queue a webhook_test event. Account key only.\n\n404 ``webhook_not_configured`` when none is saved. 409 ``webhook_disabled`` when\na 404 or 410 turned it off. 503 ``webhooks_unavailable`` when the encryption\nkey is unset. Shares the account security limit with rotation and webhook\nwrites (``SATSGATE_RL_MAX_SECURITY`` calls per window, keyed by client id).",
+        "operationId": "v1_client_webhook_test_v1_client_webhook_test_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Client Webhook Test"
+      }
+    },
+    "/v1/connect/alert-email": {
+      "get": {
+        "description": "What the confirmation screen may show. The token is not consumed.",
+        "operationId": "v1_connect_alert_email_preview_v1_connect_alert_email_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Email-Token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Email-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Connect Alert Email Preview"
+      },
+      "post": {
+        "description": "First alert address only. A confirmed address has to be changed with the account key.\n\nThis does not consume the connect token.",
+        "operationId": "v1_connect_alert_email_v1_connect_alert_email_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Connect-Token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Connect-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Connect Alert Email"
+      }
+    },
+    "/v1/connect/alert-email/confirm": {
+      "post": {
+        "description": "Confirm on a POST. A mail scanner that only fetches the link does not confirm it.",
+        "operationId": "v1_connect_alert_email_confirm_v1_connect_alert_email_confirm_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Email-Token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Email-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Connect Alert Email Confirm"
+      }
+    },
+    "/v1/connect/evm": {
+      "get": {
+        "description": "What the page may show before the wallet connects. No API key.",
+        "operationId": "v1_connect_evm_v1_connect_evm_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Connect-Token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Connect-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Connect Evm"
+      }
+    },
+    "/v1/connect/evm/challenge": {
+      "post": {
+        "description": "Same challenge as the account-key route. A bad token does not start one.",
+        "operationId": "v1_connect_evm_challenge_v1_connect_evm_challenge_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Connect-Token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Connect-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvmPayeeChallengeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Connect Evm Challenge"
+      }
+    },
+    "/v1/connect/evm/verify": {
+      "post": {
+        "description": "Verify the signature. Success clears the connect token. Failure leaves it in place.\n\nThe body is parsed here so a long signature is not echoed in a 422. A contract\nsignature is checked on Base outside the event loop.",
+        "operationId": "v1_connect_evm_verify_v1_connect_evm_verify_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Connect-Token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Connect-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Connect Evm Verify"
+      }
+    },
+    "/v1/ledger": {
+      "get": {
+        "description": "Return this client's verification ledger entries (credits).",
+        "operationId": "v1_ledger_v1_ledger_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Ledger"
+      }
+    },
+    "/v1/paywall/challenge": {
+      "post": {
+        "description": "Generate an L402 challenge for a resource.\n\nHow to use it:\n- Your backend (customer) calls this endpoint and receives invoice + macaroon.\n- Your backend returns HTTP 402 to *your* end user with those values.\n\n`invoice_expires_at` is when the invoice stops being payable. `claim_until`\n(also returned as `valid_until`) is when satsgate will still unlock it.\nPassing `payee_lightning_address` on the first challenge saves it. Change\nthe saved payee with POST /v1/client/payee. A restricted key cannot save or\nchange the payee.\n\nA trusted proxy may send `X-Satsgate-Buyer-Ip` with the end buyer's address.\nThe header is ignored unless the TCP peer is in `SATSGATE_TRUSTED_PROXIES`.\nWithout it, limits stay per client, as before.",
+        "operationId": "v1_paywall_challenge_v1_paywall_challenge_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Satsgate-Buyer-Ip",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Satsgate-Buyer-Ip"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaywallChallengeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Paywall Challenge"
+      }
+    },
+    "/v1/paywall/charge": {
+      "post": {
+        "description": "Debit after the origin returned 2xx. A confirm call does not debit.\n\nOld clients omit this route. They keep sending charge=true on verify, which\nstill debits before they forward.",
+        "operationId": "v1_paywall_charge_v1_paywall_charge_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaywallChargeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Paywall Charge"
+      }
+    },
+    "/v1/paywall/status/{payment_hash}": {
+      "get": {
+        "description": "Poll a paywall challenge paid from any wallet.\n\nRequires the merchant API key and the macaroon issued for this payment hash.\nThis is an alternative to POST /v1/paywall/verify, not a free read. The first\nsettled call spends credits once for this payment_hash. A repeat, on either\nroute, spends 0. While the invoice is unpaid this route returns HTTP 200\n`status=pending` (verify returns HTTP 402 `payment_pending` for that same state).",
+        "operationId": "v1_paywall_status_v1_paywall_status__payment_hash__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "payment_hash",
+            "required": true,
+            "schema": {
+              "title": "Payment Hash",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expected_resource",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Expected Resource",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cost_credits",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "maximum": 10000,
+              "minimum": 1,
+              "title": "Cost Credits",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "When true, atomically take one use of this payment. False checks without consuming.",
+            "in": "query",
+            "name": "consume",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "When true, atomically take one use of this payment. False checks without consuming.",
+              "title": "Consume",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "When false, confirm without debiting. The default still debits on the first settled call.",
+            "in": "query",
+            "name": "charge",
+            "required": false,
+            "schema": {
+              "default": true,
+              "description": "When false, confirm without debiting. The default still debits on the first settled call.",
+              "title": "Charge",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Paywall Status"
+      }
+    },
+    "/v1/paywall/verify": {
+      "post": {
+        "description": "Verify an L402 Authorization and spend payment verifications (credits) (once per payment_hash).\n\nThis is the core of the \"plans + prepay\" model:\n- the customer tops up payment verifications (credits)\n- each verified payment consumes 1 verification (credit) (exactly once per payment_hash)\n\n`Authorization: L402 <macaroon>:<preimage>` is the original flow.\n`Authorization: L402 <macaroon>` settles from the stored LUD-21 verify URL when the\npayee's provider advertised one.\n\n`GET /v1/paywall/status/{payment_hash}` is the poll alternative. While the invoice\nis unpaid, this route returns HTTP 402 `payment_pending` and status returns HTTP 200\n`pending`. The first settled call on either route spends credits; a repeat spends 0.",
+        "operationId": "v1_paywall_verify_v1_paywall_verify_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaywallVerifyIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Paywall Verify"
+      }
+    },
+    "/v1/paywall/x402/settle": {
+      "post": {
+        "description": "Call only after the origin returned 2xx. The facilitator settles, then one credit is taken.",
+        "operationId": "v1_paywall_x402_settle_v1_paywall_x402_settle_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaywallX402In"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Paywall X402 Settle"
+      }
+    },
+    "/v1/paywall/x402/verify": {
+      "post": {
+        "description": "Check a PAYMENT-SIGNATURE. serve=true means the caller may call the origin. No credit moves.",
+        "operationId": "v1_paywall_x402_verify_v1_paywall_x402_verify_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaywallX402In"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Paywall X402 Verify"
+      }
+    },
+    "/v1/plans": {
+      "get": {
+        "operationId": "v1_plans_v1_plans_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response V1 Plans V1 Plans Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "V1 Plans"
+      }
+    },
+    "/v1/rates": {
+      "get": {
+        "description": "Effective BTC/USD quote. It does not name where the number came from.",
+        "operationId": "v1_rates_v1_rates_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "V1 Rates"
+      }
+    },
+    "/v1/sites": {
+      "get": {
+        "description": "Approved sites that opted in. No owner, origin, or secret.",
+        "operationId": "v1_sites_public_v1_sites_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Sites Public"
+      },
+      "post": {
+        "description": "Register a site. The origin HMAC secret is returned once. New sites start pending.",
+        "operationId": "v1_sites_create_v1_sites_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SiteCreateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Sites Create"
+      }
+    },
+    "/v1/sites/mine": {
+      "get": {
+        "operationId": "v1_sites_mine_v1_sites_mine_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Sites Mine"
+      }
+    },
+    "/v1/sites/{slug}": {
+      "delete": {
+        "operationId": "v1_sites_delete_v1_sites__slug__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Sites Delete"
+      },
+      "get": {
+        "operationId": "v1_sites_get_v1_sites__slug__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Sites Get"
+      },
+      "patch": {
+        "operationId": "v1_sites_update_v1_sites__slug__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SiteUpdateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Sites Update"
+      }
+    },
+    "/v1/sites/{slug}/rotate-secret": {
+      "post": {
+        "operationId": "v1_sites_rotate_secret_v1_sites__slug__rotate_secret_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Sites Rotate Secret"
+      }
+    },
+    "/v1/sites/{slug}/routes": {
+      "post": {
+        "operationId": "v1_site_routes_create_v1_sites__slug__routes_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RouteCreateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Site Routes Create"
+      }
+    },
+    "/v1/sites/{slug}/routes/{route_id}": {
+      "delete": {
+        "operationId": "v1_site_routes_delete_v1_sites__slug__routes__route_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "route_id",
+            "required": true,
+            "schema": {
+              "title": "Route Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Site Routes Delete"
+      },
+      "patch": {
+        "operationId": "v1_site_routes_update_v1_sites__slug__routes__route_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "route_id",
+            "required": true,
+            "schema": {
+              "title": "Route Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RouteUpdateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Site Routes Update"
+      }
+    },
+    "/v1/sites/{slug}/verify-origin": {
+      "post": {
+        "description": "Ask the origin to prove the receipt checker is installed. Any site status is accepted.",
+        "operationId": "v1_sites_verify_origin_v1_sites__slug__verify_origin_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Sites Verify Origin"
+      }
+    },
+    "/v1/topup/lightning": {
+      "post": {
+        "description": "Top up any amount of sats. Minimum is SATSGATE_TOPUP_MIN_SATS.\n\nNo key: the invoice can create the account when it is paid. A restricted\nkey cannot top up. The credited milisatoshis include the per-top-up bonus.",
+        "operationId": "v1_topup_lightning_v1_topup_lightning_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LightningTopupIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Topup Lightning"
+      }
+    },
+    "/v1/topup/status/{payment_hash}": {
+      "get": {
+        "description": "Poll a top-up that was paid from any wallet.\n\nAuthorization is `L402 <macaroon>` (no preimage) or the usual preimage form.\nSettlement is read from the verify URL stored when the invoice was created.\nThe API key is returned only on the call that creates the account.",
+        "operationId": "v1_topup_status_v1_topup_status__payment_hash__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "payment_hash",
+            "required": true,
+            "schema": {
+              "title": "Payment Hash",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Topup Status"
+      }
+    },
+    "/v1/topup/usdc": {
+      "post": {
+        "description": "Authenticated free-amount USDC top-up. A missing accounting rate is 503, not a 402.",
+        "operationId": "v1_topup_usdc_v1_topup_usdc_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "PAYMENT-SIGNATURE",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Payment-Signature"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UsdcTopupIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Topup Usdc"
+      }
+    },
+    "/v1/topup/{plan_id}": {
+      "get": {
+        "description": "Buy prepaid payment verifications (credits) by plan.\n\n- No Authorization: 402 + invoice + macaroon\n- `Authorization: L402 <macaroon>:<preimage>`: credit the account\n- `Authorization: L402 <macaroon>`: credit the account when the provider's\n  stored LUD-21 verify URL reports the invoice settled\n\nThe preimage flow keeps working for providers that do not advertise verify.",
+        "operationId": "v1_topup_v1_topup__plan_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Topup"
+      }
+    },
+    "/v1/topup/{plan_id}/x402": {
+      "get": {
+        "description": "Buy a credit pack with USDC.\n\nWhile the operator CDP switch is on, the only network is Base\n(`eip155:8453`) through the CDP facilitator. While it is off, the only\nnetwork is Base Sepolia (`eip155:84532`). Credits are not sold for testnet\nUSDC once mainnet is on. No `PAYMENT-SIGNATURE`: 402 and `PAYMENT-REQUIRED`\n(scheme `exact`, payTo the treasury, amount from the locked BTC/USD quote).\nWith that header: verify, settle, then grant credits. A failed settle grants\nnothing. Credits are not redeemable for USDC. Lightning top-up is separate.",
+        "operationId": "v1_topup_x402_v1_topup__plan_id__x402_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "PAYMENT-SIGNATURE",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Payment-Signature"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Topup X402"
+      }
+    },
+    "/v1/usage/daily": {
+      "get": {
+        "description": "Daily (UTC) series for charts and automated top-ups.",
+        "operationId": "v1_usage_daily_v1_usage_daily_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "title": "Days",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Usage Daily"
+      }
+    },
+    "/v1/usage/forecast": {
+      "get": {
+        "description": "Pace of recent paid unlocks, in milisatoshis. Never names a pack.",
+        "operationId": "v1_usage_forecast_v1_usage_forecast_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "lookback_hours",
+            "required": false,
+            "schema": {
+              "default": 24,
+              "title": "Lookback Hours",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Usage Forecast"
+      }
+    },
+    "/v1/usage/summary": {
+      "get": {
+        "description": "Usage summary over a time window (default: last 24h).",
+        "operationId": "v1_usage_summary_v1_usage_summary_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "since_hours",
+            "required": false,
+            "schema": {
+              "default": 24,
+              "title": "Since Hours",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Api-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "V1 Usage Summary"
+      }
+    }
+  }
+}
