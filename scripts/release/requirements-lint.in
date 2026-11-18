@@ -1,0 +1,5 @@
+# Workflow linters for .github/workflows (T-D.3.2).
+# Compile with:
+#   pip-compile --generate-hashes --allow-unsafe --output-file=scripts/release/requirements-lint.txt scripts/release/requirements-lint.in
+zizmor==1.32.0
+actionlint-py==1.7.12.25

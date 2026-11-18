@@ -8,14 +8,12 @@
 
 ## Fastest path: `satsgate init`
 
-`satsgate` is not on PyPI yet (until Publicación D). From a checkout of this repo:
-
 ```bash
-pip install -e sdk/python -e proxy -e cli
-satsgate init
+uvx satsgate init
+pip install satsgate
 ```
 
-After publication the same setup is `uvx satsgate init`.
+From a checkout: `pip install -e sdk/python -e proxy -e cli`.
 
 The merchant flow from a cold start:
 
@@ -98,7 +96,7 @@ Configured via env vars:
   - checks the BOLT11 amount, network, `description_hash` (LUD-06), expiry, and payment hash before issuing a challenge
   - if the provider advertises LUD-21 `verify`, settlement is confirmed there too, including without the payer returning a preimage. Providers that omit it (Wallet of Satoshi) stay preimage-only
 
-`GET /health` returns `{"ok": true, "version": "0.17.0"}` and nothing else.
+`GET /health` returns `{"ok": true, "version": "0.20.3"}` and nothing else. Works with core 0.20.3 or later.
 
 ## Prepaid balance (milisatoshis)
 
@@ -277,7 +275,7 @@ Set the payee with the account key before the proxy creates challenges. There is
 
 ## Hosted sites (closed beta)
 
-Core stores the site. `satsgate-gate` (version 0.15.2, in [`gate/`](./gate/README.md)) charges at `https://gate.satsgate.org/<slug>/<path>` and returns a signed receipt. It does not call, relay, or serve the origin. The buyer repeats the request at `redeem_url` with the header `Satsgate-Receipt`. Core is 0.20.2. The self-hosted proxy is 0.14.0. satsgate-mcp is 0.13.0 and follows that receipt when the host is allowed. The connect page stays 0.17.0. Lightning goes to the merchant's Lightning Address. USDC goes to the merchant's verified address on the one network that site is in: Base Sepolia in test mode, Base when the site is live and the operator has enabled CDP. On this gate, the prepaid balance is debited when the receipt is issued. Test mode stores the receipt and does not debit. Self-hosted `/v1/paywall/*` still debits on settle and still forwards from the proxy. Satsgate does not hold the sats or the USDC and does not refund buyers.
+Core stores the site. `satsgate-gate` (version 0.15.2, in [`gate/`](./gate/README.md)) charges at `https://gate.satsgate.org/<slug>/<path>` and returns a signed receipt. It does not call, relay, or serve the origin. The buyer repeats the request at `redeem_url` with the header `Satsgate-Receipt`. Works with core 0.20.3 or later. The self-hosted proxy is 0.14.1. satsgate-mcp is 0.13.0 and follows that receipt when the host is allowed. The connect page stays 0.17.0. Lightning goes to the merchant's Lightning Address. USDC goes to the merchant's verified address on the one network that site is in: Base Sepolia in test mode, Base when the site is live and the operator has enabled CDP. On this gate, the prepaid balance is debited when the receipt is issued. Test mode stores the receipt and does not debit. Self-hosted `/v1/paywall/*` still debits on settle and still forwards from the proxy. Satsgate does not hold the sats or the USDC and does not refund buyers.
 
 ```bash
 curl -sI https://gate.satsgate.org/my-shop/blog/post
@@ -352,7 +350,7 @@ New sites start `pending`. `GET /v1/sites` lists only `approved` sites with `lis
 | `SATSGATE_GATE_TOKEN` | unset | Shared with the gate container. Unset means `/internal/gate/*` is 404. |
 | `SATSGATE_GATE_PEERS` | empty (Compose sets `172.28.0.4`) | When set, only that TCP peer may present the gate token. |
 
-Current deploy notes are at the top of `CHANGELOG.md` (core 0.20.2 and gate 0.15.2). The 0.13.0 notes follow. Copy `satsgate.sqlite3` before you restart. Restart to serve 0.13.0. The 0.12.0 startup adds columns and rebuilds `site_routes` (see below). 0.13.0 does not add another table. Current API keys, credits, and Lightning challenges keep working if you do not set the new variables. Set `SATSGATE_SITE_SECRET_KEY` before the first site is created, and keep that value. Losing it makes stored secrets unreadable. Rotation still works and issues a new secret. Leave `SATSGATE_GATE_TOKEN` unset until the gate container is deployed. The public API host rejects `/internal/*` in Caddy either way.
+Current deploy notes are at the top of `CHANGELOG.md` (core 0.20.3 and gate 0.15.2). The 0.13.0 notes follow. Copy `satsgate.sqlite3` before you restart. Restart to serve 0.13.0. The 0.12.0 startup adds columns and rebuilds `site_routes` (see below). 0.13.0 does not add another table. Current API keys, credits, and Lightning challenges keep working if you do not set the new variables. Set `SATSGATE_SITE_SECRET_KEY` before the first site is created, and keep that value. Losing it makes stored secrets unreadable. Rotation still works and issues a new secret. Leave `SATSGATE_GATE_TOKEN` unset until the gate container is deployed. The public API host rejects `/internal/*` in Caddy either way.
 
 ### x402 on Base Sepolia (0.12.0)
 
@@ -508,13 +506,13 @@ Full steps, the signature, and a mainnet checklist are in [`proxy/README.md`](./
 
 ## Buyer MCP
 
-`satsgate-mcp` (version 0.11.0, in [`mcp/`](./mcp/README.md)) is a separate process an agent runs over stdio. It is a client. It does not change the core.
+`satsgate-mcp` (version 0.13.0, in [`mcp/`](https://github.com/Mike-io-hash/satsgate/blob/main/mcp/README.md)) is a separate process an agent runs over stdio. Works with core 0.20.3 or later. It is a client. It does not change the core.
 
 `discover` and `quote` request a URL and read the 402. Lightning still returns the price in sats, `max_uses`, `access_seconds`, and expiry. An x402 offer adds the `PAYMENT-REQUIRED` accepts: network, asset, atomic amount, human USDC, `payTo`, resource, scheme, and expiry. The amount is whatever the 402 locked. This process does not recompute it. `pay_and_fetch` with mode `human` returns the invoice and a QR when Lightning is offered, including when x402 is on the same 402. With no Lightning wallet connected, a person can pay that invoice from a phone and the agent continues through `check_payment`. Mode `nwc` pays Lightning from `SATSGATE_MCP_NWC_URI` in the environment, never from a tool argument, and only inside `SATSGATE_MCP_MAX_PAYMENT_SATS` and `SATSGATE_MCP_DAILY_MAX_SATS`. USDC uses a separate pair, `SATSGATE_MCP_MAX_PAYMENT_USD` and `SATSGATE_MCP_DAILY_MAX_USD`. Both must be set before a `PAYMENT-SIGNATURE` is forwarded. This process holds no buyer key and does not sign. The agent retries `pay_and_fetch` with `payment_signature` from an external wallet. A token with uses or time left is reused. `token_used_up` comes back as a new quote unless `SATSGATE_MCP_AUTO_PAY` is on and the new invoice is inside the budget.
 
 An optional `sgr_` key enables read-only `challenge_status` and `credits_balance`. The key cannot top up or change the payee. Nothing in the x402 path asks for an account key. `list_sites` reads `GET /v1/sites` on the core URL: approved, listed sites, each with a gate URL and route prices. A USD-only route is included, with `price_currency` and `price_usd_atomic`. Set `SATSGATE_MCP_REGISTRY` to a JSON file or another URL only when that directory should be replaced.
 
-Core health is `0.17.0`. `GET /health` reports `0.17.0`. The MCP package is 0.11.0. It still cannot top up. Buying prepaid balance with USDC is `POST /v1/topup/usdc` on the core with the account key, not an MCP tool. While `SATSGATE_X402_CDP` is on, that top-up is Base mainnet USDC only. While it is off, it stays on Base Sepolia.
+Core health is `0.20.3`. `GET /health` reports `0.20.3`. The MCP package is 0.13.0. Works with core 0.20.3 or later and gate 0.15.2 or later. It still cannot top up. Buying prepaid balance with USDC is `POST /v1/topup/usdc` on the core with the account key, not an MCP tool. While `SATSGATE_X402_CDP` is on, that top-up is Base mainnet USDC only. While it is off, it stays on Base Sepolia.
 
 ```bash
 pip install -r mcp/requirements.txt

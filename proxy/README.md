@@ -2,7 +2,17 @@
 
 A reverse proxy a merchant runs beside an existing HTTP API. The buyer hits the proxy. The proxy sells the request through [satsgate](https://api.satsgate.org) and forwards only a paid request to the origin. The merchant does not write paywall code.
 
-The proxy is version **0.14.1**. Default `mode: paywall` talks to the satsgate core paywall (challenge, verify, status, charge, and x402 verify/settle). Core is **0.20.3**. The hosted gate is **0.15.2**. `mode: receipt` does not call core and does not use an API key. It checks `Satsgate-Receipt` with the site secret and forwards a successful check to the origin. The proxy does not sell prepaid balance and does not call the facilitator. Top up on the core with `POST /v1/topup/lightning` or `POST /v1/topup/usdc`. While the operator CDP switch is on, a USDC top-up is Base mainnet USDC only. The hosted gate is a separate program and only sells receipts. Buyer USDC on a proxied paywall route goes to the merchant's verified `payTo`. In receipt mode the buyer already paid the gate.
+The proxy is version **0.14.1**. It works with core 0.20.3 or later and with gate 0.15.2 or later. Default `mode: paywall` talks to the satsgate core paywall (challenge, verify, status, charge, and x402 verify/settle). `mode: receipt` does not call core and does not use an API key. It checks `Satsgate-Receipt` with the site secret and forwards a successful check to the origin. The proxy does not sell prepaid balance and does not call the facilitator. Top up on the core with `POST /v1/topup/lightning` or `POST /v1/topup/usdc`. While the operator CDP switch is on, a USDC top-up is Base mainnet USDC only. The hosted gate is a separate program and only sells receipts. Buyer USDC on a proxied paywall route goes to the merchant's verified `payTo`. In receipt mode the buyer already paid the gate.
+
+## Install
+
+```bash
+pip install satsgate-proxy
+uvx --env-file .env satsgate-proxy --config satsgate-proxy.yaml
+docker pull ghcr.io/mike-io-hash/satsgate-proxy:0.14.1
+```
+
+From a checkout: `pip install -e proxy`.
 
 ## USDC payments: Base network only
 
@@ -48,12 +58,7 @@ Satsgate never custodies, receives, forwards, or refunds buyer funds. The USDC m
 
    Startup logs `key fp` and 12 hex characters. That is the start of SHA-256 of the API key. It is not a prefix of the key, and the key itself is not written to the log.
 
-Without Docker, from a checkout:
-
-```bash
-pip install -r proxy/requirements.txt
-PYTHONPATH=proxy/src python -m satsgate_proxy --config proxy/satsgate-proxy.yaml
-```
+From a checkout: `pip install -e proxy`.
 
 The image listens as uid 65532. Build it from the repo root: `docker build -f proxy/Dockerfile -t satsgate-proxy:0.14.1 .`
 

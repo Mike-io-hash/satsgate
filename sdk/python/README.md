@@ -1,6 +1,16 @@
 # satsgate-sdk (Python)
 
-Python client for **satsgate** model B. A vendor opens an account, holds a prepaid balance in milisatoshis, and charges a live unlock from that balance. The balance is not money and is not redeemable for sats, USDC, or fiat. PyPI publication is forthcoming; install from this repo until then.
+Python client for **satsgate** model B. A vendor opens an account, holds a prepaid balance in milisatoshis, and charges a live unlock from that balance. The balance is not money and is not redeemable for sats, USDC, or fiat. Works with core 0.20.3 or later.
+
+```bash
+pip install satsgate-sdk
+```
+
+From a checkout: `pip install -e sdk/python`.
+
+## USDC payments: Base network only
+
+USDC payments use Base only. Ethereum mainnet, Polygon, Solana, Arbitrum, and any other chain are not accepted.
 
 ## Install (editable, from this repo)
 

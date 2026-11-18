@@ -6,6 +6,7 @@ import logging
 import shutil
 import subprocess
 import sys
+import sysconfig
 import tomllib
 import zipfile
 from pathlib import Path
@@ -90,9 +91,10 @@ def test_t_c_1_3_wheels_declare_apache_and_cli_license_matches(tmp_path: Path) -
 
 
 def test_t_c_1_4_versions_match() -> None:
+    """Pinned versions. T-D.1.3 below reuses this instead of copying it."""
     projects = {path: project for path, project in _projects()}
-    assert projects[ROOT / "cli" / "pyproject.toml"]["version"] == "0.1.0"
-    assert '__version__ = "0.1.0"' in _text(ROOT / "cli" / "src" / "satsgate" / "__init__.py")
+    assert projects[ROOT / "cli" / "pyproject.toml"]["version"] == "0.1.1"
+    assert '__version__ = "0.1.1"' in _text(ROOT / "cli" / "src" / "satsgate" / "__init__.py")
     assert projects[ROOT / "sdk" / "python" / "pyproject.toml"]["version"] == "0.10.0"
     assert '__version__ = "0.10.0"' in _text(ROOT / "sdk" / "python" / "src" / "satsgate_sdk" / "__init__.py")
     assert projects[ROOT / "proxy" / "pyproject.toml"]["version"] == "0.14.1"
@@ -101,6 +103,14 @@ def test_t_c_1_4_versions_match() -> None:
     assert '__version__ = "0.15.2"' in _text(ROOT / "gate" / "src" / "satsgate_gate" / "__init__.py")
     assert projects[ROOT / "mcp" / "pyproject.toml"]["version"] == "0.13.0"
     assert '__version__ = "0.13.0"' in _text(ROOT / "mcp" / "src" / "satsgate_mcp" / "__init__.py")
+
+
+def test_t_d_1_3_pyproject_version_equals_dunder_version() -> None:
+    """T-D.1.3: pyproject version == __version__ for all four packages.
+
+    Extends T-C.1.4. The assertions stay there so the two tests cannot drift.
+    """
+    test_t_c_1_4_versions_match()
 
 
 def test_t_c_1_5_proxy_is_a_hard_dependency_and_mcp_is_an_extra() -> None:
@@ -125,7 +135,7 @@ def test_t_c_1_6_installed_script_and_module_print_the_version(tmp_path: Path) -
     from satsgate_proxy import __version__ as proxy_version
     from satsgate_sdk import __version__ as sdk_version
 
-    assert satsgate.__version__ == "0.1.0"
+    assert satsgate.__version__ == "0.1.1"
     assert sdk_version == "0.10.0"
     assert proxy_version == "0.14.1"
     if shutil.which("python3") is None:
@@ -138,6 +148,13 @@ def test_t_c_1_6_installed_script_and_module_print_the_version(tmp_path: Path) -
     created = subprocess.run([sys.executable, "-m", "venv", "--system-site-packages", str(venv)], check=False)
     if created.returncode != 0:
         pytest.skip(f"cannot create a venv: exit {created.returncode}")
+    site = venv / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    site.mkdir(parents=True, exist_ok=True)
+    paths = sysconfig.get_paths()
+    visible = paths["purelib"]
+    if paths["platlib"] != visible:
+        visible += "\n" + paths["platlib"]
+    (site / "current-interpreter.pth").write_text(visible + "\n", encoding="utf-8")
     pip = venv / "bin" / "pip"
     python = venv / "bin" / "python"
     script = venv / "bin" / "satsgate"
@@ -147,16 +164,21 @@ def test_t_c_1_6_installed_script_and_module_print_the_version(tmp_path: Path) -
         capture_output=True,
         text=True,
     )
-    if installed.returncode != 0:
-        pytest.skip("cannot create a venv: " + installed.stderr[-500:])
+    # T-D.7.1: a failed pip install of the built wheels is a failure, not a skip.
+    assert installed.returncode == 0, installed.stderr[-500:]
     module = subprocess.run([str(python), "-m", "satsgate", "--version"], check=False, capture_output=True, text=True)
     command = subprocess.run([str(script), "--version"], check=False, capture_output=True, text=True)
     assert module.returncode == 0, module.stderr
     assert command.returncode == 0, command.stderr
     assert module.stdout == command.stdout
-    assert module.stdout.startswith("satsgate 0.1.0\n")
+    assert module.stdout.startswith("satsgate 0.1.1\n")
     assert "satsgate-sdk 0.10.0\n" in module.stdout
     assert "satsgate-proxy 0.14.1\n" in module.stdout
+
+
+def test_t_d_7_1_pip_install_failure_is_a_failure(tmp_path: Path) -> None:
+    """Same check as T-C.1.6. A broken dependency pin fails the test instead of skipping it."""
+    test_t_c_1_6_installed_script_and_module_print_the_version(tmp_path)
 
 
 def test_t_c_1_7_headline_is_in_the_package_and_the_readme() -> None:

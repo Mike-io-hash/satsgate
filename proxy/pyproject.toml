@@ -4,10 +4,10 @@ version = "0.14.1"
 description = "Charge AI agents in Lightning and USDC on the same 402. 500 free unlocks per UTC month. Self-hosted reverse proxy. Cobrale a agentes de IA en Lightning y USDC, en el mismo 402."
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "Apache-2.0"}
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 classifiers = [
   "Development Status :: 4 - Beta",
-  "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
@@ -30,7 +30,7 @@ Issues = "https://github.com/Mike-io-hash/satsgate/issues"
 Changelog = "https://github.com/Mike-io-hash/satsgate/blob/main/CHANGELOG.md"
 
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]

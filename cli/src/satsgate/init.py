@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
 import json
 import logging
 import os
@@ -32,16 +33,7 @@ def start_command(config: str = "satsgate-proxy.yaml") -> str:
     return f"uvx --env-file .env satsgate-proxy --config {config}"
 
 
-def from_source(config: str = "satsgate-proxy.yaml") -> str:
-    return (
-        "From a checkout, until the packages are published: "
-        "pip install -e sdk/python -e proxy && set -a && . ./.env && set +a && "
-        f"python -m satsgate_proxy --config {config}"
-    )
-
-
 START_COMMAND = start_command()
-FROM_SOURCE = from_source()
 _SNIPPETS = {
     "fastapi": (("satsgate_fastapi_verify.py", "fastapi_verify.py"),),
     "express": (("satsgate_express_verify.js", "express_verify.js"),),
@@ -297,25 +289,6 @@ def render_yaml(
     )
 
 
-def _next_minor(version: str) -> str:
-    major, minor, _patch = version.split(".")
-    return f"{major}.{int(minor) + 1}"
-
-
-def render_proxy_dockerfile() -> str:
-    """Pip install of the proxy. The published image is a later step."""
-    ceiling = _next_minor(proxy_version)
-    image = f"ghcr.io/mike-io-hash/satsgate-proxy:{proxy_version}"
-    return (
-        f"# Fallback until {image} is published (D). Do not publish this image from CI.\n"
-        "FROM python:3.12-slim\n"
-        "RUN pip install --no-cache-dir "
-        f'"satsgate-proxy>={proxy_version},<{ceiling}" \\\n'
-        "    && useradd --uid 65532 --create-home --shell /usr/sbin/nologin satsgate\n"
-        "USER 65532:65532\n"
-    )
-
-
 def _compose_source(root: Path, yaml_path: Path) -> str:
     try:
         relative = yaml_path.resolve().relative_to(root.resolve())
@@ -331,15 +304,20 @@ def render_compose(yaml_path: Path, root: Path) -> str:
     document = {
         "services": {
             "satsgate-proxy": {
-                "build": {"context": ".", "dockerfile": "Dockerfile.satsgate-proxy"},
-                "image": f"satsgate-proxy:{proxy_version}",
+                "image": image,
                 "env_file": ".env",
                 "read_only": True,
                 "user": "65532:65532",
                 "ports": ["127.0.0.1:8080:8080"],
-                # Joined so the source has no hardcoded temp-directory literal.
-                "tmpfs": ["/" + "tmp"],
-                "volumes": [f"{source}:/etc/satsgate/proxy.yaml:ro"],
+                "tmpfs": ["/tmp"],  # nosec B108 - tmpfs mount target inside the read-only container, not a host temp file
+                "volumes": [
+                    {
+                        "type": "bind",
+                        "source": source,
+                        "target": "/etc/satsgate/proxy.yaml",
+                        "read_only": True,
+                    }
+                ],
                 "entrypoint": [
                     "/bin/sh",
                     "-c",
@@ -352,9 +330,8 @@ def render_compose(yaml_path: Path, root: Path) -> str:
     }
     header = (
         "# satsgate-proxy for this project. Secrets are read from .env.\n"
-        f"# D target image: {image}\n"
-        "# Until that image is published, build Dockerfile.satsgate-proxy\n"
-        "# (a pip install of the same release). Do not publish from this repo.\n"
+        f"# The image is public on GHCR: {image}\n"
+        "# To build it yourself, use proxy/Dockerfile from the repo.\n"
         "# upstream.base_url 127.0.0.1 is this container, not the merchant app.\n"
         "# Use host.docker.internal when the app runs on the host.\n"
         "# The merchant YAML keeps host 127.0.0.1 for local uvx. This service\n"
@@ -829,7 +806,12 @@ def _probe_get(app: Any, route_path: str) -> httpx.Response:
             async with httpx.AsyncClient(transport=transport, base_url="http://satsgate-proxy") as client:
                 return await client.get(probe_path(route_path))
 
-    return asyncio.run(once())
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(once())
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(lambda: asyncio.run(once())).result()
 
 
 def _probe(
@@ -972,14 +954,18 @@ def _fill_next_steps(run: _Run, options: InitOptions) -> None:
     config = options.yaml_out or "satsgate-proxy.yaml"
     steps = [
         f"Start the proxy: {start_command(config)}",
-        from_source(config),
         "Add the origin check. Set SATSGATE_ORIGIN_SECRET on the origin from .env. "
         "A client that can reach the origin directly must fail closed.",
         "The packaged Caddy snippet is a note. It does not check the signature by itself.",
     ]
     if run.x402:
         if run.kept_usdc:
-            steps.append("USDC test mode stays on in the existing config. This run does not turn it off.")
+            steps.append(
+                "USDC test mode stays on in the existing config. This run does not turn it off. "
+                "To turn it off, delete the YAML and run init again. It is regenerated and the keys are reused. "
+                "Manual edits to the YAML are lost. To keep them, remove the route's `x402` and `x402_mode` "
+                "lines and restart the proxy instead."
+            )
         steps.append(
             "Pay once on Base Sepolia from a buyer agent (for example satsgate-mcp-pay, "
             "with the key on the buyer's machine). Test mode is free."
@@ -1225,16 +1211,6 @@ def _execute(options: InitOptions, console: _Console, transport: Any, run: _Run)
         if not _copy_snippets(run, root, console, options.framework or "none"):
             return
         if options.docker:
-            dockerfile = _place_file(
-                run,
-                root,
-                root / "Dockerfile.satsgate-proxy",
-                console,
-                render_proxy_dockerfile(),
-                step="write_dockerfile",
-            )
-            if dockerfile is None:
-                return
             compose = _place_file(
                 run,
                 root,

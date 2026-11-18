@@ -69,7 +69,7 @@ def _coinbase_allowed(line: str) -> bool:
     if "coinbase" not in lowered:
         return True
     normalized = re.sub(r"[^a-z0-9]+", " ", lowered)
-    if any(word in normalized for word in ("price", "rate", "quote", "spot")):
+    if re.search(r"\b(?:price|rate)\b", normalized) or any(word in normalized for word in ("quote", "spot")):
         return False
     return any(token in normalized for token in _COINBASE_OK)
 
@@ -79,6 +79,13 @@ def _kraken_is_the_connect_deposit_warning(path: Path, line: str) -> bool:
         return False
     lowered = line.lower()
     return "kraken" in lowered and "deposit address" in lowered
+
+
+def test_t_d_7_3_price_and_rate_are_whole_words() -> None:
+    """`separate` and `pricing` are not the words price and rate. A spot price still fails."""
+    assert _coinbase_allowed("Coinbase Smart Wallet stays separate from the account.")
+    assert _coinbase_allowed("The Coinbase wallet pricing note is only a label.")
+    assert not _coinbase_allowed("Prices use the Coinbase spot price.")
 
 
 def test_t_b_4_3_public_text_does_not_name_rate_sources() -> None:

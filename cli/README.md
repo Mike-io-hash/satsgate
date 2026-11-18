@@ -6,14 +6,12 @@ Charge AI agents in Lightning and USDC on the same 402. 500 free unlocks per UTC
 
 It does not ask for a seed, a private key, or a recovery phrase. It does not hold sats or USDC. The account key is not copied into the project `.env`. The project `.env` holds `SATSGATE_API_KEY` (`sgr_`) and `SATSGATE_ORIGIN_SECRET`.
 
-`satsgate` is not on PyPI yet (until Publicación D). From a checkout:
-
 ```bash
-pip install -e sdk/python -e proxy -e cli
-satsgate init
+uvx satsgate init
+pip install satsgate
 ```
 
-After publication: `uvx satsgate init`.
+From a checkout: `pip install -e sdk/python -e proxy -e cli`.
 
 ## Human and agent
 
@@ -42,9 +40,13 @@ Exit codes: 0 done, 1 the API or the network failed, 2 usage, 3 a human has to d
 
 A second run reuses the account and the keys. An existing YAML or snippet is not overwritten (agent exit 3 `file_exists`). A different `SATSGATE_*` value is exit 3 `env_conflict`. A symlink is refused. On Windows the run finishes and warns `permissions_not_restricted`; WSL is the supported way to get owner-only files.
 
-## USDC
+## USDC payments: Base network only
+
+USDC payments use Base only. Ethereum mainnet, Polygon, Solana, Arbitrum, and any other chain are not accepted.
 
 `--want-usdc` mints a one-time connect link when the EVM payee is not verified yet. A terminal prints the link once and can open it. Otherwise it is written to `.satsgate/connect-link.txt` and is not printed. After the payee is verified, a later run sets `x402: true` and `x402_mode: test`. The unpaid 402 then includes a Base Sepolia offer. Paying that offer is a later step for a buyer agent (`satsgate-mcp-pay`), with the key on the buyer's machine. Test mode is free.
+
+To turn USDC test mode off, delete the YAML and run `init` again. It is regenerated and the keys are reused. Manual edits to the YAML are lost. To keep them, remove the route's `x402` and `x402_mode` lines and restart the proxy instead.
 
 Lightning has no test network. A paid Lightning request moves real sats to the merchant's own address.
 
@@ -54,6 +56,6 @@ Lightning has no test network. A paid Lightning request moves real sats to the m
 uvx --env-file .env satsgate-proxy --config satsgate-proxy.yaml
 ```
 
-`--docker` writes `docker-compose.satsgate.yml` and `Dockerfile.satsgate-proxy`, and prints `docker compose -f docker-compose.satsgate.yml up`. The compose file names `ghcr.io/mike-io-hash/satsgate-proxy:0.14.1` as the image D will publish. Until that image exists, the Dockerfile installs `satsgate-proxy` with pip into `python:3.12-slim`. The generated service listens on `0.0.0.0`; the YAML written for `uvx` stays on `127.0.0.1`.
+`satsgate` 0.1.1. `--docker` writes `docker-compose.satsgate.yml` and prints `docker compose -f docker-compose.satsgate.yml up`. The compose file uses the public image `ghcr.io/mike-io-hash/satsgate-proxy:0.14.1`. To build that image yourself, use `proxy/Dockerfile` from the repo. The generated service listens on `0.0.0.0`; the YAML written for `uvx` stays on `127.0.0.1`. From a checkout: `pip install -e sdk/python -e proxy -e cli`.
 
 `--framework fastapi`, `express`, or `nginx` copies the existing origin check. A client that can reach the origin directly must fail closed. The Caddy file in the package is a note, not an HMAC check.
