@@ -4,6 +4,16 @@ A buyer-side MCP server. An agent (Claude Desktop, Cursor, or any stdio MCP clie
 
 This package is version **0.13.0**. It talks to whatever URL returned the 402. Works with core 0.20.3 or later. The self-hosted proxy is **0.14.1**. Works with gate 0.15.2 or later. On a gate host (`SATSGATE_MCP_GATE_HOSTS`, default `gate.satsgate.org`) `pay_and_fetch` pays the gate, keeps the receipt, and repeats the request at `redeem_url` when that host is on the allowlist. The receipt is not logged. A stored receipt is returned by `challenge_status`. The body sent to a gate host is not forwarded. A 402 may offer Lightning, x402 (USDC on Base), or both. One 402 lists one USDC network. `list_sites` includes a public route priced only in USD, with `price_currency` and `price_usd_atomic`. This process cannot buy Satsgate credits, and it does not hold a buyer private key. An account tops up on the core with `POST /v1/topup/lightning` or `POST /v1/topup/usdc`. While `SATSGATE_X402_CDP` is on, USDC top-up is Base mainnet only. While it is off, it is Base Sepolia. The USDC path is not an MCP tool.
 
+## Install
+
+```bash
+pip install satsgate-mcp
+```
+
+The console script is `satsgate-mcp`.
+
+From a checkout: `pip install -e mcp`.
+
 ## USDC payments: Base network only
 
 USDC payments use Base only. Ethereum mainnet, Polygon, Solana, Arbitrum, and any other chain are not accepted.
@@ -24,14 +34,14 @@ This MCP server does not send that USDC and does not hold a key. It shows the ne
 ## Run it
 
 ```bash
-pip install -r mcp/requirements.txt
+pip install satsgate-mcp
 export SATSGATE_MCP_DATA_DIR="$HOME/.local/share/satsgate-mcp"
 export SATSGATE_MCP_MAX_PAYMENT_SATS=100
 export SATSGATE_MCP_DAILY_MAX_SATS=500
-PYTHONPATH=mcp/src python -m satsgate_mcp
+satsgate-mcp
 ```
 
-`python -m satsgate_mcp` speaks MCP over stdio. Logs go to stderr. After `pip install -e mcp` the console script is `satsgate-mcp`.
+`satsgate-mcp` speaks MCP over stdio. Logs go to stderr. From a checkout: `pip install -e mcp`.
 
 Claude Desktop or Cursor config:
 

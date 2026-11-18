@@ -86,6 +86,18 @@ def test_t_d_11_4_new_public_text_stays_plain() -> None:
         assert banned not in blob
 
 
+def test_i5_proxy_and_mcp_publish_an_install_section() -> None:
+    proxy = (ROOT / "proxy" / "README.md").read_text(encoding="utf-8")
+    mcp = (ROOT / "mcp" / "README.md").read_text(encoding="utf-8")
+    assert "## Install" in proxy
+    assert "pip install satsgate-proxy" in proxy
+    assert "uvx --env-file .env satsgate-proxy --config" in proxy
+    assert "docker pull ghcr.io/mike-io-hash/satsgate-proxy:0.14.1" in proxy
+    assert "## Install" in mcp
+    assert "pip install satsgate-mcp" in mcp
+    assert "satsgate-mcp" in mcp
+
+
 def test_t_d_11_3_usdc_readmes_name_base_only() -> None:
     for rel in (
         "README.md",
