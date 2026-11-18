@@ -315,22 +315,29 @@ jobs:
           VER: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
-          url="https://test.pypi.org/pypi/${DIST}/${VER}/json"
-          ok=0
+          got="${RUNNER_TEMP}/from-testpypi"
+          ready=0
           for _ in $(seq 1 30); do
-            code="$(curl -sS -o "${RUNNER_TEMP}/meta.json" -w "%{http_code}" --max-time 20 "${url}" || echo 000)"
-            if [[ "${code}" == "200" ]]; then
-              ok=1
+            rm -rf "${got}"
+            set +e
+            python scripts/release/fetch_published.py \
+              --index testpypi \
+              --name "${DIST}" \
+              --version "${VER}" \
+              --sums incoming/SHA256SUMS \
+              --dest "${got}"
+            code="$?"
+            set -e
+            if [[ "${code}" == "0" ]]; then
+              ready=1
               break
+            fi
+            if [[ "${code}" != "2" ]]; then
+              exit "${code}"
             fi
             sleep 10
           done
-          [[ "${ok}" == "1" ]]
-          got="${RUNNER_TEMP}/from-testpypi"
-          mkdir -p "${got}"
-          python -m pip download --no-deps --index-url https://test.pypi.org/simple/ --only-binary=:all: --dest "${got}" "${DIST}==${VER}"
-          python -m pip download --no-deps --index-url https://test.pypi.org/simple/ --no-binary=:all: --dest "${got}" "${DIST}==${VER}"
-          python scripts/release/hashes.py incoming/SHA256SUMS "${got}"
+          [[ "${ready}" == "1" ]]
           python -m venv "${RUNNER_TEMP}/smoke"
           python scripts/release/smoke_install.py \
             --python "${RUNNER_TEMP}/smoke/bin/python" \
@@ -410,22 +417,29 @@ jobs:
           REHEARSE: ${{ needs.plan.outputs.rehearse }}
         run: |
           set -euo pipefail
-          url="https://pypi.org/pypi/${DIST}/${VER}/json"
-          ok=0
+          got="${RUNNER_TEMP}/from-pypi"
+          ready=0
           for _ in $(seq 1 30); do
-            code="$(curl -sS -o "${RUNNER_TEMP}/meta.json" -w "%{http_code}" --max-time 20 "${url}" || echo 000)"
-            if [[ "${code}" == "200" ]]; then
-              ok=1
+            rm -rf "${got}"
+            set +e
+            python scripts/release/fetch_published.py \
+              --index pypi \
+              --name "${DIST}" \
+              --version "${VER}" \
+              --sums incoming/SHA256SUMS \
+              --dest "${got}"
+            code="$?"
+            set -e
+            if [[ "${code}" == "0" ]]; then
+              ready=1
               break
+            fi
+            if [[ "${code}" != "2" ]]; then
+              exit "${code}"
             fi
             sleep 10
           done
-          [[ "${ok}" == "1" ]]
-          got="${RUNNER_TEMP}/from-pypi"
-          mkdir -p "${got}"
-          python -m pip download --no-deps --index-url https://pypi.org/simple/ --only-binary=:all: --dest "${got}" "${DIST}==${VER}"
-          python -m pip download --no-deps --index-url https://pypi.org/simple/ --no-binary=:all: --dest "${got}" "${DIST}==${VER}"
-          python scripts/release/hashes.py incoming/SHA256SUMS "${got}"
+          [[ "${ready}" == "1" ]]
           python -m venv "${RUNNER_TEMP}/smoke"
           python scripts/release/smoke_install.py \
             --python "${RUNNER_TEMP}/smoke/bin/python" \
