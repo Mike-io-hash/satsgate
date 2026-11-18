@@ -25,6 +25,23 @@ def test_t_d_8_2_rendered_2026_11_13_matches_the_golden(tmp_path: Path) -> None:
     assert (dest / "2026-11-13" / "terms.css").read_bytes() == GOLDEN_CSS.read_bytes()
 
 
+def test_n3_the_current_frozen_source_must_match_and_odd_names_fail(tmp_path: Path) -> None:
+    current = (ROOT / "docs" / "hosted-gate-terms.md").read_text(encoding="utf-8")
+    source = tmp_path / "hosted-gate-terms.md"
+    terms = tmp_path / "terms"
+    terms.mkdir()
+    source.write_text(current, encoding="utf-8")
+    (terms / "2026-11-13.md").write_text(current + "\nA drifted sentence.\n", encoding="utf-8")
+    drifted = _run("--source", str(source), "--terms-dir", str(terms), "--dest", str(tmp_path / "drift"))
+    assert drifted.returncode != 0
+    assert "identical" in drifted.stderr
+    (terms / "2026-11-13.md").write_text(current, encoding="utf-8")
+    (terms / "notes.md").write_text("not a dated source\n", encoding="utf-8")
+    odd = _run("--source", str(source), "--terms-dir", str(terms), "--dest", str(tmp_path / "odd"))
+    assert odd.returncode != 0
+    assert "notes.md" in odd.stderr
+
+
 def test_t_d_8_1_a_later_date_keeps_the_frozen_snapshot(tmp_path: Path) -> None:
     current = (ROOT / "docs" / "hosted-gate-terms.md").read_text(encoding="utf-8")
     frozen = (ROOT / "docs" / "terms" / "2026-11-13.md").read_text(encoding="utf-8")
