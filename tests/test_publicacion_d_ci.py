@@ -33,6 +33,7 @@ _DROP = (
     ".git/config",
     "backups/db.sqlite3",
     "node_modules/leftpad/index.js",
+    "cli/.satsgate/account.env",
     "web/connect/dist/index.html",
 )
 _KEEP_EXTRA = (".env.example", "proxy/.env.example")

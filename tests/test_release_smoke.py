@@ -101,6 +101,23 @@ def test_console_script_is_next_to_the_venv_python_symlink(tmp_path: Path) -> No
         os.environ["PATH"] = previous
 
 
+def test_n4_main_runs_pip_check(tmp_path: Path) -> None:
+    check = _load("smoke_check")
+    python = tmp_path / "python"
+    python.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        "  -c) echo 0.1.1; exit 0 ;;\n"
+        "  -m) echo pip-broken >&2; exit 1 ;;\n"
+        "esac\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    code = check.main(["--python", str(python), "--module", "satsgate", "--version", "0.1.1", "--commands", ""])
+    assert code == 1
+
+
 def test_init_probe_on_a_closed_port_writes_no_key(tmp_path: Path) -> None:
     check = _load("smoke_check")
     env_python = os.environ.get("PYTHONPATH", "")
