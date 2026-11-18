@@ -16,7 +16,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 # SDK
-pip install -e sdk/python
+pip install satsgate-sdk
 
 # only needed to run this FastAPI example
 pip install fastapi uvicorn[standard]

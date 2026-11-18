@@ -1,7 +1,7 @@
 [project]
 name = "satsgate-proxy"
-version = "0.14.1"
-description = "Charge AI agents in Lightning and USDC on the same 402. 500 free unlocks per UTC month. Self-hosted reverse proxy. Cobrale a agentes de IA en Lightning y USDC, en el mismo 402."
+version = "0.14.2"
+description = "Charge AI agents in Lightning and USDC on the same 402. Payments go straight to your wallet. 500 free unlocks a month."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"

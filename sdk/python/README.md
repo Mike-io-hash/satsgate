@@ -1,36 +1,28 @@
 # satsgate-sdk (Python)
 
-Python client for **satsgate** model B. A vendor opens an account, holds a prepaid balance in milisatoshis, and charges a live unlock from that balance. The balance is not money and is not redeemable for sats, USDC, or fiat. Works with core 0.20.3 or later.
+Charge AI agents in Lightning and USDC on the same 402. Payments go straight to your wallet. 500 free unlocks a month.
+
+Python client for **Satsgate** model B. A vendor opens an account, holds a prepaid balance in millisatoshis, and charges a live unlock from that balance. The balance is not money and is not redeemable for sats, USDC, or fiat. Works with core 0.20.3 or later.
 
 ```bash
 pip install satsgate-sdk
 ```
 
-From a checkout: `pip install -e sdk/python`.
-
 ## USDC payments: Base network only
 
 USDC payments use Base only. Ethereum mainnet, Polygon, Solana, Arbitrum, and any other chain are not accepted.
 
-## Install (editable, from this repo)
-
-```bash
-# from the satsgate repo root
-python3 -m venv .venv
-source .venv/bin/activate
-
-pip install -e sdk/python
-```
-
 ## Account and top-up
+
+Point `base_url` at `http://127.0.0.1:8000` only when a local core is running. The examples below use the hosted API.
 
 `create_account(base_url=...)` calls `POST /v1/accounts` with no API key and an empty body. The response includes `api_key` (shown once), `client_id`, `balance_msat`, `balance_sats`, and `estimated_unlocks_remaining`. A 429 is raised. The client does not retry.
 
 ```python
 from satsgate_sdk import SatsgateClient, create_account
 
-opened = create_account(base_url="http://127.0.0.1:8000")
-sg = SatsgateClient(base_url="http://127.0.0.1:8000", api_key=opened["api_key"])
+opened = create_account(base_url="https://api.satsgate.org")
+sg = SatsgateClient(base_url="https://api.satsgate.org", api_key=opened["api_key"])
 print(sg.balance()["balance_msat"], sg.balance()["estimated_unlocks_remaining"])
 
 # Lightning: minimum 1,000 sats. The 402 body includes invoice, macaroon,
@@ -49,10 +41,10 @@ offer = sg.topup_usdc(usd="1.00")
 ```python
 from satsgate_sdk import SatsgateClient
 
-sg = SatsgateClient(base_url="http://127.0.0.1:8000", api_key="sg_...")
+sg = SatsgateClient(base_url="https://api.satsgate.org", api_key="sg_...")
 
 # 1) Register payee (once)
-sg.set_payee("burlybakery53@walletofsatoshi.com")
+sg.set_payee("merchant@pay.example")
 
 # One-time browser link for a USDC payee. The URL is not logged.
 # link = sg.create_connect_link()
@@ -89,7 +81,7 @@ print(sg.ledger(limit=50))
 # 5) Restricted key for a proxy or MCP server (account key only).
 # The secret is in created["api_key"] and is not shown again.
 # created = sg.create_api_key(label="blog-proxy", resource_prefix="blog/")
-# proxy = SatsgateClient(base_url="http://127.0.0.1:8000", api_key=created["api_key"])
+# proxy = SatsgateClient(base_url="https://api.satsgate.org", api_key=created["api_key"])
 # proxy.paywall_challenge(resource="blog/post", amount_sats=10)
 # sg.revoke_api_key(created["key"]["id"])
 ```
@@ -128,4 +120,8 @@ The demo seller is `sdk/python/examples/receipt_seller.py`. `x402-test` is mount
 ## Cache
 
 `paywall_verify(..., use_cache=True)` remembers a successful `payment_hash` until `cache_until`.
-Older servers only return `valid_until`, and the SDK falls back to that. The cache is there so a busy route does not call satsgate on every request. It is not how long the buyer may use your product. `valid_until` is the macaroon expiry caveat. `claim_until` is the latest time a first unlock is accepted.
+Older servers only return `valid_until`, and the SDK falls back to that. The cache is there so a busy route does not call Satsgate on every request. It is not how long the buyer may use your product. `valid_until` is the macaroon expiry caveat. `claim_until` is the latest time a first unlock is accepted.
+
+## Contributors' note
+
+From a checkout: `pip install -e sdk/python`.

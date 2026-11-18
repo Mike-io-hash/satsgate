@@ -1,18 +1,20 @@
 # satsgate-proxy
 
+Charge AI agents in Lightning and USDC on the same 402. Payments go straight to your wallet. 500 free unlocks a month.
+
 A reverse proxy a merchant runs beside an existing HTTP API. The buyer hits the proxy. The proxy sells the request through [satsgate](https://api.satsgate.org) and forwards only a paid request to the origin. The merchant does not write paywall code.
 
-The proxy is version **0.14.1**. It works with core 0.20.3 or later and with gate 0.15.2 or later. Default `mode: paywall` talks to the satsgate core paywall (challenge, verify, status, charge, and x402 verify/settle). `mode: receipt` does not call core and does not use an API key. It checks `Satsgate-Receipt` with the site secret and forwards a successful check to the origin. The proxy does not sell prepaid balance and does not call the facilitator. Top up on the core with `POST /v1/topup/lightning` or `POST /v1/topup/usdc`. While the operator CDP switch is on, a USDC top-up is Base mainnet USDC only. The hosted gate is a separate program and only sells receipts. Buyer USDC on a proxied paywall route goes to the merchant's verified `payTo`. In receipt mode the buyer already paid the gate.
+The proxy is version **0.14.2**. It works with core 0.20.3 or later and with gate 0.15.2 or later. Default `mode: paywall` talks to the satsgate core paywall (challenge, verify, status, charge, and x402 verify/settle). `mode: receipt` does not call core and does not use an API key. It checks `Satsgate-Receipt` with the site secret and forwards a successful check to the origin. The proxy does not sell prepaid balance and does not call the facilitator. Top up on the core with `POST /v1/topup/lightning` or `POST /v1/topup/usdc`. While the operator CDP switch is on, a USDC top-up is Base mainnet USDC only. The hosted gate is a separate program and only sells receipts. Buyer USDC on a proxied paywall route goes to the merchant's verified `payTo`. In receipt mode the buyer already paid the gate.
 
 ## Install
 
 ```bash
 pip install satsgate-proxy
 uvx --env-file .env satsgate-proxy --config satsgate-proxy.yaml
-docker pull ghcr.io/mike-io-hash/satsgate-proxy:0.14.1
+docker pull ghcr.io/mike-io-hash/satsgate-proxy:0.14.2
 ```
 
-From a checkout: `pip install -e proxy`.
+`satsgate init --docker` writes a compose file for that image. The minor tag is `ghcr.io/mike-io-hash/satsgate-proxy:0.14`.
 
 ## USDC payments: Base network only
 
@@ -21,7 +23,7 @@ USDC payments use Base only. Ethereum mainnet, Polygon, Solana, Arbitrum, and an
 | Network | Network id | Circle USDC contract | Status |
 | --- | --- | --- | --- |
 | Base Sepolia (testnet) | `eip155:84532` | [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e) | Testing. `x402: true` without `x402_mode`, or `x402_mode: test`, offers only this USDC. It is not a network for real buyers. |
-| Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | `x402_mode: live`. Available only when the operator sets `SATSGATE_X402_CDP=1` and both CDP credentials. The 402 offers only this USDC. |
+| Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | Live mode (on by default on api.satsgate.org; a self-hosted core needs `SATSGATE_X402_CDP=1` and CDP credentials, see docs/self-hosting.md). The 402 offers only this USDC. |
 
 Merchants: `payTo` must be an address you control on Base. Prove it with the same EVM challenge the hosted gate uses. The USDC is paid to that address on the one network the route is in. Try on Base Sepolia with your agent first, then switch the site to live. Buyers: USDC sent on another network will not be accepted. A balance on Ethereum, Polygon, Solana, or Arbitrum does not pay this proxy.
 
@@ -51,16 +53,14 @@ Satsgate never custodies, receives, forwards, or refunds buyer funds. The USDC m
    ```bash
    export SATSGATE_API_KEY='sgr_...'
    export SATSGATE_ORIGIN_SECRET="$(openssl rand -hex 32)"
-   docker compose -f proxy/docker-compose.yml up --build
+   uvx --env-file .env satsgate-proxy --config satsgate-proxy.yaml
    ```
 
-   Buyers use the proxy's published port. `GET /healthz` is the proxy (`{"ok":true,"component":"satsgate-proxy","version":"0.14.1"}`). It is not forwarded.
+   Buyers use the proxy's published port. `GET /healthz` is the proxy (`{"ok":true,"component":"satsgate-proxy","version":"0.14.2"}`). It is not forwarded.
 
    Startup logs `key fp` and 12 hex characters. That is the start of SHA-256 of the API key. It is not a prefix of the key, and the key itself is not written to the log.
 
-From a checkout: `pip install -e proxy`.
-
-The image listens as uid 65532. Build it from the repo root: `docker build -f proxy/Dockerfile -t satsgate-proxy:0.14.1 .`
+The image listens as uid 65532.
 
 ## Receipt mode
 
@@ -181,7 +181,11 @@ A retry of the same token takes another use when the bundle still has one. A `pe
 - `Accept-Encoding` is forced to `identity`. The proxy does not gzip.
 - `Location` is always removed. An origin that redirects the buyer has to use a URL in the body, or not redirect.
 - An origin failure does not burn the use. A retry after a lost 2xx can take another use if the first charge succeeded and the buyer did not see it. Credits are never refunded. There is no idempotency key.
-- Aperture cannot verify satsgate macaroons. lnget and `fetch402` can, using the 402 header and `mac:preimage`. A phone wallet uses the macaroon-only poll.
+- Aperture cannot verify Satsgate macaroons. lnget and `fetch402` can, using the 402 header and `mac:preimage`. A phone wallet uses the macaroon-only poll.
+
+## Contributors' note
+
+From a checkout: `pip install -e proxy`. Build the image from the repo root with `docker build -f proxy/Dockerfile -t satsgate-proxy:0.14.2 .`, or `docker compose -f proxy/docker-compose.yml up --build`.
 - Replicas of the proxy do not need shared state. Uses, buyer limits, and challenge reuse live in the core database. The core's in-memory challenge rate limit is per core process.
 - The macaroon-only path decodes the macaroon to learn the payment hash. A garbage token becomes a fresh 402.
 - `scope: site` cannot mix prices. `scope: route` tokens do not unlock other routes.
@@ -195,5 +199,5 @@ Use 1 to 21 sats on a test route. Pay from a different wallet than the payee.
 - **Alby `fetch402`.** The macaroon is treated as opaque. The retry includes the preimage. The macaroon base64 does not contain the substrings `L402` or `LSAT` (the core re-rolls those).
 - **Phone wallet.** Pay the invoice without a preimage. Retry `Authorization: L402 <macaroon>` until `payment_pending` stops and the origin responds. `Retry-After` is present while pending, and a second invoice is not minted.
 - A used `per_request` token gets a new **402**, not 401.
-- The payee receives the sats when the invoice is paid. The account loses **one** credit on the first successful delivery only, after the origin returns 2xx. A second use of a bundle does not charge another credit. A failed origin takes no credit.
+- The payee receives the sats when the invoice is paid. The unlock fee is debited from the prepaid service balance (or the monthly free quota) on the first successful delivery only, after the origin returns 2xx. A second use of a bundle does not debit again. A failed origin takes nothing.
 - Against hosted core, the proxy sends `X-Satsgate-Buyer-Ip` and it is ignored unless that egress IP was added to `SATSGATE_TRUSTED_PROXIES`. Record what you observed.

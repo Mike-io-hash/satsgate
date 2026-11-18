@@ -5,7 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Publicación D] - 2026-11-17
+## [Package patch releases] - 2026-11-18
+
+Documentation and package metadata improvements.
+
+`satsgate-sdk` 0.10.1, `satsgate-proxy` 0.14.2, `satsgate-mcp` 0.13.1, and `satsgate` 0.1.2.
+
+Core stays 0.20.3 and the hosted gate 0.15.2. No production change.
+
+- Clearer README.
+- API reference moved to `docs/api.md` and self-hosting to `docs/self-hosting.md`.
+- Updated install instructions (published packages and the GHCR image).
+- Metadata cleanup.
+- Example values replaced with placeholders.
+- Deploy notes renamed.
+- Publishing guide updated.
+- `satsgate-mcp --help` and `--version`.
+
+## [Release workflows] - 2026-11-17
 
 Core stays **0.20.3** and the hosted gate stays **0.15.2**. This pull request adds the release workflows and the proxy image workflow. It publishes nothing: no PyPI, TestPyPI, or GHCR upload, and no tag or release. The date is the ART date of this change.
 
@@ -18,7 +35,7 @@ Core stays **0.20.3** and the hosted gate stays **0.15.2**. This pull request ad
 
 ## [0.20.3] - 2026-11-17
 
-Core **0.20.3**. Hosted gate stays **0.15.2**. Packages were not published. `satsgate init` is not installable from PyPI until Publicación D.
+Core **0.20.3**. Hosted gate stays **0.15.2**. Packages were not published. `satsgate init` is not installable from PyPI until the release workflows.
 
 ### Fixed
 - USDC test payments through a self-hosted proxy no longer use quota or balance.
@@ -62,7 +79,7 @@ Core **0.20.1**. Hosted gate stays **0.15.2**. Python SDK **0.8.0**, self-hosted
 - Buyer quotes follow the same effective rate as accounting. An offer that was already issued still keeps the amount and the fee that were locked on it.
 
 ### Removed
-- CoinGecko, and `SATSGATE_COINGECKO_API_KEY`. Core 0.20.0 had used CoinGecko for its own USDC math.
+- The previous third-party price API, and its API key setting. Core 0.20.0 had used that API for its own USDC math. The setting was removed.
 
 ### Added
 - Optional `SATSGATE_BASE_RPC_FALLBACK_URL`, empty by default. Same https rules as `SATSGATE_BASE_RPC_URL`. It is tried once when the primary Base RPC does not answer.
@@ -83,7 +100,7 @@ Core **0.20.0**, hosted gate **0.15.2**, Python SDK **0.8.0**, self-hosted proxy
 ### Added
 - 500 free successful live unlocks per UTC month, shared by accounts that pay out to the same Lightning Address or the same verified EVM address. Prepaid is charged only after that quota. The fee is locked when the challenge is issued.
 - A conversion tool, `python -m app.migrate_credits_to_msat`, turns existing credits into 2,000 msat each. It does not open a database it was not given. Production apply is a later step and needs a separate OK.
-- Accounting BTC rate (CoinGecko, with the buyer median as backup) for Satsgate's own USDC math. A missing or stale rate rejects a USDC top-up and a live USDC-priced challenge with `503` `rate_unavailable`. It does not stop Lightning.
+- Accounting BTC rate (a third-party price API, with an exchange median (internal backup) as backup) for Satsgate's own USDC math. A missing or stale rate rejects a USDC top-up and a live USDC-priced challenge with `503` `rate_unavailable`. It does not stop Lightning.
 - Seller advice: `add_lightning` under US$0.01, and `balance_low` / `balance_zero` on the account. These are not attached to a buyer 402.
 - `POST /v1/admin/clients/{id}/refund` credits prepaid balance. It does not pay Lightning or USDC out. The audit line does not include the admin token. Automatic repair credits a second debit or a debit with no settlement.
 - Webhook kinds `balance.low` and `balance.zero`, edge-triggered.
@@ -193,7 +210,7 @@ Core 0.16.0. The gate stays 0.14.0, the proxy stays 0.13.0, and satsgate-mcp sta
 - `satsgate-proxy` 0.13.0 sends `x402_mode` (`test` or `live`). `x402: true` without a mode is test. A mode without `x402: true` refuses to start.
 
 ### Changed
-- The draft terms in `docs/hosted-gate-terms.md` now say that a facilitator can reject a USDC payment, including after the origin ran; that illegal or sanctioned content can be taken down; that credits are not money and are not redeemable; and that the service is not anonymous. On the hosted gate, a credit and a use are taken only after the origin returns 2xx, and for USDC only after settle. A failed origin takes neither. The buyer retries the same macaroon or signature. Lightning sats still reach the merchant when the invoice is paid. Satsgate does not refund buyers. The draft is still pending legal review.
+- The draft terms in `docs/hosted-gate-terms.md` now say that a facilitator can reject a USDC payment, including after the origin ran; that illegal or sanctioned content can be taken down; that credits are not money and are not redeemable; and that payments are not private. On the hosted gate, a credit and a use are taken only after the origin returns 2xx, and for USDC only after settle. A failed origin takes neither. The buyer retries the same macaroon or signature. Lightning sats still reach the merchant when the invoice is paid. Satsgate does not refund buyers. The draft is still pending legal review.
 
 Those notes describe core 0.15.0. Current health is at the top of Unreleased. The hosted gate is 0.14.0. The self-hosted proxy is 0.13.0. satsgate-mcp stays 0.11.0. Copy `satsgate.sqlite3` before restart. Rebuild the core image, the gate image, and the proxy image. Rollback of that release is `SATSGATE_X402_CDP=0` and a core restart. Live sites stop offering USDC. Test mode and Lightning keep working. The column stays.
 
@@ -227,6 +244,8 @@ To turn x402 on, with the account key: `POST /v1/client/payee/evm/challenge` wit
 
 ## [0.14.2] - 2026-10-23
 
+Core 0.14.2 and proxy 0.12.0 add no migration and no new environment variable.
+
 ### Changed
 - `satsgate-proxy` 0.12.0 matches the hosted gate's charge timing and offers both rails. An unpaid request is still HTTP 402. Lightning keeps `WWW-Authenticate`. When a route sets `x402: true` and the account has a verified EVM payee, the same 402 also carries `PAYMENT-REQUIRED` (x402 v2, scheme `exact`, Base Sepolia USDC, `payTo` that address, amount derived from the sats price). The proxy confirms a Lightning payment, or asks core to verify a `PAYMENT-SIGNATURE`, then calls the origin. One credit is taken only after that response is 2xx: `POST /v1/paywall/charge` for Lightning, and `POST /v1/paywall/x402/settle` for USDC. A 4xx or 5xx from the origin is returned as that status and body. Nothing is debited and nothing is settled. The same macaroon, or the same `PAYMENT-SIGNATURE`, can be retried. A redirect, timeout, or oversized body is 502 or 504 with `use_spent: false`. `PAYMENT-RESPONSE` is `success`, `transaction`, `network`, and `payer`, with `tx` repeating the hash. The proxy does not call the facilitator. Buyer USDC goes to the merchant `payTo`.
 - `POST /v1/paywall/verify` and `GET /v1/paywall/status` still debit when `charge` is omitted or true, so proxy 0.8.0 keeps its old behaviour on this core. The new proxy sends `charge=false` and charges afterwards.
@@ -238,11 +257,11 @@ To turn x402 on, with the account key: `POST /v1/client/payee/evm/challenge` wit
 ## [0.14.1] - 2026-10-22
 
 ### Changed
-- Hosted gate 0.13.0 charges a Lightning credit only after the origin returns 2xx. Core confirms the preimage or LUD-21 proof first (`settled_at` is set, the credit stays), the gate calls the origin, and `POST /internal/gate/charge` then takes one use and, on the first success, one credit. A 4xx or 5xx from the origin is returned as that status and does not debit. A redirect, timeout, rebind, or oversized body is 502 or 504 with `use_spent: false`. The same macaroon retries inside its validity. `max_uses` still allows one successful delivery. Two concurrent retries debit once. The merchant pays a Satsgate credit only for a successful delivery. Buyer sats already went to the merchant's own node. Satsgate does not custody them and does not refund them.
+- Hosted gate 0.13.0 charges a Lightning credit only after the origin returns 2xx. Core confirms the preimage or LUD-21 proof first (`settled_at` is set, the credit stays), the gate calls the origin, and `POST /internal/gate/charge` then takes one use and, on the first success, one credit. A 4xx or 5xx from the origin is returned as that status and does not debit. A redirect, timeout, rebind, or oversized body is 502 or 504 with `use_spent: false`. The same macaroon retries inside its validity. `max_uses` still allows one successful delivery. Two concurrent retries debit once. The merchant pays a Satsgate credit only for a successful delivery. Buyer sats already went to the merchant's Lightning Address. Satsgate does not custody them and does not refund them.
 - The self-hosted proxy is unchanged at 0.8.0. `POST /v1/paywall/verify` still debits on the first settled call, which is what the proxy uses before it forwards. An old gate that still sends `consume=true` keeps that earlier debit. Rebuild the gate image and the core image together.
 - A gate-route x402 offer uses `SATSGATE_X402_OFFER_SECONDS` clamped to 60–300 (default 60), the same window as a USDC credit pack. That clock is not the Lightning invoice expiry. A reused invoice whose x402 quote has expired gets a new short quote. The BOLT11 invoice and the macaroon claim window stay as they were.
 - The per-buyer open-challenge cap counts only unexpired, unused challenges. Lightning and x402 are counted separately, each against `SATSGATE_BUYER_MAX_OPEN_CHALLENGES` (default 5). An expired offer does not count. A settled Lightning invoice does not count. An x402 offer that already charged a credit does not count. `Retry-After` is the soonest expiry of the rows that still count, not the expiry plus the claim grace and not the 48 hour claim cap. The per-minute rate still counts recent creates on both rails together. The account-wide cap uses the same unexpired, unused rule and the same soonest-expiry `Retry-After`.
-- `PAYMENT-RESPONSE` follows the x402 v2 settlement response: `success`, `transaction`, `network`, and `payer`. `transaction` is the spec name ([coinbase/x402 `specs/x402-specification-v2.md`](https://github.com/coinbase/x402/blob/main/specs/x402-specification-v2.md), section 5.3). `tx` repeats the same hash for this release. The gate copies the header. Core top-up uses the same document.
+- `PAYMENT-RESPONSE` follows the x402 v2 settlement response: `success`, `transaction`, `network`, and `payer`. `transaction` is the name in the x402 v2 specification, section 5.3. `tx` repeats the same hash for this release. The gate copies the header. Core top-up uses the same document.
 
 `GET /health` reports `0.14.1`. `GET /healthz` on the gate reports `0.13.0`. No migration and no new environment variable. `SATSGATE_X402_OFFER_SECONDS` is the existing setting. Copy `satsgate.sqlite3` before restart if you want a rollback point. Restart core and the gate together. The proxy image does not need a rebuild. Leave the facilitator at `https://x402.org/facilitator`.
 
@@ -251,7 +270,7 @@ To turn x402 on, with the account key: `POST /v1/client/payee/evm/challenge` wit
 ### Added
 - `GET /v1/topup/{plan_id}/x402` sells the same credit pack for USDC on Base Sepolia. The account key is required. A restricted key cannot buy credits. With no `PAYMENT-SIGNATURE`, the response is 402 and `PAYMENT-REQUIRED` (x402 v2, scheme `exact`, asset Base Sepolia USDC, `payTo` `SATSGATE_TREASURY_EVM_ADDRESS`, amount the pack's sats price converted with the live BTC/USD median). `maxTimeoutSeconds` follows `SATSGATE_X402_OFFER_SECONDS`, clamped to 60–300. With `PAYMENT-SIGNATURE`, core checks the payload against that locked offer, asks the existing facilitator to verify and then settle, and grants the pack only after settle succeeds. The buyer response carries `PAYMENT-RESPONSE`.
 - The quote rounds up to the next USDC atomic unit (6 decimals), the same way a route quote rounds. Below $0.001 is not offered. Above $1,000,000 is not offered. The $100 route cap does not apply, because a pack price is not merchant input. The integer is locked on the offer. A later median does not change it. A missing or stale median is 503 `rate_unavailable` on this path only. Lightning top-up is unchanged.
-- One EIP-3009 nonce (network, asset, payer, nonce on `x402_authorizations`) can grant credits once. A second submit is 409 `x402_replay`. A duplicate still in flight is 409 `x402_in_progress`. The ledger reason is `topup_x402`, with the tx hash, network, and atomic amount. Credits stay closed-loop and are not redeemable for USDC. There is no withdrawal. Satsgate does not run a facilitator and does not forward anyone else's funds. This payment is the client buying Satsgate credits, so the USDC is paid to Satsgate's own treasury.
+- One EIP-3009 nonce (network, asset, payer, nonce on `x402_authorizations`) can grant credits once. A second submit is 409 `x402_replay`. A duplicate still in flight is 409 `x402_in_progress`. The ledger reason is `topup_x402`, with the tx hash, network, and atomic amount. Credits stay closed-loop and are not redeemable for USDC. There is no withdrawal. Satsgate does not run a facilitator and does not forward anyone else's funds. This payment is the client loading a prepaid service balance, so the USDC is paid to Satsgate's own treasury.
 
 `GET /health` reports `0.14.0`. Startup adds `resource_url` and `grant_credits` on `payment_offers`, `rail`, `tx_hash`, `amount_usd_atomic`, and `network` on `topups`, and `network` and `amount_usd_atomic` on `ledger`. No new table. Copy `satsgate.sqlite3` before restart if you want a rollback point. Leave `SATSGATE_TREASURY_EVM_ADDRESS` unset and the USDC pack route answers `x402_topup_disabled`. Lightning top-up keeps working. An invalid address does the same, and does not stop the process. The gate image does not need a rebuild for this release. Restart the core image. Keep `SATSGATE_X402_FACILITATOR_URL` at `https://x402.org/facilitator` and `SATSGATE_X402_NETWORK` at `eip155:84532`.
 
@@ -265,12 +284,12 @@ To turn x402 on, with the account key: `POST /v1/client/payee/evm/challenge` wit
 ## [0.13.0] - 2026-10-20
 
 ### Added
-- `GET /v1/rates`, a public BTC/USD median. Core refreshes Coinbase, Kraken, and Bitstamp about once a minute (2 second timeout each, no API key). It keeps the median of the sources that agree. One source is not enough. A price more than 2% from the median is dropped. The last good median goes stale after 3 minutes. `status` is `ok`, `stale`, or `unavailable`.
+- `GET /v1/rates`, a public BTC/USD median. Core refreshes an exchange median (internal backup) about once a minute (2 second timeout each, no API key). It keeps the median of the sources that agree. One source is not enough. A price more than 2% from the median is dropped. The last good median goes stale after 3 minutes. `status` is `ok`, `stale`, or `unavailable`.
 - A route still has one main price, sats or USD. When the other rail is enabled and the median is fresh, the challenge locks the derived amount on `payment_offers` (`rate_num`, `rate_den`, `rate_fetched_at`, both amounts, expiry). A later verify uses that row, not a new fetch. If the median is missing or stale, the challenge offers only the main currency. It does not fail because the quote is down.
 - Derived sats round up to the next sat (minimum 1). Derived USDC rounds up to the next atomic unit (6 decimals). A derived USDC amount below $0.001 is not offered. The merchant's own price is unchanged.
 - `GET /v1/sites/mine` adds `derived` on each route: the live quote, or `unavailable` / `stale` / `below_minimum`. `GET /v1/sites` still shows the main price and `price_currency` only. It does not show `payTo` or the moving quote.
 
-`GET /health` reports `0.13.0`. No new table and no new column. Copy `satsgate.sqlite3` before restart anyway. Lightning challenges are unchanged when x402 is off or the median cannot be used. The hosted gate stays 0.11.0 and still ignores extra fields on a Lightning challenge. Satsgate does not convert, hold, or forward the payment. The buyer pays the locked amount on that rail to the merchant.
+`GET /health` reports `0.13.0`. No new table and no new column. Copy `satsgate.sqlite3` before restarting onto 0.13.0. Restart to serve 0.13.0. Lightning challenges are unchanged when x402 is off or the median cannot be used. The hosted gate stays 0.11.0 and still ignores extra fields on a Lightning challenge. Satsgate does not convert, hold, or forward the payment. The buyer pays the locked amount on that rail to the merchant.
 
 New env vars, all optional: `SATSGATE_RATES_ENABLED` (default on), `SATSGATE_RATES_REFRESH_SECONDS` (60), `SATSGATE_RATES_STALE_SECONDS` (180), `SATSGATE_RATES_SOURCE_TIMEOUT_SECONDS` (2), `SATSGATE_RATES_OUTLIER_BPS` (200).
 
@@ -397,7 +416,7 @@ Restart the process to serve 0.6.0. Startup adds nullable `paywall_challenges.ma
 
 ### Security
 - A leaked restricted key cannot redirect payouts or mint another key. Revocation is checked on every request (`api_key_revoked`). Forbidden account calls return HTTP 403 `insufficient_scope`. A resource outside the prefix returns HTTP 403 `resource_not_allowed`.
-- The account key is unchanged. Existing `sg_` keys keep full access. Unknown account keys on top-up stay anonymous, as before. A presented `sgr_` key is never treated as anonymous.
+- The account key is unchanged. Existing `sg_` keys keep full access. Unknown account keys on top-up stay unauthenticated, as before. A presented `sgr_` key is never treated as unauthenticated.
 
 ### Migration
 No new environment variables. Restart the process to serve 0.5.0. Startup adds the `api_keys` table and nullable `ledger.api_key_id`, `ledger.resource`, and `paywall_challenges.api_key_id` columns. Existing rows are left in place. Copy the SQLite file first if you want a rollback point. Nothing else has to be configured.

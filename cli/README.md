@@ -1,17 +1,20 @@
 # satsgate
 
-Charge AI agents in Lightning and USDC on the same 402. 500 free unlocks per UTC month. Cobrale a agentes de IA en Lightning y USDC, en el mismo 402.
+Charge AI agents in Lightning and USDC on the same 402. Payments go straight to your wallet. 500 free unlocks a month.
+
+No node to run, and no custody: the buyer pays the seller's wallet. After 500 free unlocks in a UTC month, each paid unlock debits 2 sats from a prepaid service balance, capped at 10% of the item price.
 
 `satsgate init` takes a merchant from nothing to a self-hosted paywall config. It opens a free account, saves the account key in `.satsgate/account.env`, asks for a Lightning Address, mints a restricted proxy key, writes `.env` and `satsgate-proxy.yaml`, and checks the paywall with a real 402. That check does not pay, verify, or settle.
+
+Terms: https://satsgate.org/terms. Source: https://github.com/Mike-io-hash/satsgate. API reference: https://github.com/Mike-io-hash/satsgate/blob/main/docs/api.md.
 
 It does not ask for a seed, a private key, or a recovery phrase. It does not hold sats or USDC. The account key is not copied into the project `.env`. The project `.env` holds `SATSGATE_API_KEY` (`sgr_`) and `SATSGATE_ORIGIN_SECRET`.
 
 ```bash
 uvx satsgate init
-pip install satsgate
 ```
 
-From a checkout: `pip install -e sdk/python -e proxy -e cli`.
+or `pip install satsgate`, then `satsgate init`.
 
 ## Human and agent
 
@@ -56,6 +59,10 @@ Lightning has no test network. A paid Lightning request moves real sats to the m
 uvx --env-file .env satsgate-proxy --config satsgate-proxy.yaml
 ```
 
-`satsgate` 0.1.1. `--docker` writes `docker-compose.satsgate.yml` and prints `docker compose -f docker-compose.satsgate.yml up`. The compose file uses the public image `ghcr.io/mike-io-hash/satsgate-proxy:0.14.1`. To build that image yourself, use `proxy/Dockerfile` from the repo. The generated service listens on `0.0.0.0`; the YAML written for `uvx` stays on `127.0.0.1`. From a checkout: `pip install -e sdk/python -e proxy -e cli`.
+`satsgate` 0.1.2. `--docker` writes `docker-compose.satsgate.yml` and prints `docker compose -f docker-compose.satsgate.yml up`. The compose file uses the public image `ghcr.io/mike-io-hash/satsgate-proxy:0.14.2`. The generated service listens on `0.0.0.0`; the YAML written for `uvx` stays on `127.0.0.1`.
+
+## Contributors' note
+
+To build the image yourself, use `proxy/Dockerfile` from the repo. From a checkout: `pip install -e sdk/python -e proxy -e cli`.
 
 `--framework fastapi`, `express`, or `nginx` copies the existing origin check. A client that can reach the origin directly must fail closed. The Caddy file in the package is a note, not an HMAC check.

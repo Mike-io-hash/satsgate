@@ -4,7 +4,7 @@ Python client for the satsgate API under model B.
 
 - ``create_account`` opens an account. No API key is sent. The ``sg_`` key is returned once.
 - Top up a free amount with ``topup_lightning`` or ``topup_usdc``. The prepaid balance
-  is milisatoshis (``balance_msat``). It is not redeemable for sats, USDC, or fiat.
+  is millisatoshis (``balance_msat``). It is not redeemable for sats, USDC, or fiat.
 - A restricted ``sgr_`` key can read the balance. It cannot open an account or top up.
 - The buyer payment still happens on Lightning or USDC. This SDK does not sign and
   does not ask for a seed or a private key.
@@ -17,6 +17,6 @@ Python client for the satsgate API under model B.
 
 from .client import SatsgateClient, SatsgateError, create_account
 
-__version__ = "0.10.0"
+__version__ = "0.10.1"
 
 __all__ = ["SatsgateClient", "SatsgateError", "create_account"]

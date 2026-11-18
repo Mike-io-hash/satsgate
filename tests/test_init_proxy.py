@@ -72,7 +72,7 @@ def _assert_compose_service(text: str, source: str) -> None:
         }
     ]
     assert "build" not in service
-    assert service["image"] == "ghcr.io/mike-io-hash/satsgate-proxy:0.14.1"
+    assert service["image"] == "ghcr.io/mike-io-hash/satsgate-proxy:0.14.2"
     assert service["ports"] == ["127.0.0.1:8080:8080"]
     assert service["read_only"] is True
     assert service["user"] == "65532:65532"
@@ -375,8 +375,8 @@ def test_t_c_3_7_start_command_and_docker_compose_keep_secrets_out(tmp_path: Pat
     assert START_COMMAND in out
     compose = (work / "docker-compose.satsgate.yml").read_text(encoding="utf-8")
     assert "env_file: .env" in compose
-    assert "satsgate-proxy:0.14.1" in compose
-    assert "ghcr.io/mike-io-hash/satsgate-proxy:0.14.1" in compose
+    assert "satsgate-proxy:0.14.2" in compose
+    assert "ghcr.io/mike-io-hash/satsgate-proxy:0.14.2" in compose
     assert "dockerfile:" not in compose
     assert "Until that image is published" not in compose
     assert "Do not publish from this repo" not in compose
