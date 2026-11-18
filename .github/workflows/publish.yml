@@ -64,10 +64,8 @@ jobs:
   build:
     needs: resolve
     runs-on: ubuntu-latest
-    # Uploading the built files needs the artifact scope. This job has no id-token.
     permissions:
       contents: read
-      actions: write
     outputs:
       sums: ${{ steps.sums.outputs.sums }}
     strategy:

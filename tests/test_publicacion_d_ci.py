@@ -129,6 +129,9 @@ def test_t_d_5_1_ci_permissions_and_pins() -> None:
     text = path.read_text(encoding="utf-8")
     workflow = _load_workflow(path)
     assert workflow["permissions"] == {"contents": "read"}
+    web = workflow["jobs"]["web"]
+    assert web.get("permissions", workflow["permissions"]).get("actions") != "write"
+    assert "actions: write" not in path.read_text(encoding="utf-8").split("web:", 1)[1]
     assert "pull_request_target" not in text
     checkouts = 0
     uses = 0

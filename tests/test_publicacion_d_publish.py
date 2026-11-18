@@ -90,6 +90,7 @@ def test_t_d_3_1_publish_workflow_cannot_upload_from_a_pull_request() -> None:
     assert "needs.smoke-testpypi.result == 'success'" in expr
     assert "needs.smoke-testpypi.result == 'failure'" not in expr
     assert "needs.smoke-testpypi.result == 'cancelled'" not in expr
+    assert jobs["build"].get("permissions") == {"contents": "read"}
     assert "id-token" not in json.dumps(jobs["build"].get("permissions"))
 
 
