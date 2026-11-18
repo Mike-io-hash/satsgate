@@ -47,6 +47,13 @@ A second run reuses the account and the keys. An existing YAML or snippet is not
 
 USDC payments use Base only. Ethereum mainnet, Polygon, Solana, Arbitrum, and any other chain are not accepted.
 
+| Network | Network id | Circle USDC contract | Status |
+| --- | --- | --- | --- |
+| Base Sepolia (testnet) | `eip155:84532` | [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e) | Testing. It is not a network for real buyers. |
+| Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | Live mode (on by default on api.satsgate.org; a self-hosted core needs `SATSGATE_X402_CDP=1` and CDP credentials, see [self-hosting](https://github.com/Mike-io-hash/satsgate/blob/main/docs/self-hosting.md)). |
+
+`payTo` must be an address you control on Base. The USDC moves from the buyer to that address. Satsgate does not hold a buyer wallet and does not run its own facilitator.
+
 `--want-usdc` mints a one-time connect link when the EVM payee is not verified yet. A terminal prints the link once and can open it. Otherwise it is written to `.satsgate/connect-link.txt` and is not printed. After the payee is verified, a later run sets `x402: true` and `x402_mode: test`. The unpaid 402 then includes a Base Sepolia offer. Paying that offer is a later step for a buyer agent (`satsgate-mcp-pay`), with the key on the buyer's machine. Test mode is free.
 
 To turn USDC test mode off, delete the YAML and run `init` again. It is regenerated and the keys are reused. Manual edits to the YAML are lost. To keep them, remove the route's `x402` and `x402_mode` lines and restart the proxy instead.

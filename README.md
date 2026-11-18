@@ -1,4 +1,4 @@
-# satsgate
+# Satsgate
 
 [![CI](https://github.com/Mike-io-hash/satsgate/actions/workflows/ci.yml/badge.svg)](https://github.com/Mike-io-hash/satsgate/actions/workflows/ci.yml)
 
@@ -96,7 +96,7 @@ self-hosted proxy    hosted gate    your own call to the API
 seller Lightning Address, or the seller's address on Base
 ```
 
-Satsgate debits the seller's prepaid service balance after the free quota, and only after a successful response.
+Satsgate debits the seller's prepaid service balance after the free quota: with the proxy, only after the origin returns 2xx; on the hosted gate, when the receipt is issued.
 
 Three ways to integrate:
 
@@ -127,7 +127,7 @@ USDC payments use Base only. Ethereum mainnet, Polygon, Solana, Arbitrum, and an
 | Network | Network id | Circle USDC contract | Status |
 | --- | --- | --- | --- |
 | Base Sepolia (testnet) | `eip155:84532` | [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e) | Testing. Not a network for real buyers. |
-| Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | Live mode (on by default on api.satsgate.org; a self-hosted core needs `SATSGATE_X402_CDP=1` and CDP credentials, see docs/self-hosting.md). |
+| Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | Live mode (on by default on api.satsgate.org; a self-hosted core needs `SATSGATE_X402_CDP=1` and CDP credentials, see [self-hosting](docs/self-hosting.md)). |
 
 `payTo` must be an address you control on Base. The USDC moves from the buyer to that address. Satsgate does not hold a buyer wallet and does not run its own facilitator.
 
@@ -141,13 +141,19 @@ or `pip install "satsgate[mcp]"`.
 
 ```json
 {
-  "command": "satsgate-mcp",
-  "env": {
-    "SATSGATE_MCP_MAX_PAYMENT_SATS": "100",
-    "SATSGATE_MCP_DAILY_MAX_SATS": "500"
+  "mcpServers": {
+    "satsgate": {
+      "command": "satsgate-mcp",
+      "env": {
+        "SATSGATE_MCP_MAX_PAYMENT_SATS": "100",
+        "SATSGATE_MCP_DAILY_MAX_SATS": "500"
+      }
+    }
   }
 }
 ```
+
+Paying also needs `SATSGATE_MCP_NWC_URI` or the USD caps in that env block. Wallet setup is in [mcp/README.md](mcp/README.md).
 
 `satsgate-mcp --help` lists the environment variables it reads and exits. `--version` prints the package version. With no arguments it speaks MCP on stdio.
 
@@ -156,9 +162,9 @@ or `pip install "satsgate[mcp]"`.
 | Package | Where |
 | --- | --- |
 | `satsgate` | [PyPI](https://pypi.org/project/satsgate/) 0.1.x |
-| `satsgate-sdk` | PyPI 0.10.x |
-| `satsgate-proxy` | PyPI 0.14.x and [GHCR](https://github.com/Mike-io-hash/satsgate/pkgs/container/satsgate-proxy) |
-| `satsgate-mcp` | PyPI 0.13.x |
+| `satsgate-sdk` | [PyPI](https://pypi.org/project/satsgate-sdk/) 0.10.x |
+| `satsgate-proxy` | [PyPI](https://pypi.org/project/satsgate-proxy/) 0.14.x and [GHCR](https://github.com/Mike-io-hash/satsgate/pkgs/container/satsgate-proxy) |
+| `satsgate-mcp` | [PyPI](https://pypi.org/project/satsgate-mcp/) 0.13.x |
 
 OpenAPI: [https://api.satsgate.org/openapi.json](https://api.satsgate.org/openapi.json). Works with core 0.20.3 or later.
 
@@ -187,11 +193,18 @@ Report a security issue as described in [SECURITY.md](SECURITY.md).
 
 - [docs/api.md](docs/api.md)
 - [docs/self-hosting.md](docs/self-hosting.md)
+- [docs/x402-design.md](docs/x402-design.md)
 - [CUSTOMER_QUICKSTART.md](CUSTOMER_QUICKSTART.md)
+- [cli/README.md](cli/README.md)
+- [sdk/python/README.md](sdk/python/README.md)
+- [proxy/README.md](proxy/README.md)
+- [mcp/README.md](mcp/README.md)
 - [Terms](https://satsgate.org/terms)
 - [CHANGELOG.md](CHANGELOG.md)
 - [BETA.md](BETA.md)
 - [STATUS.md](STATUS.md)
+- Health: https://api.satsgate.org/health
+- Manifest: https://api.satsgate.org/.well-known/satsgate.json
 
 ## Contributing and support
 
@@ -200,3 +213,4 @@ Support: [SUPPORT.md](SUPPORT.md). Development setup: [CONTRIBUTING.md](CONTRIBU
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+

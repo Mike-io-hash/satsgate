@@ -8,11 +8,11 @@ uvx satsgate init
 
 or `pip install satsgate`, then `satsgate init`.
 
-This is the path to integrate **satsgate** as a *customer* (agent operator).
+This is the path to integrate **Satsgate** as a *customer* (agent operator).
 
 Notes:
-- **Non-custodial:** your users pay **your** Lightning Address (LNURL-pay). satsgate never holds your funds.
-- **No end-user accounts / no KYC** (via satsgate).
+- **Non-custodial:** your users pay **your** Lightning Address (LNURL-pay). Satsgate never holds your funds.
+- **No end-user accounts / no KYC** (via Satsgate).
 - Hosted pricing is a prepaid balance in millisatoshis (`balance_msat` in the API). **It does not expire** and it is not redeemable.
 - The small minimum top-up is there for **anti-abuse** on the hosted API.
 
@@ -45,7 +45,7 @@ If the hosted payee's provider advertises LUD-21 `verify` (Alby does), you can s
 
 Pay the invoice from a **different** wallet than the one that receives it. Paying yourself from the same node (for example Alby Go on the same Alby Hub) usually fails.
 
-Live mode (on by default on api.satsgate.org; a self-hosted core needs `SATSGATE_X402_CDP=1` and CDP credentials, see docs/self-hosting.md). USDC top-up uses `POST /v1/topup/usdc` when `SATSGATE_TREASURY_EVM_ADDRESS` is set. While `SATSGATE_X402_CDP` is on, that top-up is Base mainnet USDC only (`eip155:8453`). While it is off, it is Base Sepolia only (`eip155:84532`) and the response says `testing: true`. Prepaid balance is not sold for faucet USDC once mainnet is on. No `PAYMENT-SIGNATURE` yet: `402` and `PAYMENT-REQUIRED`. Retry with `PAYMENT-SIGNATURE` after your wallet signs that exact USDC authorization. The balance grows only after the facilitator settles, and it is not redeemable for USDC. If the treasury variable is unset, the route says `x402_topup_disabled` and Lightning top-up is unchanged. The proxy and the MCP server do not call this route.
+On api.satsgate.org, `POST /v1/topup/usdc` takes Base mainnet USDC (`eip155:8453`). A self-hosted core needs `SATSGATE_TREASURY_EVM_ADDRESS` and `SATSGATE_X402_CDP=1`; otherwise it is Base Sepolia (`testing: true`). Prepaid balance is not sold for faucet USDC once mainnet is on. No `PAYMENT-SIGNATURE` yet: `402` and `PAYMENT-REQUIRED`. Retry with `PAYMENT-SIGNATURE` after your wallet signs that exact USDC authorization. The balance grows only after the facilitator settles, and it is not redeemable for USDC. If the treasury variable is unset, the route says `x402_topup_disabled` and Lightning top-up is unchanged. The proxy and the MCP server do not call this route.
 
 A hosted site that takes USDC starts in test mode. Try on Base Sepolia with your agent first, then switch the site to live. See [`gate/README.md`](./gate/README.md).
 
@@ -166,7 +166,7 @@ curl -s -X POST https://api.satsgate.org/v1/api-keys \
 
 That key can call the paywall challenge, status, and verify routes for resources starting with `demo/`. It cannot top up, change the payee, manage keys, or read the ledger. Drop the prefix field to allow every resource. Revoke it with `POST /v1/api-keys/{id}/revoke` using the account key. Python: `SatsgateClient.create_api_key`, `list_api_keys`, `revoke_api_key` (satsgate-sdk 0.4.0).
 
-To put that key in front of an API you already have, without writing paywall code, run [`satsgate-proxy`](./proxy/README.md). It is a separate process (version 0.14.2) and uses resource ids `route:<name>` or `site`, so set `resource_prefix` to match those (or omit it). The core in this quickstart stays the hosted API. `x402: true` without `x402_mode` is Base Sepolia. `x402_mode: live` is Base, after the operator has enabled it.
+To put that key in front of an API you already have, without writing paywall code, run [`satsgate-proxy`](./proxy/README.md). It is a separate process (version 0.14.2) and uses resource ids `route:<name>` or `site`, so set `resource_prefix` to match those (or omit it). The core in this quickstart stays the hosted API. `x402: true` without `x402_mode` is Base Sepolia. `x402_mode: live` is Base (on by default on api.satsgate.org).
 
 A buyer-side agent uses [`satsgate-mcp`](https://github.com/Mike-io-hash/satsgate/blob/main/mcp/README.md) (version 0.13.1). Works with core 0.20.3 or later. That process does not create challenges. It pays a Lightning URL the proxy already protects, reads an x402 offer without signing it, and `list_sites` reads the public directory of approved sites, including a USD-priced route. The optional `sgr_` key on the MCP server is only for read-only status and is a different key from the one in the proxy.
 
@@ -180,7 +180,7 @@ This script:
 
 Pay that invoice from a **different** wallet than the payee. Alby Go paying an invoice that the same Alby Hub issued usually fails. Use a second wallet for the buyer.
 
-If you pay from a wallet that does not hand you the preimage, poll `GET /v1/paywall/status/{payment_hash}` with the API key and `Authorization: L402 <macaroon>` until `settled` is true. That GET spends the credit when it settles. `POST /v1/paywall/verify` is the preimage alternative. Only the first settled call takes a free slot or debits the locked fee.
+If you pay from a wallet that does not hand you the preimage, poll `GET /v1/paywall/status/{payment_hash}` with the API key and `Authorization: L402 <macaroon>` until `settled` is true. That GET debits the unlock fee when it settles. `POST /v1/paywall/verify` is the preimage alternative. Only the first settled call takes a free slot or debits the locked fee.
 
 `invoice_expires_at` is when the buyer must pay. `claim_until` (and `valid_until` on a new challenge) is when you can still unlock. Those used to differ by hours: the invoice lived about a day and the token died after 10 minutes. They now stay aligned, plus a grace period. `cache_until` on a successful unlock is how long to cache that result when the challenge has no usage policy.
 

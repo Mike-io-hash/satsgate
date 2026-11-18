@@ -49,7 +49,7 @@ def test_t_d_10_1_caddy_recreate_is_forced() -> None:
 
 
 def test_t_d_11_2_published_install_text_replaced_the_forthcoming_lines() -> None:
-    banned = ("not on PyPI yet", "until Publicación D", "PyPI publication is forthcoming")
+    banned = ("not on PyPI yet", "PyPI publication is forthcoming")
     for path in ROOT.rglob("*"):
         if not path.is_file() or path.suffix not in {".md", ".yml", ".yaml"}:
             continue

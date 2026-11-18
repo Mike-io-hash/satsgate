@@ -88,7 +88,7 @@ The tables below are the same settings the API reference describes.
 | Network | Network id | Circle USDC contract | Status |
 | --- | --- | --- | --- |
 | Base Sepolia (testnet) | `eip155:84532` | [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e) | Testing. A site in test mode offers only this USDC, through `https://x402.org/facilitator`. It is not a network for real buyers. |
-| Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | Live mode (on by default on api.satsgate.org; a self-hosted core needs `SATSGATE_X402_CDP=1` and CDP credentials, see docs/self-hosting.md). A site in live mode offers only this USDC, through the Coinbase CDP facilitator. |
+| Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | Live mode (on by default on api.satsgate.org; a self-hosted core needs `SATSGATE_X402_CDP=1` and CDP credentials). A site in live mode offers only this USDC, through the Coinbase CDP facilitator. |
 
 | Limit | Default | Env |
 | --- | --- | --- |
@@ -100,10 +100,10 @@ The tables below are the same settings the API reference describes.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SATSGATE_SITE_SECRET_KEY` | unset | 64 hex characters. Required to create or rotate a site secret. Unset does not stop the process. |
-| `SATSGATE_SITES_AUTO_APPROVE` | off | `1` approves a new site only after a successful origin check, acceptance of the current `SATSGATE_TERMS_VERSION`, and an account that is not suspended. Empty terms with this switch on refuses to boot. Leave it off. |
+| `SATSGATE_SITES_AUTO_APPROVE` | off | `1` approves a new site only after a successful origin check, acceptance of the current `SATSGATE_TERMS_VERSION`, and an account that is not suspended. Empty terms with this switch on refuses to boot. The default is off. |
 | `SATSGATE_RECEIPT_SECONDS` | 86400 | Receipt lifetime when the route sets no `access_seconds`. Clamped to 60–86400 and to the paywall access cap. |
-| `SATSGATE_TERMS_VERSION` | empty | Effective date of the terms. Production is already `2026-11-13`. Do not change it here. |
-| `SATSGATE_TERMS_URL` | empty | https page linked from the API and the gate 402 when set. Deploy sets `https://satsgate.org/terms`. Empty in Compose. |
+| `SATSGATE_TERMS_VERSION` | empty | Effective date of the terms you serve. |
+| `SATSGATE_TERMS_URL` | empty | https page linked from the API and the gate 402 when set. Empty means the key is present and null. |
 | `SATSGATE_ABUSE_CONTACT` | empty | Bare email. Shown on `GET /` of the gate when set. |
 | `SATSGATE_GEOBLOCK_COUNTRIES` | empty | ISO codes refused on signups and quotes. Empty skips the lookup. |
 | `SATSGATE_GEOIP_DB` | `/data/geoip/dbip-country-lite.mmdb` | DB-IP Country Lite. Required only when the country list is set. |

@@ -100,7 +100,7 @@ Core **0.20.0**, hosted gate **0.15.2**, Python SDK **0.8.0**, self-hosted proxy
 ### Added
 - 500 free successful live unlocks per UTC month, shared by accounts that pay out to the same Lightning Address or the same verified EVM address. Prepaid is charged only after that quota. The fee is locked when the challenge is issued.
 - A conversion tool, `python -m app.migrate_credits_to_msat`, turns existing credits into 2,000 msat each. It does not open a database it was not given. Production apply is a later step and needs a separate OK.
-- Accounting BTC rate (a third-party price API, with an exchange median (internal backup) as backup) for Satsgate's own USDC math. A missing or stale rate rejects a USDC top-up and a live USDC-priced challenge with `503` `rate_unavailable`. It does not stop Lightning.
+- Accounting BTC rate (a third-party price API, with an exchange median as an internal backup) for Satsgate's own USDC math. A missing or stale rate rejects a USDC top-up and a live USDC-priced challenge with `503` `rate_unavailable`. It does not stop Lightning.
 - Seller advice: `add_lightning` under US$0.01, and `balance_low` / `balance_zero` on the account. These are not attached to a buyer 402.
 - `POST /v1/admin/clients/{id}/refund` credits prepaid balance. It does not pay Lightning or USDC out. The audit line does not include the admin token. Automatic repair credits a second debit or a debit with no settlement.
 - Webhook kinds `balance.low` and `balance.zero`, edge-triggered.
@@ -284,7 +284,7 @@ Core 0.14.2 and proxy 0.12.0 add no migration and no new environment variable.
 ## [0.13.0] - 2026-10-20
 
 ### Added
-- `GET /v1/rates`, a public BTC/USD median. Core refreshes an exchange median (internal backup) about once a minute (2 second timeout each, no API key). It keeps the median of the sources that agree. One source is not enough. A price more than 2% from the median is dropped. The last good median goes stale after 3 minutes. `status` is `ok`, `stale`, or `unavailable`.
+- `GET /v1/rates`, a public BTC/USD median. Core refreshes a median of several exchanges about once a minute (2 second timeout each, no API key). It keeps the median of the sources that agree. One source is not enough. A price more than 2% from the median is dropped. The last good median goes stale after 3 minutes. `status` is `ok`, `stale`, or `unavailable`.
 - A route still has one main price, sats or USD. When the other rail is enabled and the median is fresh, the challenge locks the derived amount on `payment_offers` (`rate_num`, `rate_den`, `rate_fetched_at`, both amounts, expiry). A later verify uses that row, not a new fetch. If the median is missing or stale, the challenge offers only the main currency. It does not fail because the quote is down.
 - Derived sats round up to the next sat (minimum 1). Derived USDC rounds up to the next atomic unit (6 decimals). A derived USDC amount below $0.001 is not offered. The merchant's own price is unchanged.
 - `GET /v1/sites/mine` adds `derived` on each route: the live quote, or `unavailable` / `stale` / `below_minimum`. `GET /v1/sites` still shows the main price and `price_currency` only. It does not show `payTo` or the moving quote.
@@ -294,6 +294,8 @@ Core 0.14.2 and proxy 0.12.0 add no migration and no new environment variable.
 New env vars, all optional: `SATSGATE_RATES_ENABLED` (default on), `SATSGATE_RATES_REFRESH_SECONDS` (60), `SATSGATE_RATES_STALE_SECONDS` (180), `SATSGATE_RATES_SOURCE_TIMEOUT_SECONDS` (2), `SATSGATE_RATES_OUTLIER_BPS` (200).
 
 ## [0.12.0] - 2026-10-19
+
+x402 on Base Sepolia (0.12.0). Hosted gate x402 (gate 0.12.0).
 
 ### Added
 - Core x402 v2 on Base Sepolia (`eip155:84532`), USDC, scheme `exact` (EIP-3009). The facilitator is `https://x402.org/facilitator` unless `SATSGATE_X402_FACILITATOR_URL` is set. Satsgate does not sign, broadcast, or hold a key. Base mainnet is refused at startup. There is no CDP path.

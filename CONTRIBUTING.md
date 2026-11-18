@@ -43,7 +43,7 @@ docker compose -f proxy/docker-compose.yml up --build
 This project prefers:
 - small, readable diffs
 - clear error messages
-- plain public docs and comments
+- Write public docs, package metadata, comments, and commit messages in English.
 
 ## Pull requests
 

@@ -12,6 +12,13 @@ pip install satsgate-sdk
 
 USDC payments use Base only. Ethereum mainnet, Polygon, Solana, Arbitrum, and any other chain are not accepted.
 
+| Network | Network id | Circle USDC contract | Status |
+| --- | --- | --- | --- |
+| Base Sepolia (testnet) | `eip155:84532` | [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e) | Testing. It is not a network for real buyers. |
+| Base | `eip155:8453` | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | Live mode (on by default on api.satsgate.org; a self-hosted core needs `SATSGATE_X402_CDP=1` and CDP credentials, see [self-hosting](https://github.com/Mike-io-hash/satsgate/blob/main/docs/self-hosting.md)). |
+
+`payTo` must be an address you control on Base. The USDC moves from the buyer to that address. Satsgate does not hold a buyer wallet and does not run its own facilitator.
+
 ## Account and top-up
 
 Point `base_url` at `http://127.0.0.1:8000` only when a local core is running. The examples below use the hosted API.

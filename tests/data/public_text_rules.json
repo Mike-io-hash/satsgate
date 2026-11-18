@@ -66,11 +66,6 @@
     },
     {
       "file": "tests/test_release_d_docs.py",
-      "line": 52,
-      "reason": "Negative check that a retired release heading stays absent."
-    },
-    {
-      "file": "tests/test_release_d_docs.py",
       "line": 118,
       "reason": "Negative check that published package text does not use retired words."
     }

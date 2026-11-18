@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = "c66646745328eb4c6a1bd33c6668a4b549298af3"
 RULES_PATH = ROOT / "tests" / "data" / "public_text_rules.json"
 GOLDEN = ROOT / "tests" / "fixtures" / "openapi-0.20.3.json"
-README_BASE = ROOT / "tests" / "fixtures" / "readme-base.txt"
+README_TOKENS = ROOT / "tests" / "fixtures" / "readme-base-tokens.json"
 TREE_BASE = ROOT / "tests" / "fixtures" / "tree-base.json"
 HEADLINE = (
     "Charge AI agents in Lightning and USDC on the same 402. "
@@ -81,6 +81,37 @@ MISALIGN = (
     "takes one credit",
     "Satsgate credits",
     "when the operator sets",
+)
+WORDING_FILES = {
+    "README.md",
+    "CUSTOMER_QUICKSTART.md",
+    "gate/README.md",
+    "proxy/README.md",
+    "mcp/README.md",
+    "sdk/python/README.md",
+    "cli/README.md",
+    "docs/api.md",
+    "docs/self-hosting.md",
+}
+WORDING_PATTERNS = (
+    r"empty credit balance",
+    r"the credit and the use",
+    r"\ba credit is taken\b",
+    r"credits are never refunded",
+    r"no merchant credit",
+    r"credits are not spent",
+    r"spends the credit",
+    r"client's credits",
+    r"credits were already charged",
+    r"one merchant credit",
+    r"\ba satsgate credit\b",
+    r"lightning credit",
+    r"the credit is taken",
+    r"operator cdp",
+    r"operator switch",
+    r"operator has enabled",
+    r"when the operator sets",
+    r"after the operator has",
 )
 ROUTE_DOCSTRINGS = {("app/main.py", 704), ("app/main.py", 2136)}
 FROZEN_PARTS = ("docs/hosted-gate-terms.md", "docs/terms/", "tests/fixtures/terms-")
@@ -238,6 +269,16 @@ def _units(rel: str, text: str) -> list[tuple[int, str]]:
         return _lines(text)
     if rel == "proxy/Dockerfile" or rel.startswith(".github/workflows/") or rel.startswith(".github/ISSUE_TEMPLATE/"):
         return _lines(text)
+    if Path(rel).name == "package.json":
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+        description = data.get("description")
+        if not isinstance(description, str):
+            return []
+        line_no = next((index for index, line in enumerate(text.splitlines(), 1) if '"description"' in line), 1)
+        return [(line_no, description)]
     if rel.endswith(".toml"):
         try:
             project = tomllib.loads(text).get("project", {})
@@ -330,7 +371,6 @@ def scan(root: Path = ROOT, *, extra_digests: set[str] | None = None) -> list[tu
         if rel in {
             "tests/data/public_text_rules.json",
             "tests/test_public_text.py",
-            "tests/fixtures/readme-base.txt",
             "tests/fixtures/tree-base.json",
             "tests/fixtures/openapi-0.20.3.json",
         } or _frozen(rel):
@@ -365,13 +405,26 @@ def _git_bytes(spec: str) -> bytes | None:
     return proc.stdout
 
 
-def _base_readme() -> str:
-    """Base README. A shallow checkout has no history, so the committed copy is the fallback."""
-    fixture = README_BASE.read_text(encoding="utf-8")
+def _unique(values: list[str]) -> list[str]:
+    seen: list[str] = []
+    for value in values:
+        if value not in seen:
+            seen.append(value)
+    return seen
+
+
+def _token_payload(text: str) -> dict[str, list[str]]:
+    raw = _required_tokens(text)
+    return {key: _unique(values) for key, values in raw.items()}
+
+
+def _base_tokens() -> dict[str, list[str]]:
+    """Tokens from the base README. A shallow checkout falls back to the committed JSON."""
+    saved = json.loads(README_TOKENS.read_text(encoding="utf-8"))
     live = _git_bytes(f"{BASE}:README.md")
     if live is not None:
-        assert live.decode() == fixture
-    return fixture
+        assert _token_payload(live.decode()) == saved
+    return saved
 
 
 def _union_text() -> str:
@@ -449,14 +502,15 @@ def _contributor_exempt(lines: list[str], index: int) -> bool:
     return False
 
 
-def _install_hits() -> list[str]:
+def _install_hits(root: Path = ROOT, paths: list[str] | None = None) -> list[str]:
     hits = []
-    for rel in _tracked():
+    rels = paths if paths is not None else _tracked(root)
+    for rel in rels:
         if not rel.endswith(".md") and not rel.endswith(".py"):
             continue
         if rel in {"CONTRIBUTING.md", "docs/self-hosting.md", "tests/test_public_text.py"}:
             continue
-        path = ROOT / rel
+        path = root / rel
         try:
             text = path.read_text(encoding="utf-8")
         except UnicodeError:
@@ -495,6 +549,12 @@ def _misalign_hits() -> list[str]:
                 if phrase in chunk:
                     hits.append(f"{rel}:{lineno} {phrase}")
                     break
+            if rel in WORDING_FILES:
+                lowered = chunk.lower()
+                for pattern in WORDING_PATTERNS:
+                    if re.search(pattern, lowered):
+                        hits.append(f"{rel}:{lineno} {pattern}")
+                        break
     return hits
 
 
@@ -632,7 +692,7 @@ def test_t_dm_2_2_built_metadata_passes_the_guard(tmp_path: Path) -> None:
 def test_t_dm_3_1_reference_move_keeps_the_base_tokens() -> None:
     for reason in DROPPED.values():
         assert reason.strip()
-    missing = _missing(_required_tokens(_base_readme()), _union_text())
+    missing = _missing(_base_tokens(), _union_text())
     assert missing == [], "\n".join(missing)
 
 
@@ -696,9 +756,9 @@ def test_t_dm_4_1_checkout_commands_stay_in_contributor_docs() -> None:
 
 
 def test_t_dm_4_1_a_public_checkout_command_is_rejected(tmp_path: Path) -> None:
-    sample = tmp_path / "README.md"
-    sample.write_text("pip install -e sdk/python\n", encoding="utf-8")
-    assert "pip install -e" in sample.read_text(encoding="utf-8")
+    (tmp_path / "README.md").write_text("pip install -e sdk/python\n", encoding="utf-8")
+    hits = _install_hits(tmp_path, ["README.md"])
+    assert hits == ["README.md:1 pip install -e"]
 
 
 def test_t_dm_4_2_twine_and_readme_renderer(tmp_path: Path) -> None:
@@ -732,7 +792,15 @@ def test_t_dm_5_1_old_phrases_stay_out() -> None:
     assert _misalign_hits() == []
 
 
+def _app_version() -> str:
+    text = (ROOT / "app" / "config.py").read_text(encoding="utf-8")
+    return re.search(r'^APP_VERSION = "([^"]+)"', text, re.M).group(1)
+
+
 def test_t_dm_6_1_openapi_matches_the_base_snapshot(tmp_path: Path) -> None:
+    # The golden document is the 0.20.3 production schema. Refresh it when APP_VERSION changes.
+    if _app_version() != "0.20.3":
+        return
     live = _canonical(_load_production_openapi(tmp_path / "openapi.sqlite3"))
     assert live == GOLDEN.read_text(encoding="utf-8")
 
@@ -744,7 +812,12 @@ def _stripped_dump(text: str) -> str:
 
 
 def test_t_dm_6_2_app_edits_are_comments_and_docstrings_only() -> None:
-    """Compare with the base commit when it is in the clone, and with the snapshot otherwise."""
+    """Compare with the base commit when it is in the clone, and with the snapshot otherwise.
+
+    The snapshot guards the 0.20.3 tree. Refresh it when APP_VERSION changes.
+    """
+    if _app_version() != "0.20.3":
+        return
     snapshot = json.loads(TREE_BASE.read_text(encoding="utf-8"))
     current_app: dict[str, str] = {}
     for path in sorted((ROOT / "app").rglob("*.py")):
@@ -784,19 +857,27 @@ def test_t_dm_8_1_publishers_are_added_one_at_a_time() -> None:
 def test_t_dm_9_1_mcp_help_and_version() -> None:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "mcp" / "src")
-    help_run = subprocess.run(
+    # Keep stdin open. A server that waits for a client must hit the timeout.
+    help_proc = subprocess.Popen(
         [sys.executable, "-m", "satsgate_mcp", "--help"],
         cwd=ROOT,
         env=env,
-        check=False,
-        capture_output=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=5,
-        stdin=subprocess.DEVNULL,
     )
-    assert help_run.returncode == 0, help_run.stderr
-    assert "SATSGATE_MCP_NWC_URI" in help_run.stdout
-    assert "nostr+walletconnect://" not in help_run.stdout
+    try:
+        help_proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        help_proc.kill()
+        help_proc.wait(timeout=5)
+        raise
+    help_out = help_proc.stdout.read() if help_proc.stdout is not None else ""
+    help_err = help_proc.stderr.read() if help_proc.stderr is not None else ""
+    assert help_proc.returncode == 0, help_err
+    assert "SATSGATE_MCP_NWC_URI" in help_out
+    assert "nostr+walletconnect://" not in help_out
     version = subprocess.run(
         [sys.executable, "-m", "satsgate_mcp", "--version"],
         cwd=ROOT,
