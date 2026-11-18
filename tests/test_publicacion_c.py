@@ -6,6 +6,7 @@ import logging
 import shutil
 import subprocess
 import sys
+import sysconfig
 import tomllib
 import zipfile
 from pathlib import Path
@@ -147,6 +148,13 @@ def test_t_c_1_6_installed_script_and_module_print_the_version(tmp_path: Path) -
     created = subprocess.run([sys.executable, "-m", "venv", "--system-site-packages", str(venv)], check=False)
     if created.returncode != 0:
         pytest.skip(f"cannot create a venv: exit {created.returncode}")
+    site = venv / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    site.mkdir(parents=True, exist_ok=True)
+    paths = sysconfig.get_paths()
+    visible = paths["purelib"]
+    if paths["platlib"] != visible:
+        visible += "\n" + paths["platlib"]
+    (site / "current-interpreter.pth").write_text(visible + "\n", encoding="utf-8")
     pip = venv / "bin" / "pip"
     python = venv / "bin" / "python"
     script = venv / "bin" / "satsgate"
@@ -169,7 +177,7 @@ def test_t_c_1_6_installed_script_and_module_print_the_version(tmp_path: Path) -
 
 
 def test_t_d_7_1_pip_install_failure_is_a_failure(tmp_path: Path) -> None:
-    """A broken dependency pin in a built wheel fails this test instead of skipping it."""
+    """Same check as T-C.1.6. A broken dependency pin fails the test instead of skipping it."""
     test_t_c_1_6_installed_script_and_module_print_the_version(tmp_path)
 
 

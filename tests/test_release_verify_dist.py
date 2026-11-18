@@ -33,6 +33,18 @@ def _fill(directory: Path, files: dict[str, bytes]) -> dict[str, str]:
     return mapping
 
 
+def test_m7_a_directory_without_sums_fails(tmp_path: Path) -> None:
+    verify = _load()
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    try:
+        verify.verify_root(empty, None)
+    except verify.VerifyError as exc:
+        assert "SHA256SUMS" in str(exc)
+    else:
+        raise AssertionError("missing SHA256SUMS was accepted")
+
+
 def test_i2_extra_wheel_or_rewritten_sums_fail(tmp_path: Path) -> None:
     verify = _load()
     files = {"pkg-0.1.0-py3-none-any.whl": b"wheel", "pkg-0.1.0.tar.gz": b"sdist"}

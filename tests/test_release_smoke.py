@@ -86,6 +86,19 @@ def test_console_script_is_next_to_the_venv_python_symlink(tmp_path: Path) -> No
     script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     script.chmod(0o755)
     check.check_commands(str(python), ["satsgate-proxy --help"])
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    planted = elsewhere / "satsgate-proxy"
+    planted.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    planted.chmod(0o755)
+    script.unlink()
+    previous = os.environ.get("PATH", "")
+    os.environ["PATH"] = str(elsewhere) + os.pathsep + previous
+    try:
+        with pytest.raises(check.SmokeError, match="missing console script"):
+            check.check_commands(str(python), ["satsgate-proxy --help"])
+    finally:
+        os.environ["PATH"] = previous
 
 
 def test_init_probe_on_a_closed_port_writes_no_key(tmp_path: Path) -> None:

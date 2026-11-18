@@ -109,6 +109,7 @@ workflow does the build. Mike does not push tags.
 `sdk` → `proxy` (PyPI) → the proxy image (`ghcr.yml`, from the same `proxy-v*` tag) →
 `mcp` → `satsgate`. `satsgate` depends on the SDK and the proxy, and `init --docker`
 names the GHCR image, so the image has to exist before `satsgate` is on PyPI.
+On a `proxy-v*` tag, `ghcr.yml` starts beside `publish.yml`. Approve the `ghcr` environment only after `verify-pypi` is green.
 
 The versions for that first train are `sdk-v0.10.0`, `proxy-v0.14.1`, `mcp-v0.13.0`,
 and `satsgate-v0.1.1`.

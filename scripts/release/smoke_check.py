@@ -36,15 +36,25 @@ def check_commands(python: str, commands: list[str]) -> None:
     env = os.environ.copy()
     # A venv python is a symlink. resolve() would point at the base interpreter
     # and miss the console scripts installed next to the symlink.
-    bindir = str(Path(python).absolute().parent)
-    env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+    bindir = Path(python).absolute().parent
+    env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", "")
     for command in commands:
         argv = command.split()
         if not argv:
             continue
-        proc = _run(argv, env=env)
+        script = bindir / argv[0]
+        if not script.is_file():
+            raise SmokeError(f"missing console script {argv[0]}")
+        proc = _run([str(script), *argv[1:]], env=env)
         if proc.returncode != 0:
             raise SmokeError(f"{command} exited {proc.returncode}")
+
+
+def check_pip(python: str) -> None:
+    proc = _run([python, "-m", "pip", "check"])
+    if proc.returncode != 0:
+        detail = (proc.stdout or proc.stderr).strip()
+        raise SmokeError(detail or "pip check failed")
 
 
 def init_probe(python: str, work: Path) -> None:
@@ -91,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     commands = [item for item in args.commands.split("|") if item]
     try:
         check_version(args.python, args.module, args.version)
+        check_pip(args.python)
         check_commands(args.python, commands)
         if args.init_probe:
             work = args.work or Path.cwd()

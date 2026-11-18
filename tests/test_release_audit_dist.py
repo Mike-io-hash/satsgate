@@ -58,6 +58,7 @@ def test_t_d_2_2_audit_dist(tmp_path: Path) -> None:
         assert audited.stdout == ""
         wheels.extend(out.glob("*.whl"))
     sdk_wheel = next(path for path in wheels if path.name.startswith("satsgate_sdk-"))
+    cli_wheel = next(path for path in wheels if path.name.startswith("satsgate-"))
 
     cases = (
         ("env", "satsgate_sdk/.env", b"TOKEN=1", "member:.env"),
@@ -73,3 +74,8 @@ def test_t_d_2_2_audit_dist(tmp_path: Path) -> None:
         assert rule in audited.stdout, audited.stdout
         assert SECRET not in audited.stdout
         assert SECRET not in audited.stderr
+    stray = tmp_path / "stray"
+    _inject(cli_wheel, stray / cli_wheel.name, "satsgate_proxy/__init__.py", b"x = 1\n")
+    audited = _run(stray)
+    assert audited.returncode != 0
+    assert "wheel:stray-module:satsgate_proxy" in audited.stdout

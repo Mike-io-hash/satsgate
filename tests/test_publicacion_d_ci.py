@@ -24,14 +24,18 @@ _KEEP = (
 _DROP = (
     ".env",
     "proxy/.env",
+    "proxy/src/.env",
+    "app/.env",
     ".env.local",
     "foo.sqlite3",
+    "app/db.sqlite3",
     "data/geoip/x.mmdb",
     ".git/config",
     "backups/db.sqlite3",
     "node_modules/leftpad/index.js",
     "web/connect/dist/index.html",
 )
+_KEEP_EXTRA = (".env.example", "proxy/.env.example")
 
 
 def _load_workflow(path: Path) -> dict:
@@ -65,25 +69,30 @@ def _pattern_body(pattern: str) -> str:
     return "".join(pieces)
 
 
+def _matches(pattern: str, path: str) -> bool:
+    """Docker context match. A pattern without a slash or ``**`` matches only at the root."""
+    directory = pattern.endswith("/")
+    pattern = pattern.rstrip("/")
+    body = _pattern_body(pattern)
+    if "**" not in pattern and "/" not in pattern:
+        if "/" in path:
+            return False
+        return re.fullmatch(body, path) is not None
+    if directory:
+        return re.fullmatch(body, path) is not None or re.fullmatch(body + "/.+", path) is not None
+    return re.fullmatch(body, path) is not None
+
+
 def _ignored(path: str, lines: list[str]) -> bool:
     ignored = False
+    prefixes = ["/".join(path.split("/")[: end]) for end in range(1, path.count("/") + 2)]
     for raw in lines:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         negate = line.startswith("!")
         pattern = line[1:] if negate else line
-        directory = pattern.endswith("/")
-        pattern = pattern.rstrip("/")
-        body = _pattern_body(pattern)
-        if "/" in pattern:
-            regex = re.compile(rf"^{body}(?:/.*)?$" if directory else rf"^{body}$")
-        elif directory:
-            regex = re.compile(rf"^(?:.+/)?{body}(?:/.*)?$")
-        else:
-            regex = re.compile(rf"^(?:.+/)?{body}$")
-        prefixes = ["/".join(path.split("/")[: end]) for end in range(1, path.count("/") + 2)]
-        if any(regex.fullmatch(prefix) for prefix in prefixes):
+        if any(_matches(pattern, prefix) for prefix in prefixes):
             ignored = not negate
     return ignored
 
@@ -109,13 +118,14 @@ def test_t_d_4_2_dockerignore_keeps_image_inputs() -> None:
     """Dropping .env or *.sqlite3, or ignoring a COPYed path, fails this test."""
     lines = _ignore_lines()
     active = [line.strip() for line in lines if line.strip() and not line.strip().startswith("#")]
-    assert ".env" in active
-    assert "*.sqlite3" in active
+    assert "**/.env" in active
+    assert "**/*.sqlite3" in active
     for path in _KEEP:
         assert not _ignored(path, lines), path
-    for path in _DROP:
+    for path in (*_DROP,):
         assert _ignored(path, lines), path
-    assert not _ignored(".env.example", lines)
+    for path in _KEEP_EXTRA:
+        assert not _ignored(path, lines), path
     gate_ignore = ROOT / "gate" / ".dockerignore"
     if gate_ignore.is_file():
         gate_lines = gate_ignore.read_text(encoding="utf-8").splitlines()

@@ -60,17 +60,45 @@ def test_t_d_11_2_published_install_text_replaced_the_forthcoming_lines() -> Non
             assert phrase not in text, f"{phrase} in {path}"
 
 
+_CURRENT = {"0.20.3", "0.15.2", "0.14.1", "0.13.0", "0.10.0", "0.1.1"}
+_VERSION_FILES = (
+    "README.md",
+    "CUSTOMER_QUICKSTART.md",
+    "gate/README.md",
+    "proxy/README.md",
+    "mcp/README.md",
+    "sdk/python/README.md",
+    "cli/README.md",
+)
+_VERSION_PATTERNS = (
+    re.compile(r"[Vv]ersion \*\*(\d+\.\d+\.\d+)\*\*"),
+    re.compile(r"\bis \*\*(\d+\.\d+\.\d+)\*\*"),
+    re.compile(r'"version": "(\d+\.\d+\.\d+)"'),
+    re.compile(r"Core is \**(\d+\.\d+\.\d+)\**"),
+)
+
+
+def _outside_history(text: str) -> str:
+    kept: list[str] = []
+    skipping = False
+    for line in text.splitlines():
+        if line.startswith("#"):
+            title = line.lstrip("#").strip().lower()
+            skipping = "history" in title or "changelog" in title
+        if not skipping:
+            kept.append(line)
+    return "\n".join(kept)
+
+
 def test_t_d_11_1_current_component_versions() -> None:
+    for rel in _VERSION_FILES:
+        text = _outside_history((ROOT / rel).read_text(encoding="utf-8"))
+        for pattern in _VERSION_PATTERNS:
+            for found in pattern.findall(text):
+                assert found in _CURRENT, f"{found} in {rel}"
     gate = (ROOT / "gate" / "README.md").read_text(encoding="utf-8")
-    assert "Version **0.15.2**" in gate
-    assert "Version **0.15.0**" not in gate
-    assert "Core is **0.18.0**" not in gate
-    assert "0.20.3 or later" in gate
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    current = readme.split("### x402 on Base Sepolia", 1)[0]
-    assert '"version": "0.20.3"' in current
-    assert "version 0.11.0" not in current
-    assert "Core is 0.20.2" not in current
+    assert '"version": "0.15.2"' in gate
+    assert "0.15.0" not in gate
 
 
 def test_t_d_11_4_new_public_text_stays_plain() -> None:
@@ -78,12 +106,36 @@ def test_t_d_11_4_new_public_text_stays_plain() -> None:
         (ROOT / "docs" / "publishing.md").read_text(encoding="utf-8"),
         (ROOT / "proxy" / "Dockerfile").read_text(encoding="utf-8"),
         (ROOT / ".github" / "workflows" / "ghcr.yml").read_text(encoding="utf-8"),
+        (ROOT / "sdk" / "python" / "README.md").read_text(encoding="utf-8"),
+        (ROOT / "proxy" / "README.md").read_text(encoding="utf-8"),
+        (ROOT / "mcp" / "README.md").read_text(encoding="utf-8"),
+        (ROOT / "cli" / "README.md").read_text(encoding="utf-8"),
     ]
     for rel in ("sdk/python/pyproject.toml", "proxy/pyproject.toml", "mcp/pyproject.toml", "cli/pyproject.toml"):
         parts.append((ROOT / rel).read_text(encoding="utf-8"))
     blob = "\n".join(parts).lower()
     for banned in ("anonymous", "wavelength", "battle-tested", "battle tested"):
         assert banned not in blob
+
+
+def test_m8_proxy_tag_waits_to_approve_the_image() -> None:
+    guide = (ROOT / "docs" / "publishing.md").read_text(encoding="utf-8")
+    assert "Approve the `ghcr` environment only after `verify-pypi` is green." in guide
+    workflow = _workflow("ghcr.yml")
+    assert workflow["concurrency"]["group"] == "ghcr-${{ github.ref }}"
+    assert workflow["concurrency"]["cancel-in-progress"] is False
+
+
+def test_m9_setup_node_is_the_current_release() -> None:
+    text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1" in text
+    assert "49933ea5288caeca8642d1e84afbd3f7d6820020" not in text
+
+
+def test_m11_changelog_names_the_terms_and_the_ledger_check() -> None:
+    entry = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8").split("## [0.20.3]", 1)[0]
+    assert "docs/terms/2026-11-13.md" in entry
+    assert "paywall_verify" in entry
 
 
 def test_i5_proxy_and_mcp_publish_an_install_section() -> None:

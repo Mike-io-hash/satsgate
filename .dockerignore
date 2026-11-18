@@ -1,12 +1,12 @@
 # Build context for images whose context is the repo root (core and proxy).
 .git
-.env
-.env.*
-!.env.example
-*.sqlite3
+**/.env
+**/.env.*
+!**/.env.example
+**/*.sqlite3
 data/
 backups/
-.satsgate/
+**/.satsgate/
 **/__pycache__
 **/*.pyc
 node_modules/

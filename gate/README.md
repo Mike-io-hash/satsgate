@@ -27,7 +27,7 @@ The routes are not in the public OpenAPI document. When the token is unset they 
 
 ## What a request does
 
-`GET /` is service JSON (`name`, `version`, `delivery`, `terms`, `abuse`). `GET /healthz` stays `{"ok": true, "component": "satsgate-gate", "version": "0.15.0"}`. The gate does not read the request body. `HEAD` returns the same headers and no body. Responses set `Cache-Control: no-store`.
+`GET /` is service JSON (`name`, `version`, `delivery`, `terms`, `abuse`). `GET /healthz` stays `{"ok": true, "component": "satsgate-gate", "version": "0.15.2"}`. The gate does not read the request body. `HEAD` returns the same headers and no body. Responses set `Cache-Control: no-store`.
 
 1. `GET /internal/gate/sites/<slug>/status` on every request. This is not cached. Anything other than `approved` is HTTP 404, with no distinction between missing, pending, and disabled.
 2. The site record (origin URL, routes, rails, `x402_mode`) is cached for `SATSGATE_GATE_CACHE_SECONDS` (default 5). A config that still contains `origin_secret` is rejected. A disable still takes effect on the next request because step 1 is uncached.

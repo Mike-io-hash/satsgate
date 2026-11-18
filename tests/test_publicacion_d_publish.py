@@ -31,6 +31,104 @@ def _uses(workflow: dict) -> list[str]:
     return found
 
 
+_TOKEN = re.compile(
+    r"&&|\|\||==|!=|\(|\)|,|'(?:\\'|[^'])*'|\"(?:\\\"|[^\"])*\"|[A-Za-z_][A-Za-z0-9_.-]*"
+)
+
+
+def _tokens(expr: str) -> list[str]:
+    found = _TOKEN.findall(expr)
+    if "".join(found) != re.sub(r"\s+", "", expr):
+        raise AssertionError(f"unparsed publish if: {expr}")
+    return found
+
+
+class _If:
+    def __init__(self, expr: str, env: dict[str, str]) -> None:
+        self.tokens = _tokens(expr)
+        self.i = 0
+        self.env = env
+
+    def parse(self) -> bool:
+        value = self._or()
+        if self.i != len(self.tokens):
+            raise AssertionError(self.tokens[self.i :])
+        return value
+
+    def _or(self) -> bool:
+        value = self._and()
+        while self._at("||"):
+            right = self._and()
+            value = value or right
+        return value
+
+    def _and(self) -> bool:
+        value = self._primary()
+        while self._at("&&"):
+            right = self._primary()
+            value = value and right
+        return value
+
+    def _at(self, token: str) -> bool:
+        if self.i < len(self.tokens) and self.tokens[self.i] == token:
+            self.i += 1
+            return True
+        return False
+
+    def _primary(self) -> bool:
+        if self._at("("):
+            value = self._or()
+            if not self._at(")"):
+                raise AssertionError("missing )")
+            return value
+        name = self.tokens[self.i]
+        self.i += 1
+        if name == "always":
+            if not (self._at("(") and self._at(")")):
+                raise AssertionError("always")
+            return True
+        if name == "startsWith":
+            # The table below is the tag case, so startsWith(github.ref, 'refs/tags/') is true.
+            if not self._at("("):
+                raise AssertionError("startsWith")
+            while self.tokens[self.i] != ")":
+                self.i += 1
+            self.i += 1
+            return True
+        if self.tokens[self.i] not in {"==", "!="}:
+            raise AssertionError(name)
+        op = self.tokens[self.i]
+        self.i += 1
+        right = self.tokens[self.i].strip("'\"")
+        self.i += 1
+        left = self.env[name]
+        return left == right if op == "==" else left != right
+
+
+def _publish_allowed(expr: str) -> None:
+    results = ("success", "failure", "cancelled", "skipped")
+    for smoke_local in results:
+        for plan in results:
+            for smoke in results:
+                for rehearse in ("true", "false"):
+                    env = {
+                        "needs.smoke-local.result": smoke_local,
+                        "needs.plan.result": plan,
+                        "needs.smoke-testpypi.result": smoke,
+                        "needs.plan.outputs.rehearse": rehearse,
+                    }
+                    got = _If(expr, env).parse()
+                    allowed = (
+                        smoke_local == "success"
+                        and plan == "success"
+                        and (
+                            (rehearse == "false" and smoke == "skipped")
+                            or (rehearse == "true" and smoke == "success")
+                        )
+                    )
+                    assert got is allowed, env
+
+
 def test_t_d_3_1_publish_workflow_cannot_upload_from_a_pull_request() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     workflow = _load(WORKFLOW)
@@ -92,6 +190,11 @@ def test_t_d_3_1_publish_workflow_cannot_upload_from_a_pull_request() -> None:
     assert "needs.smoke-testpypi.result == 'cancelled'" not in expr
     assert jobs["build"].get("permissions") == {"contents": "read"}
     assert "id-token" not in json.dumps(jobs["build"].get("permissions"))
+    for name, job in jobs.items():
+        permissions = job.get("permissions", {})
+        assert isinstance(permissions, dict), name
+        assert "write-all" not in permissions.values()
+    _publish_allowed(pypi["if"])
 
 
 def test_package_matrix_matches_the_tree() -> None:
