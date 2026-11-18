@@ -50,6 +50,8 @@ UNION = (
 # Heading text from the base README that this patch no longer repeats.
 DROPPED = {
     "Prepaid balance (milisatoshis)": "Spelling corrected to millisatoshis.",
+    "x402 on Base Sepolia (0.12.0)": "Recorded in the 0.12.0 changelog entry.",
+    "Hosted gate x402 (gate 0.12.0)": "Recorded in the 0.12.0 changelog entry.",
 }
 README_HEADINGS = (
     "Who it is for",

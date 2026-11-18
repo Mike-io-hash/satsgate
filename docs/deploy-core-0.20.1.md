@@ -21,4 +21,4 @@ When the operator later has a separate OK:
 
 6. **Rollback.** Code: `satsgate-satsgate:pre-0.20.1` (0.20.0). There is no reverse balance conversion. If the database was not migrated, the previous image is enough. If an unexpected write happened, restore the snapshot from step 1 only when no new buyer payment landed after it. 0.20.0 will use the previous accounting vendor again. That is the known rollback trade-off for a short window.
 
-7. **After smoke.** Report the `/v1/rates` body, the unpaid USDC quote, the reference account balance was unchanged, and whether the quote was `oracle` or `fallback`.
+7. **After smoke.** Report the `/v1/rates` body, the unpaid USDC quote, that the reference account balance was unchanged, and whether the quote was `oracle` or `fallback`.

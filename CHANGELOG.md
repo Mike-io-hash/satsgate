@@ -223,7 +223,7 @@ Those notes describe core 0.15.0. Current health is at the top of Unreleased. Th
 ### Changed
 - Core 0.14.3 stores `api_key_id` on a new x402 ledger debit when the settle caller authenticated with a restricted `sgr_` key. That is the proxy's public `POST /v1/paywall/x402/settle`. The hosted gate authenticates with `GATE_TOKEN` and still leaves the column null, as does an account key. Existing rows are not rewritten. No new column and no new table. `payment_offers.api_key_id` stays null. That column is the buyer-limit scope, not this debit.
 - `satsgate-proxy` 0.12.1 logs `key fp` and the first 12 hex characters of SHA-256 of the API key at startup. It does not log any part of the key. `proxy/docker-compose.yml` tags the image `satsgate-proxy:0.12.1`.
-- Docs state the USDC network in plain language: Base only, with `eip155:84532` (Base Sepolia, live) and `eip155:8453` (Base, not live in this version). The Circle contract addresses link to BaseScan. `payTo` has to be an address the merchant controls on Base. USDC sent on another chain is not accepted. No behaviour change.
+- Docs state the USDC network in plain language: Base only, with `eip155:84532` (Base Sepolia) and `eip155:8453` (Base, not live in this version). The Circle contract addresses link to BaseScan. `payTo` has to be an address the merchant controls on Base. USDC sent on another chain is not accepted. No behaviour change.
 
 Those notes describe satsgate-mcp 0.11.0, proxy 0.12.1, gate 0.13.0, and core 0.14.3. Current versions are at the top of Unreleased. That release added no core migration. Copy `satsgate.sqlite3` before restart if you want a rollback point. Rebuild the proxy image and the core image. The gate image stayed 0.13.0. An agent that pays USDC sets both USD caps and brings a `PAYMENT-SIGNATURE` from its own wallet. That release left the facilitator at `https://x402.org/facilitator`.
 
@@ -294,8 +294,6 @@ Core 0.14.2 and proxy 0.12.0 add no migration and no new environment variable.
 New env vars, all optional: `SATSGATE_RATES_ENABLED` (default on), `SATSGATE_RATES_REFRESH_SECONDS` (60), `SATSGATE_RATES_STALE_SECONDS` (180), `SATSGATE_RATES_SOURCE_TIMEOUT_SECONDS` (2), `SATSGATE_RATES_OUTLIER_BPS` (200).
 
 ## [0.12.0] - 2026-10-19
-
-x402 on Base Sepolia (0.12.0). Hosted gate x402 (gate 0.12.0).
 
 ### Added
 - Core x402 v2 on Base Sepolia (`eip155:84532`), USDC, scheme `exact` (EIP-3009). The facilitator is `https://x402.org/facilitator` unless `SATSGATE_X402_FACILITATOR_URL` is set. Satsgate does not sign, broadcast, or hold a key. Base mainnet is refused at startup. There is no CDP path.

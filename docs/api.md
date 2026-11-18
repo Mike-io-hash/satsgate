@@ -336,11 +336,11 @@ When both rails are on and the quote is fresh, the challenge locks the other cur
 | `SATSGATE_ACCOUNTING_RATE_STALE_S` | 3600 | How old the primary read may be. |
 | `SATSGATE_ACCOUNTING_RATE_TIMEOUT_S` | 3 | Timeout for one primary read. |
 
-No new table. Copy `satsgate.sqlite3` before you restart. Lightning is unchanged when the quote is not used.
+Lightning is unchanged when the quote is not used.
 
 ### Hosted gate x402
 
-The gate offers Lightning, x402, or both, matching the site. A Lightning-only 402 is the 0.11.0 body and `WWW-Authenticate`, and it has no `PAYMENT-REQUIRED`. An x402 offer uses scheme `exact` on `eip155:84532`, the Base Sepolia USDC contract, and `payTo` equal to the verified address. The amount is the route's USD price, or the sats price converted with the effective quote and locked on that challenge. The gate does not cache the converted amount.
+The gate offers Lightning, x402, or both, matching the site. A Lightning-only 402 is the 0.11.0 body and `WWW-Authenticate`, and it has no `PAYMENT-REQUIRED`. An x402 offer uses scheme `exact` on the site's network: `eip155:84532` (Base Sepolia USDC) in test mode, `eip155:8453` (Base USDC) in live mode. The amount is the route's USD price, or the sats price converted with the effective quote and locked on that challenge. The gate does not cache the converted amount.
 
 `PAYMENT-SIGNATURE` is checked by core (verify, then the origin, then settle). Both payment headers on one request is `400 one_rail_only`. The origin does not see `PAYMENT-SIGNATURE`. A USDC payment is signed with `X-Satsgate-Paid-Usd-Atomic`. The payment-hash header is the EIP-3009 nonce, because the transaction id does not exist until settle, and settle runs after the origin.
 
