@@ -291,7 +291,35 @@ jobs:
           BUILD_SUMS: ${{ needs.build.outputs.sums }}
         run: |
           set -euo pipefail
-          python scripts/release/verify_dist.py --dir incoming --expect-json "${BUILD_SUMS}" --copy-to dist
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+
+          raw = json.loads(os.environ["BUILD_SUMS"])
+          if not isinstance(raw, dict) or not raw or not all(isinstance(k, str) and isinstance(v, str) for k, v in raw.items()):
+              raise SystemExit("empty map")
+          expect = raw
+          src, dst = pathlib.Path("incoming"), pathlib.Path("dist")
+          found = {}
+          for line in (src / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+              if not line.strip():
+                  continue
+              digest, name = line.split()
+              found[pathlib.Path(name).name] = digest
+          if found != expect:
+              raise SystemExit("SHA256SUMS does not match the build output")
+          present = {path.name for path in src.iterdir() if path.is_file() and path.name != "SHA256SUMS"}
+          if present != set(expect):
+              raise SystemExit("file set differs: " + ", ".join(sorted(present ^ set(expect))))
+          dst.mkdir()
+          for name, digest in sorted(expect.items()):
+              data = (src / name).read_bytes()
+              if hashlib.sha256(data).hexdigest() != digest:
+                  raise SystemExit(f"hash mismatch: {name}")
+              (dst / name).write_bytes(data)
+          PY
 
       - name: Publish to TestPyPI
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
@@ -395,7 +423,35 @@ jobs:
           BUILD_SUMS: ${{ needs.build.outputs.sums }}
         run: |
           set -euo pipefail
-          python scripts/release/verify_dist.py --dir incoming --expect-json "${BUILD_SUMS}" --copy-to dist
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+
+          raw = json.loads(os.environ["BUILD_SUMS"])
+          if not isinstance(raw, dict) or not raw or not all(isinstance(k, str) and isinstance(v, str) for k, v in raw.items()):
+              raise SystemExit("empty map")
+          expect = raw
+          src, dst = pathlib.Path("incoming"), pathlib.Path("dist")
+          found = {}
+          for line in (src / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+              if not line.strip():
+                  continue
+              digest, name = line.split()
+              found[pathlib.Path(name).name] = digest
+          if found != expect:
+              raise SystemExit("SHA256SUMS does not match the build output")
+          present = {path.name for path in src.iterdir() if path.is_file() and path.name != "SHA256SUMS"}
+          if present != set(expect):
+              raise SystemExit("file set differs: " + ", ".join(sorted(present ^ set(expect))))
+          dst.mkdir()
+          for name, digest in sorted(expect.items()):
+              data = (src / name).read_bytes()
+              if hashlib.sha256(data).hexdigest() != digest:
+                  raise SystemExit(f"hash mismatch: {name}")
+              (dst / name).write_bytes(data)
+          PY
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
