@@ -81,10 +81,42 @@ def test_t_c_6_2_live_offer_uses_one_free_slot(tmp_path, monkeypatch) -> None:
             origin.responder = lambda request: httpx.Response(200, content=b"ok")
             served = proxy.get("/blog/a", headers={"PAYMENT-SIGNATURE": signature})
             assert served.status_code == 200, served.text
-        balance, free = _free(core, account)
-    assert balance == before_balance
-    assert free == before_free - 1
-    assert sum(1 for url, _body in calls if url.endswith("/settle")) == 1
+            balance, free = _free(core, account)
+            assert balance == before_balance
+            assert free == before_free - 1
+            from app.db import hash_api_key
+
+            with sqlite3.connect(os.environ["SATSGATE_DB_PATH"]) as conn:
+                key_id = conn.execute(
+                    "SELECT id FROM api_keys WHERE key_hash = ?",
+                    (hash_api_key(os.environ["SATSGATE_API_KEY"]),),
+                ).fetchone()[0]
+                conn.execute("UPDATE quota_buckets SET used_unlocks = 500")
+                conn.execute("UPDATE client_quota SET used_unlocks = 500")
+                conn.execute("UPDATE clients SET balance_msat = 100000000")
+            paid_challenge = proxy.get("/blog/a")
+            assert paid_challenge.status_code == 402, paid_challenge.text
+            paid_body = paid_challenge.json()
+            paid_signature = _payload(
+                paid_challenge.headers["payment-required"],
+                buyer,
+                paid_body["x402"]["expires_at"],
+                authorization={"nonce": "0x" + "cd" * 32},
+            )
+            origin.responder = lambda request: httpx.Response(200, content=b"paid")
+            paid = proxy.get("/blog/a", headers={"PAYMENT-SIGNATURE": paid_signature})
+            assert paid.status_code == 200, paid.text
+            with sqlite3.connect(os.environ["SATSGATE_DB_PATH"]) as conn:
+                row = conn.execute(
+                    """
+                    SELECT api_key_id, network, amount_usd_atomic
+                    FROM ledger WHERE reason = 'paywall_verify'
+                    """
+                ).fetchone()
+            assert row[0] == key_id
+            assert row[1] == document["accepts"][0]["network"]
+            assert row[2] == int(paid_body["x402"]["amount"])
+    assert sum(1 for url, _body in calls if url.endswith("/settle")) == 2
 
 
 def test_t_c_6_3_replaying_a_test_signature_does_not_record_twice(tmp_path, monkeypatch) -> None:

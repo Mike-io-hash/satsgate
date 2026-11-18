@@ -19,7 +19,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE = ROOT / "docs" / "hosted-gate-terms.md"
+DEFAULT_TERMS = ROOT / "docs" / "terms"
 DEFAULT_DEST = ROOT / "web" / "terms" / "dist"
+_TERMS_FILE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.md$")
 CURRENT_CANONICAL = "https://satsgate.org/terms"
 TITLE = "Satsgate terms of use"
 
@@ -253,39 +255,84 @@ def _on_disk(dest: Path) -> dict[str, str]:
     return found
 
 
-def check_dest(dest: Path, files: dict[str, str]) -> int:
-    """Exit non-zero when dest is missing or would change. Do not write."""
+def load_frozen(terms_dir: Path) -> dict[str, str]:
+    """Dated markdown sources. The filename date is the effective date."""
+    if not terms_dir.is_dir():
+        raise BuildError(f"missing frozen terms directory {terms_dir}")
+    found: dict[str, str] = {}
+    for path in sorted(terms_dir.glob("*.md")):
+        match = _TERMS_FILE.match(path.name)
+        if match is None:
+            raise BuildError(f"unexpected terms source {path.name}")
+        found[match.group(1)] = path.read_text(encoding="utf-8")
+    if not found:
+        raise BuildError(f"no frozen terms sources in {terms_dir}")
+    return found
+
+
+def render_sources(current: str, frozen: dict[str, str]) -> dict[str, str]:
+    """Current page from the live source, every dated snapshot from its frozen source."""
+    current_date, current_blocks = parse_document(current)
+    if frozen.get(current_date) != current:
+        raise BuildError(f"docs/terms/{current_date}.md must be identical to the current terms")
+    files = {
+        "index.html": render_html(current_blocks, canonical=CURRENT_CANONICAL, css_href="/terms/terms.css", archive=False),
+        "terms.css": TERMS_CSS,
+    }
+    for date, text in sorted(frozen.items()):
+        snap_date, blocks = parse_document(text)
+        if snap_date != date:
+            raise BuildError(f"docs/terms/{date}.md says effective date {snap_date}")
+        files[f"{date}/index.html"] = render_html(
+            blocks,
+            canonical=f"{CURRENT_CANONICAL}/{date}",
+            css_href=f"/terms/{date}/terms.css",
+            archive=True,
+        )
+        files[f"{date}/terms.css"] = TERMS_CSS
+    return files
+
+
+def check_dest(dest: Path, files: dict[str, str], *, strict: bool = False) -> int:
+    """Compare the renderable set. Unknown on-disk files fail only with --strict."""
     actual = _on_disk(dest)
-    stale = sorted(set(files) ^ set(actual) | {rel for rel, content in files.items() if actual.get(rel) != content})
+    stale = sorted(rel for rel in files if actual.get(rel) != files[rel])
+    unknown = sorted(set(actual) - set(files))
     if stale:
         print("build_terms: dist is stale: " + ", ".join(stale), file=sys.stderr)
         return 1
+    if unknown:
+        print("build_terms: dist has unknown files: " + ", ".join(unknown), file=sys.stderr)
+        if strict:
+            return 1
     return 0
 
 
-def _frozen_date(files: dict[str, str]) -> str | None:
+def _frozen_dates(files: dict[str, str]) -> list[str]:
+    found: list[str] = []
     for rel in files:
         parent, _, name = rel.partition("/")
-        if name and _DATE_LINE.match(f"Effective date: {parent}."):
-            return parent
-    return None
+        if name and parent not in found and _DATE_LINE.match(f"Effective date: {parent}."):
+            found.append(parent)
+    return found
 
 
 def write_dest(dest: Path, files: dict[str, str]) -> None:
     """Write dist. Refuse to replace a dated snapshot whose bytes would change."""
-    date = _frozen_date(files)
-    if date is None:
+    dates = _frozen_dates(files)
+    if not dates:
         raise BuildError("internal: rendered site has no dated snapshot")
-    prefix = f"{date}/"
-    for rel, content in files.items():
-        if not rel.startswith(prefix):
-            continue
-        path = dest / rel
-        if not path.is_file():
-            continue
-        existing = path.read_text(encoding="utf-8")
-        if existing != content:
-            raise BuildError(f"refusing to overwrite frozen terms snapshot {rel}")
+    for date in dates:
+        prefix = f"{date}/"
+        for rel, content in files.items():
+            if not rel.startswith(prefix):
+                continue
+            path = dest / rel
+            if not path.is_file():
+                continue
+            existing = path.read_text(encoding="utf-8")
+            if existing != content:
+                raise BuildError(f"refusing to overwrite frozen terms snapshot {rel}")
     for rel, content in files.items():
         path = dest / rel
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -297,14 +344,20 @@ def write_dest(dest: Path, files: dict[str, str]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build the public terms HTML from the markdown source.")
     parser.add_argument("--check", action="store_true", help="Exit non-zero if dist is missing or stale. Do not write.")
+    parser.add_argument("--strict", action="store_true", help="Also fail when dist has files this repo cannot render.")
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
+    parser.add_argument("--terms-dir", type=Path, default=None)
     parser.add_argument("--dest", type=Path, default=DEFAULT_DEST)
     args = parser.parse_args(argv)
     try:
         text = args.source.read_text(encoding="utf-8")
-        files = render_site(text)
+        use_frozen = args.terms_dir is not None or args.source.resolve() == DEFAULT_SOURCE.resolve()
+        if use_frozen:
+            files = render_sources(text, load_frozen(args.terms_dir or DEFAULT_TERMS))
+        else:
+            files = render_site(text)
         if args.check:
-            return check_dest(args.dest, files)
+            return check_dest(args.dest, files, strict=args.strict)
         write_dest(args.dest, files)
     except BuildError as exc:
         print(f"build_terms: {exc}", file=sys.stderr)
