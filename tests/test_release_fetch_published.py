@@ -109,7 +109,7 @@ def test_b1_rejects_a_different_sha_an_extra_file_a_missing_file_and_a_foreign_h
         run(_body("testpypi", extra))
 
     missing = {"pkg-0.1.0-py3-none-any.whl": files["pkg-0.1.0-py3-none-any.whl"]}
-    with pytest.raises(fetch.FetchError, match="missing file"):
+    with pytest.raises(fetch.NotReady, match="incomplete"):
         run(_body("testpypi", missing))
 
     with pytest.raises(fetch.FetchError, match="refusing host"):
@@ -152,3 +152,41 @@ def test_b1_workflows_download_with_the_script_and_not_with_pip(tmp_path: Path) 
             opener=lambda _url: (404, b"{}"),
             downloader=lambda _url: b"",
         )
+
+
+def test_n1_transient_errors_retry_and_bad_sets_do_not(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import http.client
+
+    fetch = _load()
+    files = {"pkg-0.1.0-py3-none-any.whl": b"wheel-bytes", "pkg-0.1.0.tar.gz": b"sdist-bytes"}
+    sums = _sums(tmp_path, files)
+
+    def attempt(opener, downloader) -> None:
+        fetch.fetch(
+            index="testpypi",
+            name="satsgate-sdk",
+            version="0.10.0",
+            sums=sums,
+            dest=tmp_path / "out",
+            opener=opener,
+            downloader=downloader,
+        )
+
+    with pytest.raises(fetch.NotReady):
+        attempt(lambda _url: (500, b""), lambda _url: b"")
+    with pytest.raises(fetch.NotReady):
+        attempt(lambda _url: (_ for _ in ()).throw(http.client.IncompleteRead(b"x")), lambda _url: b"")
+    with pytest.raises(fetch.FetchError, match="downloaded bytes"):
+        attempt(lambda _url: (200, _body("testpypi", files)), lambda _url: b"not-the-published-bytes")
+
+    duplicated = json.loads(_body("testpypi", files))
+    duplicated["urls"].append(dict(duplicated["urls"][0]))
+    with pytest.raises(fetch.FetchError, match="duplicate"):
+        attempt(lambda _url: (200, json.dumps(duplicated).encode()), lambda _url: b"")
+
+    monkeypatch.setattr(fetch, "_default_opener", lambda _url: (404, b"{}"))
+    monkeypatch.setattr(fetch, "_default_downloader", lambda _url: b"")
+    code = fetch.main(
+        ["--index", "pypi", "--name", "satsgate-sdk", "--version", "0.10.0", "--sums", str(sums), "--dest", str(tmp_path / "gone")]
+    )
+    assert code == 2

@@ -94,15 +94,13 @@ def assert_exact(expected: dict[str, str], published: dict[str, str]) -> None:
     extra = sorted(set(published) - set(expected))
     missing = sorted(set(expected) - set(published))
     mismatched = sorted(name for name in expected.keys() & published.keys() if expected[name] != published[name])
-    if extra or missing or mismatched:
-        detail = []
-        if mismatched:
-            detail.append("sha mismatch: " + ", ".join(mismatched))
-        if extra:
-            detail.append("extra file: " + ", ".join(extra))
-        if missing:
-            detail.append("missing file: " + ", ".join(missing))
-        raise FetchError("; ".join(detail))
+    if mismatched:
+        raise FetchError("sha mismatch: " + ", ".join(mismatched))
+    if extra:
+        raise FetchError("extra file: " + ", ".join(extra))
+    if missing:
+        # The files that are present match. The index may still be catching up.
+        raise NotReady("published set is incomplete: " + ", ".join(missing))
 
 
 def fetch(
@@ -116,16 +114,22 @@ def fetch(
     downloader: Downloader,
 ) -> None:
     expected = parse_sums(sums.read_text(encoding="utf-8"))
-    status, body = opener(release_url(index, name, version))
-    if status == 404:
-        raise NotReady(f"{name} {version} is not on {index}")
+    try:
+        status, body = opener(release_url(index, name, version))
+    except (http.client.IncompleteRead, TimeoutError, OSError) as exc:
+        raise NotReady(exc.__class__.__name__) from exc
+    if status == 404 or status >= 500:
+        raise NotReady(f"{name} {version} is not on {index} ({status})")
     if status != 200:
         raise FetchError(f"index returned {status}")
     files = published_files(body, index=index)
     assert_exact(expected, {filename: sha for filename, (_url, sha) in files.items()})
     dest.mkdir(parents=True, exist_ok=True)
     for filename, (url, sha) in files.items():
-        payload = downloader(url)
+        try:
+            payload = downloader(url)
+        except (http.client.IncompleteRead, TimeoutError, OSError) as exc:
+            raise NotReady(exc.__class__.__name__) from exc
         got = hashlib.sha256(payload).hexdigest()
         if got != sha:
             raise FetchError(f"downloaded bytes do not match {filename}")
@@ -151,8 +155,8 @@ def _https_get(url: str, *, allowed: set[str], timeout: int, accept: str | None 
             return response.status, response.read()
         finally:
             connection.close()
-    except (TimeoutError, OSError) as exc:
-        raise FetchError(exc.__class__.__name__) from exc
+    except (http.client.IncompleteRead, TimeoutError, OSError) as exc:
+        raise NotReady(exc.__class__.__name__) from exc
 
 
 def _default_opener(url: str) -> tuple[int, bytes]:
@@ -161,6 +165,8 @@ def _default_opener(url: str) -> tuple[int, bytes]:
 
 def _default_downloader(url: str) -> bytes:
     status, body = _https_get(url, allowed=set(FILE_HOSTS.values()), timeout=60)
+    if status >= 500:
+        raise NotReady(f"download returned {status}")
     if status != 200:
         raise FetchError(f"download returned {status}")
     return body
