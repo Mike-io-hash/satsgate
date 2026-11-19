@@ -1,12 +1,9 @@
 """Public text guard: style, placeholders, internal names.
 
-T-DM.1 through T-DM.9. The production OpenAPI snapshot in
-``tests/fixtures/openapi-0.20.3.json`` was produced on the base commit before
-these edits: import ``app.main`` with ``SATSGATE_ENV=production``,
-``SATSGATE_DEV_MODE=0``, ``SATSGATE_WALLET_MODE=lnaddr``,
-``SATSGATE_LIGHTNING_ADDRESS=merchant@pay.example``, a 32-byte macaroon secret,
-and a temporary database, then ``json.dumps(app.openapi(), indent=2,
-sort_keys=True, ensure_ascii=False)``.
+T-DM.1 through T-DM.9. ``tests/fixtures/openapi-0.20.3.json`` is the historical
+production snapshot of core 0.20.3. The OpenAPI test pins the exact 0.20.4
+delta against that snapshot: ``info.version`` and the two route descriptions.
+An unknown core version fails instead of skipping.
 """
 
 from __future__ import annotations
@@ -115,7 +112,6 @@ WORDING_PATTERNS = (
     r"when the operator sets",
     r"after the operator has",
 )
-ROUTE_DOCSTRINGS = {("app/main.py", 704), ("app/main.py", 2136)}
 FROZEN_PARTS = ("docs/hosted-gate-terms.md", "docs/terms/", "tests/fixtures/terms-")
 COMMENT_ROOTS = ("app", "cli", "sdk", "proxy", "mcp", "gate", "scripts", "web/connect/src")
 ACCENTS = set("áéíóúÁÉÍÓÚñÑ¿¡")
@@ -545,8 +541,6 @@ def _misalign_hits() -> list[str]:
         for lineno, chunk in _units(rel, text):
             if _allow(rules, rel, lineno):
                 continue
-            if rel == "app/main.py" and lineno in {704, 2133, 2134, 2135, 2136, 2137}:
-                continue
             for phrase in MISALIGN:
                 if phrase in chunk:
                     hits.append(f"{rel}:{lineno} {phrase}")
@@ -799,12 +793,77 @@ def _app_version() -> str:
     return re.search(r'^APP_VERSION = "([^"]+)"', text, re.M).group(1)
 
 
-def test_t_dm_6_1_openapi_matches_the_base_snapshot(tmp_path: Path) -> None:
-    # The golden document is the 0.20.3 production schema. Refresh it when APP_VERSION changes.
-    if _app_version() != "0.20.3":
-        return
-    live = _canonical(_load_production_openapi(tmp_path / "openapi.sqlite3"))
-    assert live == GOLDEN.read_text(encoding="utf-8")
+_CORE_VERSION = "0.20.4"
+_VERSION_REFRESH = "core version changed: refresh the OpenAPI snapshot and its expected delta"
+_OPENAPI_SHA256 = "f93c71e3b43da7f9fe3acaabefeaa3ce559c09e7cb998713518f84fdc1f4ff8b"
+_TREE_SHA256 = "5e6a383386d43a51f6276340078265bee6c715707f0114114af3c3e66c780af2"
+_FORECAST_OLD = "Pace of recent paid unlocks, in milisatoshis. Never names a pack."
+_FORECAST_NEW = "Pace of recent paid unlocks, in millisatoshis. Never names a pack."
+_TOPUP_OLD = (
+    "Top up any amount of sats. Minimum is SATSGATE_TOPUP_MIN_SATS.\n\n"
+    "No key: the invoice can create the account when it is paid. A restricted\n"
+    "key cannot top up. The credited milisatoshis include the per-top-up bonus."
+)
+_TOPUP_NEW = (
+    "Top up any amount of sats. Minimum is SATSGATE_TOPUP_MIN_SATS.\n\n"
+    "No key: the invoice can create the account when it is paid. A restricted\n"
+    "key cannot top up. The credited millisatoshis include the per-top-up bonus."
+)
+_OPENAPI_DELTA = (
+    (("info", "version"), "0.20.3", "0.20.4"),
+    (("paths", "/v1/usage/forecast", "get", "description"), _FORECAST_OLD, _FORECAST_NEW),
+    (("paths", "/v1/topup/lightning", "post", "description"), _TOPUP_OLD, _TOPUP_NEW),
+)
+_HELP_NEW = "Convert satsgate credits to millisatoshis (1 credit = 2000 msat)."
+_HELP_OLD = "Convert satsgate credits to milisatoshis (1 credit = 2000 msat)."
+_ERROR_NEW = "refusing to overwrite millisat balances: "
+_ERROR_OLD = "refusing to overwrite milisat balances: "
+_APP_TEXT_MAP = {
+    "app/config.py": {"0.20.4": "0.20.3"},
+    "app/migrate_credits_to_msat.py": {_HELP_NEW: _HELP_OLD, _ERROR_NEW: _ERROR_OLD},
+}
+_SPELLING_EXEMPT = {
+    "docs/hosted-gate-terms.md": "Frozen terms.",
+    "docs/terms/2026-11-13.md": "Frozen terms.",
+    "tests/fixtures/terms-2026-11-13-index.html": "Frozen terms.",
+    "tests/fixtures/openapi-0.20.3.json": "Historical production snapshot.",
+    "tests/fixtures/tree-base.json": "Historical AST snapshot.",
+    "tests/fixtures/readme-base-tokens.json": "Historical README heading tokens.",
+    "tests/test_public_text.py": "This guard names the pattern it rejects.",
+}
+_MISSPELLING = re.compile("milisat", re.IGNORECASE)
+
+
+def _require_current_core() -> None:
+    assert _app_version() == _CORE_VERSION, _VERSION_REFRESH
+
+
+def _at(document: dict, path: tuple[str, ...]):
+    cursor = document
+    for key in path:
+        cursor = cursor[key]
+    return cursor
+
+
+def _put(document: dict, path: tuple[str, ...], value: str) -> None:
+    cursor = document
+    for key in path[:-1]:
+        cursor = cursor[key]
+    cursor[path[-1]] = value
+
+
+def test_t_m1_2_openapi_delta_is_exact(tmp_path: Path) -> None:
+    """T-M1.2. The live schema matches the 0.20.3 snapshot plus the pinned delta."""
+    _require_current_core()
+    assert hashlib.sha256(GOLDEN.read_bytes()).hexdigest() == _OPENAPI_SHA256
+    assert len(_OPENAPI_DELTA) == 3
+    fixture = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    expected = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    for path, old, new in _OPENAPI_DELTA:
+        assert _at(fixture, path) == old, path
+        _put(expected, path, new)
+    live = _load_production_openapi(tmp_path / "openapi.sqlite3")
+    assert _canonical(live) == _canonical(expected)
 
 
 def _stripped_dump(text: str) -> str:
@@ -813,18 +872,31 @@ def _stripped_dump(text: str) -> str:
     return ast.dump(tree)
 
 
-def test_t_dm_6_2_app_edits_are_comments_and_docstrings_only() -> None:
-    """Compare with the base commit when it is in the clone, and with the snapshot otherwise.
+def _mapped_dump(rel: str, text: str) -> str:
+    replacements = _APP_TEXT_MAP.get(rel, {})
+    if "0.20.4" in replacements and rel != "app/config.py":
+        raise AssertionError(f"core version mapping applies only to app/config.py, not {rel}")
+    tree = ast.parse(text)
+    _strip_docstrings(tree)
+    if replacements:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in replacements:
+                node.value = replacements[node.value]
+    return ast.dump(tree)
 
-    The snapshot guards the 0.20.3 tree. Refresh it when APP_VERSION changes.
+
+def test_t_m1_3_app_changes_are_text_only() -> None:
+    """T-M1.3. Docstring-stripped app trees match the snapshot after the pinned text map.
+
+    The base commit is cross-checked when this clone has it.
     """
-    if _app_version() != "0.20.3":
-        return
+    _require_current_core()
+    assert hashlib.sha256(TREE_BASE.read_bytes()).hexdigest() == _TREE_SHA256
     snapshot = json.loads(TREE_BASE.read_text(encoding="utf-8"))
     current_app: dict[str, str] = {}
     for path in sorted((ROOT / "app").rglob("*.py")):
         rel = path.relative_to(ROOT).as_posix()
-        current_app[rel] = _stripped_dump(path.read_text(encoding="utf-8"))
+        current_app[rel] = _mapped_dump(rel, path.read_text(encoding="utf-8"))
     assert current_app.keys() == snapshot["app"].keys()
     for rel, dumped in current_app.items():
         assert dumped == snapshot["app"][rel], rel
@@ -845,7 +917,30 @@ def test_t_dm_6_2_app_edits_are_comments_and_docstrings_only() -> None:
         assert rel.endswith(".py"), rel
         old = _git_bytes(f"{BASE}:{rel}")
         assert old is not None
-        assert _stripped_dump((ROOT / rel).read_text(encoding="utf-8")) == _stripped_dump(old.decode()), rel
+        current = _mapped_dump(rel, (ROOT / rel).read_text(encoding="utf-8"))
+        assert current == _stripped_dump(old.decode()), rel
+
+
+def test_t_m1_4_spelling_scan() -> None:
+    """T-M1.4. The raw pattern is absent from tracked text except the listed files."""
+    for rel, reason in _SPELLING_EXEMPT.items():
+        assert reason.strip() == reason and "\n" not in reason
+        assert "*" not in rel and not rel.endswith("/")
+    hits = []
+    for rel in _tracked():
+        if rel in _SPELLING_EXEMPT:
+            continue
+        path = ROOT / rel
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if _MISSPELLING.search(line):
+                hits.append(f"{rel}:{lineno}")
+    assert hits == [], "\n".join(hits)
 
 
 def test_t_dm_8_1_publishers_are_added_one_at_a_time() -> None:

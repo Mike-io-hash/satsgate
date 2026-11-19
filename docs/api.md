@@ -40,7 +40,7 @@ Configured via env vars:
   - checks the BOLT11 amount, network, `description_hash` (LUD-06), expiry, and payment hash before issuing a challenge
   - if the provider advertises LUD-21 `verify`, settlement is confirmed there too, including without the payer returning a preimage. Providers that omit it (Wallet of Satoshi) stay preimage-only
 
-`GET /health` returns `{"ok": true, "version": "0.20.3"}` and nothing else. Works with core 0.20.3 or later.
+`GET /health` returns `{"ok": true, "version": "0.20.4"}` and nothing else. Works with core 0.20.3 or later.
 
 ## Prepaid balance (millisatoshis)
 
@@ -428,7 +428,7 @@ Startup adds columns. It does not add a table. Copy `satsgate.sqlite3` before re
 
 An unpaid request is **402** with `WWW-Authenticate: L402 macaroon="...", invoice="..."` (macaroon before invoice, standard base64), which lnget and Alby `fetch402` already parse. The JSON body carries `amount_sats`, `payment_hash`, `invoice_expires_at`, and a hint for wallets that do not return a preimage. A route with `x402: true` adds `PAYMENT-REQUIRED` on that same 402. `Authorization: L402 <macaroon>:<preimage>` confirms the payment. `Authorization: L402 <macaroon>` polls status. The unlock fee is debited after the origin returns 2xx. Pending stays on that invoice (`402 payment_pending`, `Retry-After`). A used, expired, or wrong-route token is a fresh 402, not 401.
 
-The self-hosted proxy is 0.14.2. `GET /healthz` on the proxy reports `0.14.2`. Core health is `0.20.3`. In `mode: paywall` the proxy confirms payment, calls the origin, and debits only after a 2xx, on Lightning and on x402. A failed origin reports no debit. The same `PAYMENT-SIGNATURE` can be retried after that failure. Set `x402: true` on a route, and `server.public_base` to the URL buyers pay, to offer USDC as well. `x402: true` without `x402_mode` is test (Base Sepolia). `x402_mode: live` is Base (on by default on api.satsgate.org; a self-hosted core needs `SATSGATE_X402_CDP=1`, see [self-hosting](self-hosting.md)). Try on Base Sepolia with your agent first, then switch the site to live. Startup logs `key fp` and a SHA-256 fingerprint of the restricted key, not any part of the key. An x402 settle through this proxy records that key's id on the ledger debit. The proxy does not sell prepaid balance. Top up on the core, with Lightning or with `POST /v1/topup/usdc`.
+The self-hosted proxy is 0.14.2. `GET /healthz` on the proxy reports `0.14.2`. Core health is `0.20.4`. In `mode: paywall` the proxy confirms payment, calls the origin, and debits only after a 2xx, on Lightning and on x402. A failed origin reports no debit. The same `PAYMENT-SIGNATURE` can be retried after that failure. Set `x402: true` on a route, and `server.public_base` to the URL buyers pay, to offer USDC as well. `x402: true` without `x402_mode` is test (Base Sepolia). `x402_mode: live` is Base (on by default on api.satsgate.org; a self-hosted core needs `SATSGATE_X402_CDP=1`, see [self-hosting](self-hosting.md)). Try on Base Sepolia with your agent first, then switch the site to live. Startup logs `key fp` and a SHA-256 fingerprint of the restricted key, not any part of the key. An x402 settle through this proxy records that key's id on the ledger debit. The proxy does not sell prepaid balance. Top up on the core, with Lightning or with `POST /v1/topup/usdc`.
 
 Config is YAML: upstream base URL, routes (`per_request`, `uses:N`, `pass:<seconds>`, scope `route` or `site`), free paths, body limits, and an origin secret from the environment. `pricing.sats_per_credit` in an old file is ignored. Cheap calls should be bundles or passes.
 
@@ -452,7 +452,7 @@ Full steps, the signature, and a mainnet checklist are in [`proxy/README.md`](..
 
 An optional `sgr_` key enables read-only `challenge_status` and `credits_balance`. The key cannot top up or change the payee. Nothing in the x402 path asks for an account key. `list_sites` reads `GET /v1/sites` on the core URL: approved, listed sites, each with a gate URL and route prices. A USD-only route is included, with `price_currency` and `price_usd_atomic`. Set `SATSGATE_MCP_REGISTRY` to a JSON file or another URL only when that directory should be replaced.
 
-Core health is `0.20.3`. `GET /health` reports `0.20.3`. The MCP package is 0.13.1. Works with core 0.20.3 or later and gate 0.15.2 or later. It still cannot top up. Buying prepaid balance with USDC is `POST /v1/topup/usdc` on the core with the account key, not an MCP tool. While `SATSGATE_X402_CDP` is on, that top-up is Base mainnet USDC only. While it is off, it stays on Base Sepolia.
+Core health is `0.20.4`. `GET /health` reports `0.20.4`. The MCP package is 0.13.1. Works with core 0.20.3 or later and gate 0.15.2 or later. It still cannot top up. Buying prepaid balance with USDC is `POST /v1/topup/usdc` on the core with the account key, not an MCP tool. While `SATSGATE_X402_CDP` is on, that top-up is Base mainnet USDC only. While it is off, it stays on Base Sepolia.
 
 ```bash
 pip install satsgate-mcp

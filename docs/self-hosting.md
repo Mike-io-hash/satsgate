@@ -79,7 +79,7 @@ docker compose -f proxy/docker-compose.yml up --build
 
 ## Backups
 
-Copy `satsgate.sqlite3` before you restart the core. Deploy notes for the current core line are `docs/deploy-core-0.20.1.md`, `docs/deploy-core-0.20.2-terms-sdk.md`, and `docs/deploy-core-0.20.3.md`.
+Copy `satsgate.sqlite3` before you restart the core. Deploy notes for the current core line are `docs/deploy-core-0.20.1.md`, `docs/deploy-core-0.20.2-terms-sdk.md`, `docs/deploy-core-0.20.3.md`, and `docs/deploy-core-0.20.4.md`.
 
 ## Environment variables
 

@@ -116,7 +116,7 @@ def test_t_b_4_4_versions_match() -> None:
     assert mcp_project["project"]["version"] == "0.13.1"
     assert '__version__ = "0.13.1"' in mcp_init
 
-    assert 'APP_VERSION = "0.20.3"' in _text(ROOT / "app" / "config.py")
+    assert 'APP_VERSION = "0.20.4"' in _text(ROOT / "app" / "config.py")
     assert '__version__ = "0.15.2"' in _text(ROOT / "gate" / "src" / "satsgate_gate" / "__init__.py")
 
 

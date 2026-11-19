@@ -1,4 +1,4 @@
-"""T-5.1 and T-5.1-M. Milisat storage, rounding, and the credit conversion tool."""
+"""T-5.1 and T-5.1-M. Millisat storage, rounding, and the credit conversion tool."""
 
 from __future__ import annotations
 

@@ -185,7 +185,7 @@ def apply(path: str, *, now: int | None = None) -> dict:
         problem = _diverged(conn)
         if problem:
             conn.execute("ROLLBACK")
-            raise MigrationError("refusing to overwrite milisat balances: " + problem)
+            raise MigrationError("refusing to overwrite millisat balances: " + problem)
         _ensure_columns(conn)
         for item in report["rows"]:
             conn.execute(
@@ -257,7 +257,7 @@ def reverse(path: str) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Convert satsgate credits to milisatoshis (1 credit = 2000 msat).")
+    parser = argparse.ArgumentParser(description="Convert satsgate credits to millisatoshis (1 credit = 2000 msat).")
     parser.add_argument("--db", required=True, help="SQLite file to read or convert. There is no default path.")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
