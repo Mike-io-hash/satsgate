@@ -558,7 +558,7 @@ def _add_column(conn: sqlite3.Connection, table: str, name: str, ddl: str) -> No
 
 
 def _migrate_pricing(conn: sqlite3.Connection) -> None:
-    """Milisat balance, quota, and the conversion meta row. Existing credits stay put.
+    """Millisat balance, quota, and the conversion meta row. Existing credits stay put.
 
     Startup does not convert credits. ``migrate_credits_to_msat`` does that, on
     a copy first, and only against the database path it is given. New writes

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.4] - 2026-11-19
+
+Core **0.20.4**. Hosted gate stays **0.15.2**. Packages are unchanged and nothing is published. No new table, column, or environment variable.
+
+### Fixed
+- Spelling of "millisatoshis" in the descriptions of `GET /v1/usage/forecast` and `POST /v1/topup/lightning`, shown in `/openapi.json` and `/docs`.
+- The same spelling in the help and error text of the credit conversion tool (`app/migrate_credits_to_msat.py`).
+
 ## [Package patch releases] - 2026-11-18
 
 Documentation and package metadata improvements.

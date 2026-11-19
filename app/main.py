@@ -701,7 +701,7 @@ def v1_usage_forecast(
     x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
     lookback_hours: int = 24,
 ):
-    """Pace of recent paid unlocks, in milisatoshis. Never names a pack."""
+    """Pace of recent paid unlocks, in millisatoshis. Never names a pack."""
     client = _reader_client(x_api_key)
     if isinstance(client, JSONResponse):
         return client
@@ -2133,7 +2133,7 @@ def v1_topup_lightning(
     """Top up any amount of sats. Minimum is SATSGATE_TOPUP_MIN_SATS.
 
     No key: the invoice can create the account when it is paid. A restricted
-    key cannot top up. The credited milisatoshis include the per-top-up bonus.
+    key cannot top up. The credited millisatoshis include the per-top-up bonus.
     """
     from .pricing import bonus_bps, credit_msat_for_principal
     from .signup import SignupLimited
