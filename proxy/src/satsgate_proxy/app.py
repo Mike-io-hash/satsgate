@@ -16,7 +16,7 @@ from starlette.routing import Route
 from satsgate_proxy import __version__
 from satsgate_proxy.client_ip import buyer_ip_for_core
 from satsgate_proxy.config import Route as PayRoute
-from satsgate_proxy.config import Settings
+from satsgate_proxy.config import Settings, derived_route
 from satsgate_proxy.core_client import (
     CoreResult,
     charge_lightning,
@@ -29,6 +29,19 @@ from satsgate_proxy.core_client import (
 from satsgate_proxy.forward import call_upstream, forward
 from satsgate_proxy.macaroon import macaroon_fields
 from satsgate_proxy.match import match_request
+from satsgate_proxy.mcp_http import (
+    ZERO_PAYMENT_HASH,
+    FreeForward,
+    PaidCall,
+    Parsed,
+    RpcError,
+    UnsupportedCall,
+    classify,
+    encode_tool_header,
+    inspect_post,
+    note_rejection,
+    rejection_body,
+)
 
 log = logging.getLogger("satsgate_proxy")
 
@@ -201,8 +214,16 @@ async def _unlock(request: Request, settings: Settings, route: PayRoute, header:
     return await unlock_with_preimage(client, settings, route, header)
 
 
-async def _pay_x402(request: Request, settings: Settings, route: PayRoute, payment_signature: str) -> Response:
-    """Verify, call the origin, and settle only after a 2xx. The proxy never calls the facilitator."""
+async def _pay_x402(
+    request: Request,
+    settings: Settings,
+    route: PayRoute,
+    payment_signature: str,
+    *,
+    extra_headers: tuple[tuple[str, str], ...] = (),
+    delivered=None,
+) -> Response:
+    """Verify, call the origin, and settle only after delivery. The proxy never calls the facilitator."""
     client: httpx.AsyncClient = request.app.state.http
     verified = await verify_x402(
         client,
@@ -219,8 +240,10 @@ async def _pay_x402(request: Request, settings: Settings, route: PayRoute, payme
         payment_hash=verified.payment_hash,
         resource=route.resource,
         paid_usd_atomic=verified.amount_usd_atomic,
+        extra_headers=extra_headers,
     )
-    if exchanged.error or not (200 <= exchanged.status < 300):
+    accepted = delivered(exchanged) if delivered is not None else 200 <= exchanged.status < 300
+    if exchanged.error or not accepted:
         return exchanged.response(use_spent=False if exchanged.error else None)
     settled = await settle_x402(
         client,
@@ -234,8 +257,16 @@ async def _pay_x402(request: Request, settings: Settings, route: PayRoute, payme
     return exchanged.response(use_spent=None, extra=(("PAYMENT-RESPONSE", settled.payment_response),))
 
 
-async def _serve_lightning(request: Request, settings: Settings, route: PayRoute, authorization: str) -> Response | str | None:
-    """Confirm the Lightning payment, call the origin, and charge only on 2xx."""
+async def _serve_lightning(
+    request: Request,
+    settings: Settings,
+    route: PayRoute,
+    authorization: str,
+    *,
+    extra_headers: tuple[tuple[str, str], ...] = (),
+    delivered=None,
+) -> Response | str | None:
+    """Confirm the Lightning payment, call the origin, and charge only after delivery."""
     unlocked = await _unlock(request, settings, route, authorization)
     if unlocked.action == "pending":
         return _pending(unlocked)
@@ -269,10 +300,12 @@ async def _serve_lightning(request: Request, settings: Settings, route: PayRoute
         payment_hash=payment_hash.lower(),
         resource=route.resource,
         paid_sats=paid,
+        extra_headers=extra_headers,
     )
     if exchanged.error:
         return exchanged.response(use_spent=False)
-    if not (200 <= exchanged.status < 300):
+    accepted = delivered(exchanged) if delivered is not None else 200 <= exchanged.status < 300
+    if not accepted:
         return exchanged.response(use_spent=None)
     charged = await charge_lightning(
         request.app.state.http,
@@ -331,7 +364,46 @@ async def handle(request: Request) -> Response:
     route = found.route
     if not isinstance(route, PayRoute):
         return _json(404, "not_found")
+    if route.mcp is not None:
+        return await _serve_mcp(request, settings, route)
+    return await _paywall(request, settings, route)
 
+
+def _rpc_error(error: RpcError) -> JSONResponse:
+    note_rejection(error)
+    return JSONResponse(rejection_body(error), status_code=400, headers={"Cache-Control": "no-store"})
+
+
+def _unsupported(call: UnsupportedCall) -> Response:
+    if call.notification:
+        return Response(status_code=202)
+    body = rejection_body(RpcError("unsupported_method", call.request_id))
+    return JSONResponse(body, status_code=200, headers={"Cache-Control": "no-store"})
+
+
+async def _forward_mcp_free(request: Request, settings: Settings, tool_name: str | None) -> Response:
+    extra: tuple[tuple[str, str], ...] = ()
+    if tool_name is not None:
+        extra = (("X-Satsgate-Mcp-Tool", encode_tool_header(tool_name)),)
+    exchanged = await call_upstream(
+        request,
+        settings,
+        payment_hash=ZERO_PAYMENT_HASH,
+        resource="free",
+        paid_sats=0,
+        extra_headers=extra,
+    )
+    return exchanged.response(use_spent=None)
+
+
+async def _paywall(
+    request: Request,
+    settings: Settings,
+    route: PayRoute,
+    *,
+    extra_headers: tuple[tuple[str, str], ...] = (),
+    delivered=None,
+) -> Response:
     reason: str | None = None
     authorization = _l402_authorization(request)
     payment_signature = _payment_signature(request)
@@ -344,9 +416,23 @@ async def handle(request: Request) -> Response:
             or any(char in payment_signature for char in "\r\n")
         ):
             return _json(400, "bad_signature")
-        return await _pay_x402(request, settings, route, payment_signature)
+        return await _pay_x402(
+            request,
+            settings,
+            route,
+            payment_signature,
+            extra_headers=extra_headers,
+            delivered=delivered,
+        )
     if authorization is not None:
-        served = await _serve_lightning(request, settings, route, authorization)
+        served = await _serve_lightning(
+            request,
+            settings,
+            route,
+            authorization,
+            extra_headers=extra_headers,
+            delivered=delivered,
+        )
         if isinstance(served, Response):
             return served
         reason = served
@@ -368,6 +454,35 @@ async def handle(request: Request) -> Response:
     if challenge.action != "challenge":
         return _json(502, "paywall_unavailable")
     return _challenge_response(challenge, reason, route)
+
+
+async def _serve_mcp(request: Request, settings: Settings, route: PayRoute) -> Response:
+    if request.method.upper() == "DELETE":
+        if request.state.body:
+            return _rpc_error(RpcError("delete_body_not_allowed"))
+        return await _forward_mcp_free(request, settings, None)
+    inspected = inspect_post(
+        request.state.body,
+        content_types=request.headers.getlist("content-type"),
+        accepts=request.headers.getlist("accept"),
+        raw_headers=list(request.headers.raw),
+    )
+    if isinstance(inspected, RpcError):
+        return _rpc_error(inspected)
+    if not isinstance(inspected, Parsed) or route.mcp is None:
+        return _rpc_error(RpcError("invalid_message"))
+    outcome = classify(inspected, route.mcp, route.name)
+    if isinstance(outcome, RpcError):
+        return _rpc_error(outcome)
+    if isinstance(outcome, UnsupportedCall):
+        return _unsupported(outcome)
+    if isinstance(outcome, FreeForward):
+        return await _forward_mcp_free(request, settings, outcome.tool_name)
+    if not isinstance(outcome, PaidCall):
+        return _rpc_error(RpcError("invalid_message"))
+    derived = derived_route(route, outcome.tool_name)
+    extra = (("X-Satsgate-Mcp-Tool", encode_tool_header(outcome.tool_name)),)
+    return await _paywall(request, settings, derived, extra_headers=extra)
 
 
 def build_app(settings: Settings, *, transport: httpx.AsyncBaseTransport | None = None) -> Starlette:

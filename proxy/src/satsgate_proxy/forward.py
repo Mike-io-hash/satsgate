@@ -82,6 +82,7 @@ async def call_upstream(
     resource: str | None,
     paid_sats: int | None = None,
     paid_usd_atomic: int | None = None,
+    extra_headers: tuple[tuple[str, str], ...] = (),
 ) -> UpstreamExchange:
     client: httpx.AsyncClient = request.app.state.http
     target = request_target(request.scope)
@@ -106,6 +107,7 @@ async def call_upstream(
                 ),
             )
         )
+    headers.extend(extra_headers)
     upstream = settings.upstream_base_url + target
     deadline = time.monotonic() + settings.upstream_timeout
     try:
