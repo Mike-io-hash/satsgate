@@ -714,6 +714,8 @@ def test_server_registers_tools_and_returns_a_qr_image(tmp_path: Path) -> None:
         "list_sites",
         "pay_and_fetch",
         "quote",
+        "remote_call_tool",
+        "remote_list_tools",
     ]
     pay = next(tool for tool in server._tool_manager.list_tools() if tool.name == "pay_and_fetch")
     result = asyncio.run(pay.fn(url="https://shop.example/a", mode="human"))
