@@ -1391,7 +1391,10 @@ class _Remote:
         }
 
     def _transport(self, ctx, exc: BuyerError, *, paid: bool, token_kept: bool, paid_with=None, paid_sats=None, signature_sent=None, retry_same=None, invoice_kept: bool = False) -> dict:
-        detail = exc.message + _suffix(ctx, paid, token_kept, invoice_kept=invoice_kept)
+        message = exc.message
+        if message.endswith(_SUFFIX_FREE):
+            message = message[: -len(_SUFFIX_FREE)]
+        detail = message + _suffix(ctx, paid, token_kept, invoice_kept=invoice_kept)
         return self._fail(ctx, exc.code, detail, paid=paid, paid_with=paid_with, paid_sats=paid_sats, token_kept=token_kept, signature_sent=signature_sent, retry_same=retry_same)
 
     def _annotated(self, ctx, challenge: Challenge) -> dict:

@@ -2444,12 +2444,64 @@ def test_rc_2_18_a_call_error_is_a_payload(tmp_path: Path, kind: str) -> None:
     assert result.payload["error"] == expected
     assert result.payload["paid"] is False
     assert result.payload["token_kept"] is False
+    detail = {
+        "timeout": "The request timed out." + _SUFFIX_FREE,
+        "renew_500": "The MCP handshake failed (HTTP 500)." + _SUFFIX_FREE,
+        "renew_402": "The server asked for payment during initialize. This client does not pay for the handshake."
+        + _SUFFIX_FREE,
+        "human_timeout": "The request timed out." + _SUFFIX_INVOICE,
+    }[kind]
+    assert result.payload["detail"] == detail
     if kind == "human_timeout":
-        assert result.payload["detail"].endswith(_SUFFIX_INVOICE)
         assert buyer.store.quote_for(_key())["payment_hash"] == PAYMENT
-    else:
-        assert result.payload["detail"].endswith(_SUFFIX_FREE)
     assert wallet.invoices == []
+
+
+@pytest.mark.parametrize("kind", ["nwc_renew_500", "nwc_renew_402", "token_renew_500", "token_renew_402"])
+def test_rc_5_18_a_renewal_error_after_a_credential_keeps_the_token(tmp_path: Path, kind: str) -> None:
+    state = {"init": 0}
+    status = 500 if kind.endswith("500") else 402
+
+    def on_initialize(_request, body):
+        state["init"] += 1
+        if state["init"] >= 2:
+            return httpx.Response(status, json={"error": "down"})
+        return _rpc(
+            body["id"],
+            {"protocolVersion": "2025-11-25", "capabilities": {}, "serverInfo": {"name": "origin", "version": "0"}},
+            headers={"mcp-session-id": "sess-1"},
+        )
+
+    def on_call(request, body):
+        if request.headers.get("authorization"):
+            return httpx.Response(404, content=b"missing")
+        return _priced(body["id"], _lightning())
+
+    buyer, _http, wallet = _buyer(
+        tmp_path,
+        _origin(modern=False, on_initialize=on_initialize, on_call=on_call),
+        nwc_uri=NWC,
+        max_payment_sats=100,
+        daily_max_sats=500,
+    )
+    buyer._now = Clock()
+    if kind.startswith("token"):
+        _save_token(buyer, uses=5)
+    result = asyncio.run(buyer.remote_call_tool(URL, "echo", mode="nwc"))
+    base = {
+        500: "The MCP handshake failed (HTTP 500).",
+        402: "The server asked for payment during initialize. This client does not pay for the handshake.",
+    }[status]
+    paid = kind.startswith("nwc")
+    assert list(result.payload) == _FAILURE_KEYS
+    assert result.payload["error"] == ("connect_failed" if status == 500 else "handshake_not_free")
+    assert result.payload["paid"] is paid
+    assert result.payload["paid_with"] == ("lightning" if paid else None)
+    assert result.payload["paid_sats"] == (21 if paid else None)
+    assert result.payload["token_kept"] is True
+    assert result.payload["detail"] == base + _SUFFIX_TOKEN
+    assert buyer.store.token_for(_key())["uses_remaining"] == 5
+    assert wallet.invoices == ([INVOICE] if paid else [])
 
 
 @pytest.mark.parametrize("kind", ["x402_not_offered", "core_error", "session_expired"])
