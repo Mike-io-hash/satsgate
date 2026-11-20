@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Protocol
+from urllib.parse import unquote_to_bytes
 
 
 class MatchError(ValueError):
@@ -42,6 +43,44 @@ def compile_glob(pattern: str) -> re.Pattern[str]:
         body.append("/" + re.escape(part))
     body.append("$")
     return re.compile("".join(body))
+
+
+def unsafe_request_path(raw_path: bytes) -> bool:
+    """Return true when a raw request path must be rejected.
+
+    The query string is ignored. The raw bytes and up to three percent-decodings
+    are checked. A path is unsafe when any of these holds:
+
+    1. A segment is ``.`` or ``..`` once text after ``;`` is removed.
+    2. A backslash, or an encoded slash or backslash, is present.
+    3. A fourth decoding would still change the bytes.
+    """
+    view = raw_path.split(b"?", 1)[0]
+    for index in range(4):
+        if _dot_segment(view) or _other_separator(view):
+            return True
+        decoded = unquote_to_bytes(view)
+        if decoded == view:
+            return False
+        if index == 3:
+            return True
+        view = decoded
+    return False
+
+
+def _dot_segment(view: bytes) -> bool:
+    for part in view.replace(b"\\", b"/").split(b"/"):
+        segment = part.split(b";", 1)[0]
+        if segment in {b".", b".."}:
+            return True
+    return False
+
+
+def _other_separator(view: bytes) -> bool:
+    if b"\\" in view:
+        return True
+    folded = view.lower()
+    return b"%2f" in folded or b"%5c" in folded
 
 
 def compile_regex(pattern: str) -> re.Pattern[str]:
