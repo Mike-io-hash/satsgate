@@ -16,8 +16,8 @@ import httpx
 import pytest
 
 from satsgate_proxy.config import ConfigError, derived_route
-from satsgate_proxy.mcp_http import PROTOCOL_VERSIONS
-from test_satsgate_proxy import KEY, SECRET, World, _client, _load, _macaroon, _snippet
+from satsgate_proxy.mcp_http import PROTOCOL_VERSIONS, mcp_tool_succeeded
+from test_satsgate_proxy import KEY, PAYMENT, SECRET, World, _client, _load, _macaroon, _snippet
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -317,7 +317,42 @@ _ACCEPT = "application/json, text/event-stream"
 
 
 class McpWorld(World):
+    def __init__(self) -> None:
+        super().__init__()
+        self.queue: list[httpx.Response] = []
+
+    def _unlock(self, snap: dict) -> httpx.Response:
+        response = super()._unlock(snap)
+        if response.status_code != 200:
+            return response
+        body = response.json()
+        body.pop("amount_sats", None)
+        return httpx.Response(200, json=body)
+
+    def _core(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/x402/verify") or path.endswith("/x402/settle"):
+            snap = self._snap(request)
+            self.core_calls.append(snap)
+            if path.endswith("/x402/verify"):
+                return httpx.Response(
+                    200,
+                    json={"ok": True, "serve": True, "amount_usd_atomic": 10000, "nonce": "ab" * 32},
+                )
+            return httpx.Response(
+                200,
+                json={"ok": True, "payment_response": "c2V0dGxlZA"},
+                headers={"payment-response": "c2V0dGxlZA"},
+            )
+        return super()._core(request)
+
     def _upstream(self, request: httpx.Request) -> httpx.Response:
+        if self.queue:
+            raw = bytes(request.content)
+            snap = self._snap(request)
+            snap["raw"] = raw
+            self.up_calls.append(snap)
+            return self.queue.pop(0)
         raw = bytes(request.content)
         snap = self._snap(request)
         snap["raw"] = raw
@@ -849,3 +884,275 @@ def test_pm_4_checks_run_before_an_invoice(tmp_path: Path, monkeypatch: pytest.M
         )
     assert mixed.status_code == 400 and _word(mixed) == "invalid_message"
     assert world.core_calls == [] and world.up_calls == []
+
+
+def _result(result: dict, *, ident: object = 1) -> bytes:
+    return json.dumps({"jsonrpc": "2.0", "id": ident, "result": result}).encode("utf-8")
+
+
+def _rpc_error_body(error: dict, *, ident: object = 1) -> bytes:
+    return json.dumps({"jsonrpc": "2.0", "id": ident, "error": error}).encode("utf-8")
+
+
+def _reply(status: int, body: bytes, content_type: str) -> httpx.Response:
+    headers = {"content-type": content_type} if content_type else {}
+    return httpx.Response(status, content=body, headers=headers)
+
+
+def _paths(world: McpWorld) -> list[str]:
+    return [call["path"] for call in world.core_calls]
+
+
+def _auth(resource: str) -> dict[str, str]:
+    return {"Authorization": f"L402 {_macaroon(resource)}:{'cd' * 32}"}
+
+
+def _signed(headers: dict, *, payment_hash: str) -> None:
+    signature = headers["x-satsgate-signature"]
+    now = int(signature.split(",", 1)[0].split("=", 1)[1])
+    assert _snippet("fastapi_verify.py").verify_origin_signature(
+        secret=SECRET,
+        header=signature,
+        method="POST",
+        target="/mcp",
+        payment_hash=payment_hash,
+        now=now,
+        max_skew_seconds=300,
+    )
+
+
+def _failure_replies() -> list[tuple[str, httpx.Response]]:
+    success = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}).encode("utf-8")
+    doubled = b"data: " + success + b"\n\ndata: " + success + b"\n\n"
+    return [
+        ("is_error", _reply(200, _result({"isError": True}), "application/json")),
+        ("rpc_error", _reply(200, _rpc_error_body({"code": -32000, "message": "failed"}), "application/json")),
+        ("result_type", _reply(200, _result({"resultType": "input_required"}), "application/json")),
+        ("task", _reply(200, _result({"task": {"id": "job"}}), "application/json")),
+        ("text_flag", _reply(200, _result({"isError": "true"}), "application/json")),
+        ("wrong_id", _reply(200, _result({"ok": True}, ident=9), "application/json")),
+        ("two_matches", _reply(200, doubled, "text/event-stream")),
+        ("accepted", _reply(202, b"", "")),
+        ("html", _reply(200, b"<p>no</p>", "text/html")),
+        ("not_json", _reply(200, b"not-json", "application/json")),
+    ]
+
+
+def test_pm_5_1_unpaid_quote_is_a_classic_402(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
+    world = McpWorld()
+    with _client(settings, world) as client:
+        response = _post(client, _rpc("tools/call", {"name": "quote"}))
+    assert response.status_code == 402
+    assert response.headers["www-authenticate"].startswith('L402 macaroon="')
+    body = response.json()
+    assert body["error"] == "payment_required"
+    assert body["amount_sats"] == 21
+    assert body["resource"] == "route:tools:quote"
+    assert body["max_uses"] == 1
+    assert body["access_seconds"] is None
+    assert body["invoice"] and body["macaroon"] and body["payment_hash"]
+    sent = world.core_calls[0]["body"]
+    assert sent["resource"] == "route:tools:quote"
+    assert sent["amount_sats"] == 21
+    assert sent["max_uses"] == 1
+    assert sent["memo"] == "One market quote"
+    assert "x402" not in sent
+    assert world.up_calls == []
+
+    x402_settings = _mcp_settings(tmp_path, monkeypatch, _TOOLS)
+    x402_world = McpWorld()
+    with _client(x402_settings, x402_world) as client:
+        priced = _post(client, _rpc("tools/call", {"name": "quote"}))
+    assert priced.status_code == 402
+    assert "payment-required" in priced.headers
+    assert priced.json()["x402"]["testing"] is True
+    challenge = x402_world.core_calls[0]["body"]
+    assert challenge["x402"] is True
+    assert challenge["resource"] == "route:tools:quote"
+    assert challenge["resource_url"] == "https://pay.example/mcp"
+
+
+def test_pm_5_2_each_tool_has_its_own_price(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
+    world = McpWorld()
+    with _client(settings, world) as client:
+        deep = _post(client, _rpc("tools/call", {"name": "deep_search"}))
+    assert deep.status_code == 402
+    assert deep.json()["resource"] == "route:tools:deep_search"
+    assert deep.json()["amount_sats"] == 100
+    assert deep.json()["max_uses"] == 10
+    assert world.core_calls[0]["body"]["resource"] == "route:tools:deep_search"
+    assert world.core_calls[0]["body"]["amount_sats"] == 100
+    assert world.core_calls[0]["body"]["max_uses"] == 10
+
+    paid_default = _TOOLS.replace("  x402: true\n", "").replace(
+        "    default: free\n",
+        "    default:\n      price_sats: 9\n      access: per_request\n",
+    )
+    fresh = McpWorld()
+    with _client(_mcp_settings(tmp_path, monkeypatch, paid_default), fresh) as client:
+        other = _post(client, _rpc("tools/call", {"name": "fresh_tool"}))
+    assert other.status_code == 402
+    assert other.json()["resource"] == "route:tools:fresh_tool"
+    assert other.json()["amount_sats"] == 9
+    assert fresh.core_calls[0]["body"]["memo"] == "Market data tools"
+
+
+def test_pm_5_3_token_for_one_tool_does_not_open_another(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
+    world = McpWorld()
+    with _client(settings, world) as client:
+        response = _post(client, _rpc("tools/call", {"name": "deep_search"}), _auth("route:tools:quote"))
+    assert response.status_code == 402
+    assert response.json()["reason"] == "resource mismatch"
+    assert response.json()["resource"] == "route:tools:deep_search"
+    assert world.up_calls == []
+    assert not any(path.endswith("/charge") for path in _paths(world))
+    assert not any(path.endswith("/verify") and "/x402/" not in path for path in _paths(world))
+
+
+def test_pm_5_4_paid_success_charges_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
+    world = McpWorld()
+    body = _result({"content": [{"type": "text", "text": "ok"}]})
+    world.queue.append(_reply(200, body, "application/json"))
+    with _client(settings, world) as client:
+        response = _post(client, _rpc("tools/call", {"name": "quote"}), _auth("route:tools:quote"))
+    assert response.status_code == 200
+    assert response.content == body
+    headers = world.up_calls[0]["headers"]
+    assert headers["x-satsgate-resource"] == "route:tools:quote"
+    assert headers["x-satsgate-paid-sats"] == "21"
+    assert headers["x-satsgate-mcp-tool"] == "quote"
+    assert headers["x-satsgate-payment-hash"] == PAYMENT
+    _signed(headers, payment_hash=PAYMENT)
+    assert _paths(world) == [
+        "/v1/paywall/verify",
+        "/v1/paywall/charge",
+    ]
+
+
+def test_pm_5_5_failed_tool_takes_no_fee(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
+    world = McpWorld()
+    header = _auth("route:tools:quote")
+    raw = _rpc("tools/call", {"name": "quote"})
+    with _client(settings, world) as client:
+        for _name, reply in _failure_replies():
+            world.queue.append(reply)
+            response = _post(client, raw, header)
+            assert response.status_code == reply.status_code
+            assert response.content == reply.content
+            assert not any(path.endswith("/charge") for path in _paths(world))
+        world.queue.append(_reply(200, _result({"ok": True}), "application/json"))
+        done = _post(client, raw, header)
+    assert done.status_code == 200
+    assert sum(path.endswith("/charge") for path in _paths(world)) == 1
+
+
+def test_pm_5_6_failed_x402_tool_does_not_settle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch, _TOOLS)
+    world = McpWorld()
+    header = {"PAYMENT-SIGNATURE": "sig-test"}
+    raw = _rpc("tools/call", {"name": "quote"})
+    with _client(settings, world) as client:
+        for _name, reply in _failure_replies():
+            world.queue.append(reply)
+            response = _post(client, raw, header)
+            assert response.status_code == reply.status_code
+            assert response.content == reply.content
+            assert "payment-response" not in response.headers
+            assert not any(path.endswith("/x402/settle") for path in _paths(world))
+        world.queue.append(_reply(200, _result({"ok": True}), "application/json"))
+        done = _post(client, raw, header)
+    assert done.status_code == 200
+    assert done.headers["payment-response"] == "c2V0dGxlZA"
+    assert sum(path.endswith("/x402/settle") for path in _paths(world)) == 1
+    assert sum(path.endswith("/x402/verify") for path in _paths(world)) == len(_failure_replies()) + 1
+
+
+def test_pm_5_7_sse_result_decides_the_fee(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
+    header = _auth("route:tools:quote")
+    raw = _rpc("tools/call", {"name": "quote"})
+    progress = json.dumps({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progress": 1}})
+    final = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"ok": True}})
+    crlf = (
+        b":\r\n\r\n"
+        + f"event: message\r\ndata: {progress}\r\n\r\n".encode()
+        + f"data: {final}\r\n\r\n".encode()
+    )
+    failed = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"isError": True}})
+    lf = f"data: {failed}\n\n".encode()
+    errored = json.dumps({"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "failed"}})
+    after_note = f"data: {progress}\n\ndata: {errored}\n\n".encode()
+    broken = b"data: {not-json}\n\n"
+    cases = [
+        (crlf, True),
+        (lf, False),
+        (after_note, False),
+        (broken, False),
+    ]
+    for body, charged in cases:
+        world = McpWorld()
+        world.queue.append(_reply(200, body, "text/event-stream"))
+        with _client(settings, world) as client:
+            response = _post(client, raw, header)
+        assert response.status_code == 200
+        assert response.content == body
+        assert any(path.endswith("/charge") for path in _paths(world)) is charged
+
+
+def test_pm_5_8_explicit_signal_matches_the_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    explicit = _mcp_settings(tmp_path, monkeypatch)
+    omitted = _mcp_settings(
+        tmp_path,
+        monkeypatch,
+        _TOOLS.replace("  x402: true\n", "").replace("    signal: http_402\n", ""),
+    )
+    left = McpWorld()
+    right = McpWorld()
+    with _client(explicit, left) as client:
+        first = _post(client, _rpc("tools/call", {"name": "quote"}))
+    with _client(omitted, right) as client:
+        second = _post(client, _rpc("tools/call", {"name": "quote"}))
+    assert first.status_code == second.status_code == 402
+    assert first.json() == second.json()
+    assert first.headers["www-authenticate"] == second.headers["www-authenticate"]
+
+
+def test_pm_5_9_tool_success_predicate_covers_each_branch() -> None:
+    def judge(body: bytes, request_id: object = 1, content_type: str = "application/json", status: int = 200) -> bool:
+        return mcp_tool_succeeded(status, {"content-type": content_type}, body, request_id)
+
+    ok = _result({"content": [{"type": "text", "text": "ok"}]})
+    assert judge(ok) is True
+    assert judge(_result({"isError": False, "content": []})) is True
+    assert judge(_result({"resultType": "complete"})) is True
+    assert judge(_result({"isError": True})) is False
+    assert judge(_result({"isError": "true"})) is False
+    assert judge(_result({"isError": None})) is False
+    assert judge(_result({"isError": 1})) is False
+    assert judge(_rpc_error_body({"code": -32000, "message": "failed"})) is False
+    assert judge(_result({"resultType": "input_required"})) is False
+    assert judge(_result({"task": None})) is False
+    assert judge(_result({"ok": True}, ident="1"), 1) is False
+    assert judge(json.dumps({"jsonrpc": "2.0", "id": True, "result": {"ok": True}}).encode(), 1) is False
+    assert judge(_result({"ok": True}, ident=2), 1) is False
+    assert judge(b'[{"jsonrpc":"2.0","id":1,"result":{"ok":true}},{"jsonrpc":"2.0","id":1,"result":{"ok":true}}]') is False
+    assert judge(b"", content_type="") is False
+    assert judge(b"<p>no</p>", content_type="text/html") is False
+    assert judge(b"not-json") is False
+    assert judge(ok, status=202) is True
+    note = json.dumps({"jsonrpc": "2.0", "method": "notifications/progress", "params": {}})
+    final = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"ok": True}})
+    stream = f":\r\n\r\ndata: {note}\r\n\r\ndata: {final}\r\n\r\n".encode()
+    assert judge(stream, content_type="text/event-stream") is True
+    cr_only = f"data: {final}\rdata: \r\r".encode()
+    assert judge(cr_only, content_type="text/event-stream") is True
+    flagged = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"isError": True}})
+    assert judge(f"data: {flagged}\n\n".encode(), content_type="text/event-stream") is False
+    doubled = f"data: {final}\n\ndata: {final}\n\n".encode()
+    assert judge(doubled, content_type="text/event-stream") is False
+    assert judge(b"data: {not-json}\n\n", content_type="text/event-stream") is False

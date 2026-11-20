@@ -39,6 +39,7 @@ from satsgate_proxy.mcp_http import (
     classify,
     encode_tool_header,
     inspect_post,
+    mcp_tool_succeeded,
     note_rejection,
     rejection_body,
 )
@@ -482,7 +483,13 @@ async def _serve_mcp(request: Request, settings: Settings, route: PayRoute) -> R
         return _rpc_error(RpcError("invalid_message"))
     derived = derived_route(route, outcome.tool_name)
     extra = (("X-Satsgate-Mcp-Tool", encode_tool_header(outcome.tool_name)),)
-    return await _paywall(request, settings, derived, extra_headers=extra)
+
+    def delivered(exchanged) -> bool:
+        if not (200 <= exchanged.status < 300):
+            return False
+        return mcp_tool_succeeded(exchanged.status, exchanged.header_items, exchanged.content, outcome.request_id)
+
+    return await _paywall(request, settings, derived, extra_headers=extra, delivered=delivered)
 
 
 def build_app(settings: Settings, *, transport: httpx.AsyncBaseTransport | None = None) -> Starlette:

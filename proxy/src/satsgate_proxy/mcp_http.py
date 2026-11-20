@@ -420,3 +420,115 @@ def rejection_body(error: RpcError) -> dict:
 
 def note_rejection(error: RpcError) -> None:
     log.info("mcp rejected %s", error.word)
+
+
+def _same_id(left: object, right: object) -> bool:
+    if type(left) is not type(right):
+        return False
+    return left == right
+
+
+def _client_response(message: object) -> bool:
+    if not isinstance(message, dict) or "method" in message or "id" not in message:
+        return False
+    return "result" in message or "error" in message
+
+
+def _content_type(headers: object) -> str:
+    if isinstance(headers, dict):
+        pairs = headers.items()
+    else:
+        pairs = headers or ()
+    for name, value in pairs:
+        if str(name).lower() == "content-type":
+            return str(value).split(";", 1)[0].strip().lower()
+    return ""
+
+
+def _iter_sse_lines(text: str):
+    index = 0
+    limit = len(text)
+    while index < limit:
+        carriage = text.find("\r", index)
+        linefeed = text.find("\n", index)
+        if carriage == -1 and linefeed == -1:
+            yield text[index:]
+            return
+        if carriage == -1 or (linefeed != -1 and linefeed < carriage):
+            yield text[index:linefeed]
+            index = linefeed + 1
+            continue
+        yield text[index:carriage]
+        index = carriage + 2 if carriage + 1 < limit and text[carriage + 1] == "\n" else carriage + 1
+
+
+def _sse_payloads(text: str) -> list[str]:
+    payloads: list[str] = []
+    data: list[str] = []
+
+    def finish() -> None:
+        if not data:
+            return
+        joined = "\n".join(data)
+        data.clear()
+        if joined != "":
+            payloads.append(joined)
+
+    for line in _iter_sse_lines(text):
+        if line == "":
+            finish()
+            continue
+        if line.startswith(":"):
+            continue
+        if ":" in line:
+            field, _, value = line.partition(":")
+            if value.startswith(" "):
+                value = value[1:]
+        else:
+            field, value = line, ""
+        if field == "data":
+            data.append(value)
+    finish()
+    return payloads
+
+
+def _tool_result_ok(message: dict) -> bool:
+    if "error" in message:
+        return False
+    result = message.get("result")
+    if not isinstance(result, dict):
+        return False
+    if "isError" in result and result["isError"] is not False:
+        return False
+    if "resultType" in result and result["resultType"] != "complete":
+        return False
+    return "task" not in result
+
+
+def mcp_tool_succeeded(status: int, headers: object, body: bytes, request_id: object) -> bool:
+    """True only when the origin returned the tool result for this request id."""
+
+    try:
+        if status < 0 or not body:
+            return False
+        media = _content_type(headers)
+        found: list[dict] = []
+        if media == "application/json":
+            parsed = parse_json(body.decode("utf-8"))
+            if not isinstance(parsed, dict):
+                return False
+            if _client_response(parsed):
+                found.append(parsed)
+        elif media == "text/event-stream":
+            for payload in _sse_payloads(body.decode("utf-8")):
+                parsed = parse_json(payload)
+                if _client_response(parsed):
+                    found.append(parsed)
+        else:
+            return False
+        matched = [item for item in found if _same_id(item.get("id"), request_id)]
+        if len(matched) != 1:
+            return False
+        return _tool_result_ok(matched[0])
+    except Exception:
+        return False
