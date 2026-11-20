@@ -187,7 +187,7 @@ The proxy checks the request before it mints an invoice. A failed check is HTTP 
 
 `GET` on an MCP route is **405** from the proxy, with `Allow: DELETE, POST`. `DELETE` with an empty body is free. `subscriptions/listen` and `tasks/get`, `tasks/result`, `tasks/list`, and `tasks/cancel` are not forwarded. A request gets HTTP 200 and JSON-RPC `-32601`. A notification gets HTTP 202 and an empty body.
 
-On a free forward and on `DELETE`, the origin receives the original body bytes and these headers:
+On a free forward and on `DELETE`, the origin receives the original body bytes and these headers. A message that contains `params._meta["x402/payment"]` is the exception: that key is removed, `_meta` stays, and the message is sent as compact JSON.
 
 | Header | Value |
 | --- | --- |
@@ -210,35 +210,51 @@ With `signal: in_band`, the price notice is HTTP 200 and a JSON-RPC tool result.
   "x402Version": 2,
   "resource": {
     "url": "https://pay.example/mcp",
-    "description": "Test payment on Base Sepolia. Not Base mainnet.",
+    "description": "Priced tool access",
     "mimeType": "application/json"
   },
   "accepts": [
     {
       "scheme": "exact",
       "network": "eip155:84532",
-      "amount": "13650",
+      "amount": "10000",
       "asset": "<USDC contract>",
       "payTo": "<payee address>",
       "maxTimeoutSeconds": 60,
-      "extra": {"name": "USDC", "version": "2"}
+      "extra": {
+        "name": "USDC",
+        "version": "2"
+      }
     }
   ],
   "error": "payment_required",
   "tool": "quote",
   "lightning": {
     "amount_sats": 21,
-    "invoice": "lnbc...",
-    "invoice_expires_at": 1795191858,
-    "macaroon": "AgEI...",
-    "payment_hash": "64e7...",
+    "invoice": "<invoice>",
+    "invoice_expires_at": 1893456000,
+    "macaroon": "<macaroon>",
+    "payment_hash": "<payment hash>",
     "resource": "route:tools:quote",
     "max_uses": 1,
     "access_seconds": null
   },
-  "hint": "Pay the Lightning invoice, then repeat this tools/call."
+  "x402": {
+    "scheme": "exact",
+    "network": "eip155:84532",
+    "asset": "<USDC contract>",
+    "amount": "10000",
+    "payTo": "<payee address>",
+    "testing": true,
+    "x402_mode": "test"
+  },
+  "testing": true,
+  "x402_mode": "test",
+  "hint": "Pay the Lightning invoice, then repeat this tools/call with the HTTP header Authorization: L402 <macaroon>:<preimage>. If the wallet does not return a preimage, send Authorization: L402 <macaroon> and this proxy will poll until the invoice settles. To pay with x402, repeat this tools/call with the payment payload in params._meta[\"x402/payment\"] or in the PAYMENT-SIGNATURE header."
 }
 ```
+
+`reason` appears only when the core gives one, and `lightning` or the x402 keys are absent when that rail is not offered.
 
 | `error` | When the proxy uses it |
 | --- | --- |
@@ -246,7 +262,7 @@ With `signal: in_band`, the price notice is HTTP 200 and a JSON-RPC tool result.
 | `payment_pending` | The Lightning invoice is not settled yet. |
 | `rate_limited` | A rate limit. Other rate-limit codes from the core use this same shape. |
 | `one_rail_only` | More than one payment rail was sent. |
-| `bad_signature` | The x402 payload was not an object, or it was too large. |
+| `bad_signature` | The x402 payment was not accepted before any core call: the `_meta` value was not an object, the encoded payment was longer than 8192 characters, or the `PAYMENT-SIGNATURE` header was empty, longer than 8192 characters, or contained a line break. |
 | x402 rejection codes | Verify or settle was rejected. `reason` is present when the core sent one. |
 | `paywall_unavailable` | The paywall could not offer a price or finish the payment. |
 
@@ -256,9 +272,9 @@ Pending and rate-limit results also keep the `Retry-After` header.
 
 To pay with Lightning, repeat the `tools/call` with `Authorization: L402 <macaroon>:<preimage>`, or send the macaroon only.
 
-To pay with x402, put the payment payload object in `params._meta["x402/payment"]`, or send `PAYMENT-SIGNATURE`. Do not send both, and do not send either one together with `Authorization: L402`. The proxy removes `x402/payment` before the origin sees the request. The answer is JSON. The settlement is in `result._meta["x402/payment-response"]` and in the `PAYMENT-RESPONSE` header.
+To pay with x402, put the payment payload object in `params._meta["x402/payment"]`, or send `PAYMENT-SIGNATURE`. Do not send both, and do not send either one together with `Authorization: L402` or `LSAT`. The proxy removes `x402/payment` before the origin sees the request. When the tool call succeeds, the answer is JSON. The settlement is in `result._meta["x402/payment-response"]` and in the `PAYMENT-RESPONSE` header.
 
-A verify or settle failure is an error result and does not include a new offer. Call the tool again, without payment, to get a fresh notice.
+With `signal: in_band`, a verify or settle failure is an error result and does not include a new offer. Call the tool again, without payment, to get a fresh notice.
 
 A failed tool call takes no unlock fee and no use. That includes a JSON-RPC error, `result.isError: true`, and `resultType` other than `complete`. The same token can be retried. The Lightning payment has already reached the merchant's wallet, because the buyer paid that wallet directly. An x402 payment is not settled. Buyers pay the merchant's wallet directly. Satsgate does not hold those funds.
 
@@ -274,7 +290,7 @@ Limits that apply to MCP routes:
 - The HMAC does not cover the body.
 - The origin must look up a tool by its exact name. Both official MCP SDKs do that.
 - A token is bound to one tool, not to an MCP session.
-- With an x402 payment in `_meta`, a streamed origin answer is returned as one JSON response. Notifications sent during that call are dropped.
+- With an x402 payment in `_meta`, a streamed origin answer is returned as one JSON response when the tool call succeeds. Notifications sent during that call are dropped.
 - A Lightning payment needs the `Authorization` header on the HTTP request. A client that cannot set a header per request can pay with x402 in `_meta`.
 
 ## Price
