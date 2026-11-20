@@ -145,7 +145,7 @@ routes:
     x402: true            # optional, as today; applies to every paid tool
     description: Market data tools   # optional; memo fallback
     mcp:
-      signal: http_402    # optional; the only accepted value in this version
+      signal: in_band     # optional; in_band (default) or http_402
       default: free       # required: free, or {price_sats, access[, description]}
       tools:              # optional
         quote:

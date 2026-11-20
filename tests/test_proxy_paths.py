@@ -64,6 +64,7 @@ _BASE_YAML = textwrap.dedent(
         path: /mcp
         methods: [POST]
         mcp:
+          signal: http_402
           default: free
           tools:
             quote:

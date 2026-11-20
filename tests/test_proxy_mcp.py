@@ -92,17 +92,19 @@ def test_pm_1_2_unknown_mcp_keys_are_rejected(tmp_path: Path, monkeypatch: pytes
         _settings(tmp_path, monkeypatch, memo)
 
 
-def test_pm_1_3_signal_must_be_http_402(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    with pytest.raises(ConfigError, match="signal must be http_402"):
-        _settings(tmp_path, monkeypatch, _TOOLS.replace("signal: http_402", "signal: in_band"))
-    with pytest.raises(ConfigError, match="signal must be http_402"):
-        _settings(tmp_path, monkeypatch, _TOOLS.replace("    signal: http_402\n", "    signal:\n"))
-    loaded = _settings(tmp_path, monkeypatch, _TOOLS)
-    assert loaded.routes[0].mcp is not None
-    assert loaded.routes[0].mcp.signal == "http_402"
+def test_pm_1_3_signal_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for value in ("in_band", "http_402"):
+        loaded = _settings(tmp_path, monkeypatch, _TOOLS.replace("signal: http_402", f"signal: {value}"))
+        assert loaded.routes[0].mcp is not None
+        assert loaded.routes[0].mcp.signal == value
     omitted = _settings(tmp_path, monkeypatch, _TOOLS.replace("    signal: http_402\n", ""))
     assert omitted.routes[0].mcp is not None
-    assert omitted.routes[0].mcp.signal == ""
+    assert omitted.routes[0].mcp.signal == "in_band"
+    message = "route tools mcp signal must be in_band or http_402"
+    for bad in ("    signal:\n", "    signal: in_band_x\n"):
+        with pytest.raises(ConfigError) as caught:
+            _settings(tmp_path, monkeypatch, _TOOLS.replace("    signal: http_402\n", bad))
+        assert str(caught.value) == message
 
 
 def test_pm_1_4_tool_name_and_resource_length_are_checked(
@@ -280,7 +282,7 @@ def test_pm_1_9_readme_example_loads(tmp_path: Path, monkeypatch: pytest.MonkeyP
     route = settings.routes[0]
     assert route.mcp is not None
     assert route.name == "tools"
-    assert route.mcp.signal == "http_402"
+    assert route.mcp.signal == "in_band"
     assert route.mcp.default.free
     assert route.mcp.tool("echo") is not None and route.mcp.tool("echo").free
     quote = route.mcp.paid_route("quote")
@@ -1221,7 +1223,7 @@ def test_pm_5_7_sse_result_decides_the_fee(tmp_path: Path, monkeypatch: pytest.M
         assert any(path.endswith("/charge") for path in _paths(world)) is charged
 
 
-def test_pm_5_8_explicit_signal_matches_the_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pm_5_8_explicit_http_402_keeps_the_classic_notice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     explicit = _mcp_settings(tmp_path, monkeypatch)
     omitted = _mcp_settings(
         tmp_path,
@@ -1234,9 +1236,10 @@ def test_pm_5_8_explicit_signal_matches_the_default(tmp_path: Path, monkeypatch:
         first = _post(client, _rpc("tools/call", {"name": "quote"}))
     with _client(omitted, right) as client:
         second = _post(client, _rpc("tools/call", {"name": "quote"}))
-    assert first.status_code == second.status_code == 402
-    assert first.json() == second.json()
-    assert first.headers["www-authenticate"] == second.headers["www-authenticate"]
+    assert first.status_code == 402
+    assert "www-authenticate" in first.headers
+    assert second.status_code == 200
+    assert second.json()["result"]["isError"] is True
 
 
 def test_pm_5_9_tool_success_predicate_covers_each_branch() -> None:

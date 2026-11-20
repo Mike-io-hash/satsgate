@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 import httpx
 from starlette.applications import Starlette
@@ -41,6 +44,7 @@ from satsgate_proxy.mcp_http import (
     inspect_post,
     mcp_tool_succeeded,
     note_rejection,
+    parse_json,
     rejection_body,
 )
 
@@ -57,14 +61,32 @@ _POLL_HINT = (
 _PENDING_HINT = (
     "The invoice is not settled yet. Retry the same Authorization header. Do not pay a new invoice."
 )
+_IN_BAND_LIGHTNING_HINT = (
+    "Pay the Lightning invoice, then repeat this tools/call with the HTTP header "
+    "Authorization: L402 <macaroon>:<preimage>. If the wallet does not return a preimage, "
+    "send Authorization: L402 <macaroon> and this proxy will poll until the invoice settles."
+)
+_IN_BAND_X402_HINT = (
+    'To pay with x402, repeat this tools/call with the payment payload in params._meta["x402/payment"] '
+    "or in the PAYMENT-SIGNATURE header."
+)
 
 
-def _json(status: int, error: str, **extra: object) -> JSONResponse:
+@dataclass(frozen=True)
+class _Notice:
+    tool: str
+    request_id: object
+
+
+def _json(status: int, error: str, notice: _Notice | None = None, **extra: object) -> Response:
     headers = {"Cache-Control": "no-store"}
     retry = extra.get("retry_after_seconds")
     if isinstance(retry, int):
         headers["Retry-After"] = str(retry)
-    return JSONResponse({"ok": False, "error": error, **extra}, status_code=status, headers=headers)
+    body = {"ok": False, "error": error, **extra}
+    if notice is None:
+        return JSONResponse(body, status_code=status, headers=headers)
+    return _in_band_from_classic(body, notice, headers)
 
 
 async def _read_body(request: Request, limit: int) -> bytes | JSONResponse:
@@ -130,10 +152,98 @@ def _peer(request: Request) -> str:
     return client.host
 
 
-def _challenge_response(result: CoreResult, reason: str | None, route: PayRoute) -> JSONResponse:
+def _read_x402_document(encoded: str) -> dict | None:
+    try:
+        parsed = parse_json(base64.b64decode(encoded, validate=True).decode("utf-8"))
+    except (binascii.Error, UnicodeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
+def _in_band_envelope(
+    structured: dict[str, object],
+    notice: _Notice,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
+    text = json.dumps(structured, separators=(",", ":"), ensure_ascii=False)
+    payload = {
+        "jsonrpc": "2.0",
+        "id": notice.request_id,
+        "result": {
+            "content": [{"type": "text", "text": text}],
+            "structuredContent": structured,
+            "isError": True,
+            "resultType": "complete",
+        },
+    }
+    out = {"Cache-Control": "no-store"}
+    if headers is not None and "Retry-After" in headers:
+        out["Retry-After"] = headers["Retry-After"]
+    return JSONResponse(payload, status_code=200, headers=out)
+
+
+def _in_band_from_classic(body: dict[str, object], notice: _Notice, headers: dict[str, str]) -> JSONResponse:
+    structured: dict[str, object] = {}
+    for key, value in body.items():
+        if key == "ok":
+            continue
+        structured[key] = value
+        if key == "error":
+            structured["tool"] = notice.tool
+    return _in_band_envelope(structured, notice, headers)
+
+
+def _price_notice(challenge, reason: str | None, route: PayRoute, notice: _Notice) -> JSONResponse:
+    lightning = bool(challenge.www_authenticate)
+    document = None
+    if challenge.offers_x402:
+        document = _read_x402_document(challenge.payment_required)
+        if document is None:
+            log.warning("core challenge x402 document was not readable")
+    if document is None and not lightning:
+        return _in_band_envelope({"error": "paywall_unavailable", "tool": notice.tool}, notice)
+    max_uses, access_seconds = route.access.policy()
+    structured: dict[str, object] = {}
+    if document is not None:
+        structured.update(document)
+    structured["error"] = "payment_required"
+    structured["tool"] = notice.tool
+    if lightning:
+        structured["lightning"] = {
+            "amount_sats": challenge.amount_sats,
+            "invoice": challenge.invoice,
+            "invoice_expires_at": challenge.invoice_expires_at,
+            "macaroon": challenge.macaroon,
+            "payment_hash": challenge.payment_hash,
+            "resource": challenge.resource,
+            "max_uses": max_uses,
+            "access_seconds": access_seconds,
+        }
+    if document is not None and isinstance(challenge.x402, dict):
+        structured["x402"] = challenge.x402
+        if "testing" in challenge.x402:
+            structured["testing"] = challenge.x402["testing"]
+        if "x402_mode" in challenge.x402:
+            structured["x402_mode"] = challenge.x402["x402_mode"]
+    if reason:
+        structured["reason"] = reason
+    parts: list[str] = []
+    if lightning:
+        parts.append(_IN_BAND_LIGHTNING_HINT)
+    if document is not None:
+        parts.append(_IN_BAND_X402_HINT)
+    structured["hint"] = " ".join(parts)
+    return _in_band_envelope(structured, notice)
+
+
+def _challenge_response(
+    result: CoreResult, reason: str | None, route: PayRoute, notice: _Notice | None = None
+) -> Response:
     challenge = result.challenge
     if challenge is None:
-        return _json(502, "paywall_unavailable")
+        return _json(502, "paywall_unavailable", notice)
     max_uses, access_seconds = route.access.policy()
     body: dict[str, object] = {
         "ok": False,
@@ -160,26 +270,28 @@ def _challenge_response(result: CoreResult, reason: str | None, route: PayRoute)
         if "x402_mode" in challenge.x402:
             body["x402_mode"] = challenge.x402["x402_mode"]
         headers["PAYMENT-REQUIRED"] = challenge.payment_required
-    return JSONResponse(body, status_code=402, headers=headers)
+    if notice is None:
+        return JSONResponse(body, status_code=402, headers=headers)
+    return _price_notice(challenge, reason, route, notice)
 
 
-def _x402_failure(result: CoreResult) -> JSONResponse:
+def _x402_failure(result: CoreResult, notice: _Notice | None = None) -> Response:
     code = result.error
     status = result.http_status
     if result.action == "rejected" and status in {400, 402, 409} and code.isidentifier():
         extra: dict[str, object] = {}
         if result.reason:
             extra["reason"] = result.reason
-        return _json(status, code, **extra)
-    return _json(502, "paywall_unavailable")
+        return _json(status, code, notice, **extra)
+    return _json(502, "paywall_unavailable", notice)
 
 
-def _limited(result: CoreResult) -> JSONResponse:
+def _limited(result: CoreResult, notice: _Notice | None = None) -> Response:
     retry = result.retry_after if result.retry_after is not None else 1
-    return _json(429, result.error or "rate_limited", retry_after_seconds=retry)
+    return _json(429, result.error or "rate_limited", notice, retry_after_seconds=retry)
 
 
-def _pending(result: CoreResult) -> JSONResponse:
+def _pending(result: CoreResult, notice: _Notice | None = None) -> Response:
     retry = result.retry_after if result.retry_after is not None else 1
     body: dict[str, object] = {
         "ok": False,
@@ -189,7 +301,10 @@ def _pending(result: CoreResult) -> JSONResponse:
     }
     if result.payment_hash:
         body["payment_hash"] = result.payment_hash
-    return JSONResponse(body, status_code=402, headers={"Retry-After": str(retry)})
+    headers = {"Retry-After": str(retry)}
+    if notice is None:
+        return JSONResponse(body, status_code=402, headers=headers)
+    return _in_band_from_classic(body, notice, headers)
 
 
 async def _unlock(request: Request, settings: Settings, route: PayRoute, header: str) -> CoreResult:
@@ -223,6 +338,7 @@ async def _pay_x402(
     *,
     extra_headers: tuple[tuple[str, str], ...] = (),
     delivered=None,
+    notice: _Notice | None = None,
 ) -> Response:
     """Verify, call the origin, and settle only after delivery. The proxy never calls the facilitator."""
     client: httpx.AsyncClient = request.app.state.http
@@ -234,7 +350,7 @@ async def _pay_x402(
         request_path=request.url.path,
     )
     if verified.action != "serve" or verified.amount_usd_atomic is None or not verified.payment_hash:
-        return _x402_failure(verified)
+        return _x402_failure(verified, notice)
     exchanged = await call_upstream(
         request,
         settings,
@@ -254,7 +370,7 @@ async def _pay_x402(
         request_path=request.url.path,
     )
     if settled.action != "settled" or not settled.payment_response:
-        return _x402_failure(settled)
+        return _x402_failure(settled, notice)
     return exchanged.response(use_spent=None, extra=(("PAYMENT-RESPONSE", settled.payment_response),))
 
 
@@ -266,15 +382,16 @@ async def _serve_lightning(
     *,
     extra_headers: tuple[tuple[str, str], ...] = (),
     delivered=None,
+    notice: _Notice | None = None,
 ) -> Response | str | None:
     """Confirm the Lightning payment, call the origin, and charge only after delivery."""
     unlocked = await _unlock(request, settings, route, authorization)
     if unlocked.action == "pending":
-        return _pending(unlocked)
+        return _pending(unlocked, notice)
     if unlocked.action == "limited":
-        return _limited(unlocked)
+        return _limited(unlocked, notice)
     if unlocked.action == "unavailable":
-        return _json(502, "paywall_unavailable")
+        return _json(502, "paywall_unavailable", notice)
     if unlocked.action != "forward":
         return unlocked.error or None
 
@@ -290,11 +407,11 @@ async def _serve_lightning(
             payment_hash = fields["ph"]
     if not payment_hash:
         log.warning("settled unlock had no payment hash")
-        return _json(502, "paywall_unavailable")
+        return _json(502, "paywall_unavailable", notice)
     paid = unlocked.amount_sats if unlocked.amount_sats is not None else route.price_sats
     if isinstance(paid, bool) or not isinstance(paid, int) or paid < 1:
         log.warning("settled unlock had no sats amount")
-        return _json(502, "paywall_unavailable")
+        return _json(502, "paywall_unavailable", notice)
     exchanged = await call_upstream(
         request,
         settings,
@@ -319,7 +436,7 @@ async def _serve_lightning(
         return exchanged.response(use_spent=None)
     if charged.action == "fresh":
         return charged.error or "token_used_up"
-    return _json(502, "paywall_unavailable")
+    return _json(502, "paywall_unavailable", notice)
 
 
 async def handle(request: Request) -> Response:
@@ -410,19 +527,20 @@ async def _paywall(
     *,
     extra_headers: tuple[tuple[str, str], ...] = (),
     delivered=None,
+    notice: _Notice | None = None,
 ) -> Response:
     reason: str | None = None
     authorization = _l402_authorization(request)
     payment_signature = _payment_signature(request)
     if authorization is not None and payment_signature is not None:
-        return _json(400, "one_rail_only")
+        return _json(400, "one_rail_only", notice)
     if payment_signature is not None:
         if (
             not payment_signature
             or len(payment_signature.encode("utf-8")) > _PAYMENT_SIGNATURE_MAX
             or any(char in payment_signature for char in "\r\n")
         ):
-            return _json(400, "bad_signature")
+            return _json(400, "bad_signature", notice)
         return await _pay_x402(
             request,
             settings,
@@ -430,6 +548,7 @@ async def _paywall(
             payment_signature,
             extra_headers=extra_headers,
             delivered=delivered,
+            notice=notice,
         )
     if authorization is not None:
         served = await _serve_lightning(
@@ -439,6 +558,7 @@ async def _paywall(
             authorization,
             extra_headers=extra_headers,
             delivered=delivered,
+            notice=notice,
         )
         if isinstance(served, Response):
             return served
@@ -457,10 +577,10 @@ async def _paywall(
         request_path=request.url.path,
     )
     if challenge.action == "limited":
-        return _limited(challenge)
+        return _limited(challenge, notice)
     if challenge.action != "challenge":
-        return _json(502, "paywall_unavailable")
-    return _challenge_response(challenge, reason, route)
+        return _json(502, "paywall_unavailable", notice)
+    return _challenge_response(challenge, reason, route, notice)
 
 
 async def _serve_mcp(request: Request, settings: Settings, route: PayRoute) -> Response:
@@ -495,7 +615,10 @@ async def _serve_mcp(request: Request, settings: Settings, route: PayRoute) -> R
             return False
         return mcp_tool_succeeded(exchanged.status, exchanged.header_items, exchanged.content, outcome.request_id)
 
-    return await _paywall(request, settings, derived, extra_headers=extra, delivered=delivered)
+    notice = None
+    if route.mcp is not None and route.mcp.signal == "in_band":
+        notice = _Notice(outcome.tool_name, outcome.request_id)
+    return await _paywall(request, settings, derived, extra_headers=extra, delivered=delivered, notice=notice)
 
 
 def build_app(settings: Settings, *, transport: httpx.AsyncBaseTransport | None = None) -> Starlette:
