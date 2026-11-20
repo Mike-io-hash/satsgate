@@ -1207,3 +1207,22 @@ def test_ib_4_23_settle_follows_a_successful_origin(tmp_path: Path, monkeypatch:
         response = _post(client, _call_with_meta({"scheme": "exact"}))
     assert response.status_code == 200
     assert world.order == ["verify", "origin", "settle"]
+
+
+@pytest.mark.parametrize("origin_status", [500, 400])
+def test_ib_4_24_origin_error_status_is_not_settled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, origin_status: int
+) -> None:
+    world = _meta_world()
+    origin = _result({"content": [{"type": "text", "text": "ok"}]}, ident=7)
+    world.queue.append(_reply(origin_status, origin, "application/json"))
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    with _client(settings, world) as client:
+        response = _post(client, _call_with_meta({"scheme": "exact"}))
+    assert response.status_code == origin_status
+    assert response.content == origin
+    assert "payment-response" not in response.headers
+    assert b"x402/payment-response" not in response.content
+    assert sum(call["path"].endswith("/x402/verify") for call in world.core_calls) == 1
+    assert sum(call["path"].endswith("/x402/settle") for call in world.core_calls) == 0
+    assert len(world.up_calls) == 1

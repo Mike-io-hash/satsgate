@@ -367,7 +367,7 @@ async def _pay_x402(
     matched = None
     if meta_rail:
         matched = mcp_tool_response(exchanged.status, exchanged.header_items, exchanged.content, request_id)
-        accepted = matched is not None
+        accepted = 200 <= exchanged.status < 300 and matched is not None
     else:
         accepted = delivered(exchanged) if delivered is not None else 200 <= exchanged.status < 300
     if exchanged.error or not accepted:
