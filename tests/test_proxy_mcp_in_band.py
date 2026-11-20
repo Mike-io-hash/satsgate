@@ -282,6 +282,8 @@ def test_ib_1_3_explicit_http_402(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         "    signal: inband\n",
         "    signal: 402\n",
         "    signal: true\n",
+        "    signal: [in_band]\n",
+        "    signal: {a: 1}\n",
     ],
 )
 def test_ib_1_4_invalid_signal_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signal_yaml: str) -> None:

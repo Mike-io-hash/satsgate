@@ -509,7 +509,7 @@ def _mcp_policy(
         raise ConfigError(f"route {name} mcp default is required")
     if "signal" not in data:
         signal = "in_band"
-    elif data["signal"] in {"in_band", "http_402"}:
+    elif isinstance(data["signal"], str) and data["signal"] in {"in_band", "http_402"}:
         signal = data["signal"]
     else:
         raise ConfigError(f"route {name} mcp signal must be in_band or http_402")
