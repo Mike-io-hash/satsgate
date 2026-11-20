@@ -1,0 +1,745 @@
+{
+  "cases": [
+    {
+      "body": {
+        "encoding": "utf-8",
+        "value": "origin-ok"
+      },
+      "core_calls": [],
+      "headers": [
+        [
+          "cache-control",
+          "no-store"
+        ],
+        [
+          "content-length",
+          "9"
+        ],
+        [
+          "content-type",
+          "text/plain"
+        ]
+      ],
+      "name": "free_path",
+      "origin_calls": [
+        {
+          "body": null,
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "authorization",
+              "Bearer keep-me"
+            ],
+            [
+              "connection",
+              "keep-alive"
+            ],
+            [
+              "host",
+              "upstream.test"
+            ],
+            [
+              "user-agent",
+              "testclient"
+            ]
+          ],
+          "method": "GET",
+          "raw_path": "/health"
+        }
+      ],
+      "status": 200
+    },
+    {
+      "body": {
+        "encoding": "utf-8",
+        "value": "{\"ok\":false,\"error\":\"not_found\"}"
+      },
+      "core_calls": [],
+      "headers": [
+        [
+          "cache-control",
+          "no-store"
+        ],
+        [
+          "content-length",
+          "32"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "name": "not_found",
+      "origin_calls": [],
+      "status": 404
+    },
+    {
+      "body": {
+        "encoding": "utf-8",
+        "value": "{\"ok\":false,\"error\":\"method_not_allowed\"}"
+      },
+      "core_calls": [],
+      "headers": [
+        [
+          "allow",
+          "GET, POST"
+        ],
+        [
+          "content-length",
+          "41"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "name": "method_not_allowed",
+      "origin_calls": [],
+      "status": 405
+    },
+    {
+      "body": {
+        "encoding": "utf-8",
+        "value": "{\"ok\":false,\"error\":\"payment_required\",\"amount_sats\":100,\"payment_hash\":\"0000000000000000000000000000000000000000000000000000000000000001\",\"invoice\":\"lnbc1testinvoice\",\"invoice_expires_at\":1893456000,\"macaroon\":\"bWFjYXJvb24\",\"resource\":\"route:article\",\"max_uses\":1,\"access_seconds\":null,\"hint\":\"Pay the invoice, then retry with Authorization: L402 <macaroon>:<preimage>. If the wallet does not return a preimage, retry with Authorization: L402 <macaroon> and this proxy will poll until the invoice settles.\"}"
+      },
+      "core_calls": [
+        {
+          "body": {
+            "amount_sats": 100,
+            "max_uses": 1,
+            "memo": "Read an article",
+            "resource": "route:article"
+          },
+          "method": "POST",
+          "path": "/v1/paywall/challenge"
+        }
+      ],
+      "headers": [
+        [
+          "cache-control",
+          "no-store"
+        ],
+        [
+          "content-length",
+          "508"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ],
+        [
+          "www-authenticate",
+          "L402 macaroon=\"bWFjYXJvb24\", invoice=\"lnbc1testinvoice\""
+        ]
+      ],
+      "name": "unpaid",
+      "origin_calls": [],
+      "status": 402
+    },
+    {
+      "body": {
+        "encoding": "utf-8",
+        "value": "{\"ok\":false,\"error\":\"payment_pending\",\"retry_after_seconds\":7,\"hint\":\"The invoice is not settled yet. Retry the same Authorization header. Do not pay a new invoice.\",\"payment_hash\":\"abababababababababababababababababababababababababababababababab\"}"
+      },
+      "core_calls": [
+        {
+          "body": {
+            "charge": false,
+            "consume": true,
+            "cost_credits": 1,
+            "expected_resource": "route:article"
+          },
+          "method": "POST",
+          "path": "/v1/paywall/verify"
+        }
+      ],
+      "headers": [
+        [
+          "content-length",
+          "248"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ],
+        [
+          "retry-after",
+          "7"
+        ]
+      ],
+      "name": "pending",
+      "origin_calls": [],
+      "status": 402
+    },
+    {
+      "body": {
+        "encoding": "utf-8",
+        "value": "origin-ok"
+      },
+      "core_calls": [
+        {
+          "body": {
+            "charge": false,
+            "consume": true,
+            "cost_credits": 1,
+            "expected_resource": "route:article"
+          },
+          "method": "POST",
+          "path": "/v1/paywall/verify"
+        },
+        {
+          "body": {
+            "cost_credits": 1,
+            "expected_resource": "route:article",
+            "payment_hash": "abababababababababababababababababababababababababababababababab"
+          },
+          "method": "POST",
+          "path": "/v1/paywall/charge"
+        }
+      ],
+      "headers": [
+        [
+          "cache-control",
+          "no-store"
+        ],
+        [
+          "content-length",
+          "9"
+        ],
+        [
+          "content-type",
+          "text/plain"
+        ]
+      ],
+      "name": "preimage_success",
+      "origin_calls": [
+        {
+          "body": {
+            "q": 1
+          },
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "connection",
+              "keep-alive"
+            ],
+            [
+              "content-length",
+              "7"
+            ],
+            [
+              "content-type",
+              "application/json"
+            ],
+            [
+              "host",
+              "upstream.test"
+            ],
+            [
+              "user-agent",
+              "testclient"
+            ],
+            [
+              "x-satsgate-paid-sats",
+              "100"
+            ],
+            [
+              "x-satsgate-payment-hash",
+              "abababababababababababababababababababababababababababababababab"
+            ],
+            [
+              "x-satsgate-resource",
+              "route:article"
+            ],
+            [
+              "x-satsgate-signature",
+              "t=1700000000, v1=c17566d75f24e368ee821e268054744b539b266278b2f9b82e8ab42d5da2a274"
+            ]
+          ],
+          "method": "POST",
+          "raw_path": "/blog/post?file=a%20b"
+        }
+      ],
+      "status": 200
+    },
+    {
+      "body": {
+        "encoding": "utf-8",
+        "value": "{\"ok\":false,\"error\":\"payment_required\",\"amount_sats\":100,\"payment_hash\":\"0000000000000000000000000000000000000000000000000000000000000001\",\"invoice\":\"lnbc1testinvoice\",\"invoice_expires_at\":1893456000,\"macaroon\":\"bWFjYXJvb24\",\"resource\":\"route:article\",\"max_uses\":1,\"access_seconds\":null,\"hint\":\"Pay the invoice, then retry with Authorization: L402 <macaroon>:<preimage>. If the wallet does not return a preimage, retry with Authorization: L402 <macaroon> and this proxy will poll until the invoice settles.\",\"reason\":\"token_used_up\"}"
+      },
+      "core_calls": [
+        {
+          "body": {
+            "charge": false,
+            "consume": true,
+            "cost_credits": 1,
+            "expected_resource": "route:article"
+          },
+          "method": "POST",
+          "path": "/v1/paywall/verify"
+        },
+        {
+          "body": {
+            "amount_sats": 100,
+            "max_uses": 1,
+            "memo": "Read an article",
+            "resource": "route:article"
+          },
+          "method": "POST",
+          "path": "/v1/paywall/challenge"
+        }
+      ],
+      "headers": [
+        [
+          "cache-control",
+          "no-store"
+        ],
+        [
+          "content-length",
+          "533"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ],
+        [
+          "www-authenticate",
+          "L402 macaroon=\"bWFjYXJvb24\", invoice=\"lnbc1testinvoice\""
+        ]
+      ],
+      "name": "used_up",
+      "origin_calls": [],
+      "status": 402
+    },
+    {
+      "body": {
+        "encoding": "utf-8",
+        "value": "{\"ok\":false,\"error\":\"payment_required\",\"amount_sats\":100,\"payment_hash\":\"0000000000000000000000000000000000000000000000000000000000000001\",\"invoice\":\"lnbc1testinvoice\",\"invoice_expires_at\":1893456000,\"macaroon\":\"bWFjYXJvb24\",\"resource\":\"route:article\",\"max_uses\":1,\"access_seconds\":null,\"hint\":\"Pay the invoice, then retry with Authorization: L402 <macaroon>:<preimage>. If the wallet does not return a preimage, retry with Authorization: L402 <macaroon> and this proxy will poll until the invoice settles.\",\"reason\":\"resource mismatch\"}"
+      },
+      "core_calls": [
+        {
+          "body": {
+            "amount_sats": 100,
+            "max_uses": 1,
+            "memo": "Read an article",
+            "resource": "route:article"
+          },
+          "method": "POST",
+          "path": "/v1/paywall/challenge"
+        }
+      ],
+      "headers": [
+        [
+          "cache-control",
+          "no-store"
+        ],
+        [
+          "content-length",
+          "537"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ],
+        [
+          "www-authenticate",
+          "L402 macaroon=\"bWFjYXJvb24\", invoice=\"lnbc1testinvoice\""
+        ]
+      ],
+      "name": "wrong_route",
+      "origin_calls": [],
+      "status": 402
+    },
+    {
+      "body": {
+        "encoding": "utf-8",
+        "value": "nope"
+      },
+      "core_calls": [
+        {
+          "body": {
+            "charge": false,
+            "consume": true,
+            "cost_credits": 1,
+            "expected_resource": "route:article"
+          },
+          "method": "POST",
+          "path": "/v1/paywall/verify"
+        }
+      ],
+      "headers": [
+        [
+          "cache-control",
+          "no-store"
+        ],
+        [
+          "content-length",
+          "4"
+        ],
+        [
+          "content-type",
+          "text/plain"
+        ]
+      ],
+      "name": "origin_500",
+      "origin_calls": [
+        {
+          "body": null,
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "connection",
+              "keep-alive"
+            ],
+            [
+              "host",
+              "upstream.test"
+            ],
+            [
+              "user-agent",
+              "testclient"
+            ],
+            [
+              "x-satsgate-paid-sats",
+              "100"
+            ],
+            [
+              "x-satsgate-payment-hash",
+              "abababababababababababababababababababababababababababababababab"
+            ],
+            [
+              "x-satsgate-resource",
+              "route:article"
+            ],
+            [
+              "x-satsgate-signature",
+              "t=1700000000, v1=bcf149cedc29dd9955732f1fdf93862a5cffdb031581e594158604bac3b01f7f"
+            ]
+          ],
+          "method": "GET",
+          "raw_path": "/blog/a"
+        }
+      ],
+      "status": 500
+    },
+    {
+      "body": {
+        "encoding": "utf-8",
+        "value": "{\"ok\":false,\"error\":\"upstream_timeout\",\"use_spent\":false}"
+      },
+      "core_calls": [
+        {
+          "body": {
+            "charge": false,
+            "consume": true,
+            "cost_credits": 1,
+            "expected_resource": "route:article"
+          },
+          "method": "POST",
+          "path": "/v1/paywall/verify"
+        }
+      ],
+      "headers": [
+        [
+          "cache-control",
+          "no-store"
+        ],
+        [
+          "content-length",
+          "57"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "name": "origin_timeout",
+      "origin_calls": [
+        {
+          "body": null,
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "connection",
+              "keep-alive"
+            ],
+            [
+              "host",
+              "upstream.test"
+            ],
+            [
+              "user-agent",
+              "testclient"
+            ],
+            [
+              "x-satsgate-paid-sats",
+              "100"
+            ],
+            [
+              "x-satsgate-payment-hash",
+              "abababababababababababababababababababababababababababababababab"
+            ],
+            [
+              "x-satsgate-resource",
+              "route:article"
+            ],
+            [
+              "x-satsgate-signature",
+              "t=1700000000, v1=bcf149cedc29dd9955732f1fdf93862a5cffdb031581e594158604bac3b01f7f"
+            ]
+          ],
+          "method": "GET",
+          "raw_path": "/blog/a"
+        }
+      ],
+      "status": 504
+    },
+    {
+      "body": {
+        "encoding": "utf-8",
+        "value": "{\"ok\":false,\"error\":\"request_too_large\"}"
+      },
+      "core_calls": [],
+      "headers": [
+        [
+          "cache-control",
+          "no-store"
+        ],
+        [
+          "content-length",
+          "40"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "name": "oversize",
+      "origin_calls": [],
+      "status": 413
+    },
+    {
+      "body": {
+        "encoding": "utf-8",
+        "value": "{\"ok\":false,\"error\":\"one_rail_only\"}"
+      },
+      "core_calls": [],
+      "headers": [
+        [
+          "cache-control",
+          "no-store"
+        ],
+        [
+          "content-length",
+          "36"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "name": "one_rail_only",
+      "origin_calls": [],
+      "status": 400
+    },
+    {
+      "body": {
+        "encoding": "utf-8",
+        "value": "origin-ok"
+      },
+      "core_calls": [
+        {
+          "body": {
+            "payment_signature": "sig-test",
+            "resource": "route:usdc",
+            "resource_url": "https://pay.example/usdc/a"
+          },
+          "method": "POST",
+          "path": "/v1/paywall/x402/verify"
+        },
+        {
+          "body": {
+            "payment_signature": "sig-test",
+            "resource": "route:usdc",
+            "resource_url": "https://pay.example/usdc/a"
+          },
+          "method": "POST",
+          "path": "/v1/paywall/x402/settle"
+        }
+      ],
+      "headers": [
+        [
+          "cache-control",
+          "no-store"
+        ],
+        [
+          "content-length",
+          "9"
+        ],
+        [
+          "content-type",
+          "text/plain"
+        ],
+        [
+          "payment-response",
+          "c2V0dGxlZA"
+        ]
+      ],
+      "name": "x402_success",
+      "origin_calls": [
+        {
+          "body": null,
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "connection",
+              "keep-alive"
+            ],
+            [
+              "host",
+              "upstream.test"
+            ],
+            [
+              "user-agent",
+              "testclient"
+            ],
+            [
+              "x-satsgate-paid-usd-atomic",
+              "10000"
+            ],
+            [
+              "x-satsgate-payment-hash",
+              "abababababababababababababababababababababababababababababababab"
+            ],
+            [
+              "x-satsgate-resource",
+              "route:usdc"
+            ],
+            [
+              "x-satsgate-signature",
+              "t=1700000000, v1=813031388bdaa73d1180cde0b081fabf1e1ee3150e93893cc933f35e6758d60e"
+            ]
+          ],
+          "method": "GET",
+          "raw_path": "/usdc/a"
+        }
+      ],
+      "status": 200
+    },
+    {
+      "body": {
+        "encoding": "utf-8",
+        "value": "missing"
+      },
+      "core_calls": [
+        {
+          "body": {
+            "payment_signature": "sig-test",
+            "resource": "route:usdc",
+            "resource_url": "https://pay.example/usdc/a"
+          },
+          "method": "POST",
+          "path": "/v1/paywall/x402/verify"
+        }
+      ],
+      "headers": [
+        [
+          "cache-control",
+          "no-store"
+        ],
+        [
+          "content-length",
+          "7"
+        ],
+        [
+          "content-type",
+          "text/plain"
+        ]
+      ],
+      "name": "x402_origin_4xx",
+      "origin_calls": [
+        {
+          "body": null,
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "connection",
+              "keep-alive"
+            ],
+            [
+              "host",
+              "upstream.test"
+            ],
+            [
+              "user-agent",
+              "testclient"
+            ],
+            [
+              "x-satsgate-paid-usd-atomic",
+              "10000"
+            ],
+            [
+              "x-satsgate-payment-hash",
+              "abababababababababababababababababababababababababababababababab"
+            ],
+            [
+              "x-satsgate-resource",
+              "route:usdc"
+            ],
+            [
+              "x-satsgate-signature",
+              "t=1700000000, v1=813031388bdaa73d1180cde0b081fabf1e1ee3150e93893cc933f35e6758d60e"
+            ]
+          ],
+          "method": "GET",
+          "raw_path": "/usdc/a"
+        }
+      ],
+      "status": 404
+    }
+  ],
+  "frozen_unix": 1700000000,
+  "payment_hash": "abababababababababababababababababababababababababababababababab"
+}
