@@ -328,6 +328,8 @@ def _style_hits(rel: str, text: str, rules: dict, *, digests: set[str]) -> list[
                 break
         if re.search(r"\bR\d-\d\b", chunk):
             hits.append(("internal", rel, lineno))
+        if re.search(r"\bMCP-\d\b", chunk):
+            hits.append(("internal", rel, lineno))
         for phrase in phrases:
             if phrase in lowered:
                 hits.append(("banned", rel, lineno))
@@ -655,7 +657,7 @@ def test_t_dm_2_1_real_tree_is_clean() -> None:
 
 @pytest.mark.parametrize(
     "sample_key",
-    ["accent", "token", "internal_name", "review_id", "banned_word"],
+    ["accent", "token", "internal_name", "review_id", "banned_word", "part_code"],
 )
 def test_t_dm_2_1_mutation_sample_is_rejected(sample_key: str) -> None:
     sample = _rules()["mutation_samples"][sample_key]

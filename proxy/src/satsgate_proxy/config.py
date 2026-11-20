@@ -23,6 +23,8 @@ def key_fingerprint(api_key: str) -> str:
 
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ROUTE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_TOOL_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+_RESOURCE_MAX = 200
 _HEADER_NAME = re.compile(r"^[!#$%&'*+\-.0-9A-Z^_`a-z|~]+$")
 _METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
 _FORBIDDEN_PROXIES = frozenset({"*", "0.0.0.0/0", "::/0"})
@@ -48,8 +50,11 @@ _ROUTE_KEYS = frozenset(
         "description",
         "x402",
         "x402_mode",
+        "mcp",
     }
 )
+_MCP_KEYS = frozenset({"signal", "default", "tools"})
+_TOOL_PRICE_KEYS = frozenset({"price_sats", "access", "description"})
 _INJECT_KEYS = frozenset({"name", "value_env"})
 _HOP = frozenset(
     {
@@ -113,9 +118,43 @@ class Route:
     description: str | None
     x402: bool = False
     x402_mode: str = ""
+    mcp: McpPolicy | None = None
 
     def __repr__(self) -> str:
         return f"Route({self.name} {self.access.label()} {self.price_sats}sats {self.scope})"
+
+
+@dataclass(frozen=True)
+class ToolPrice:
+    """A free tool, or a price the buyer must pay before that tool runs."""
+
+    free: bool
+    price_sats: int
+    access: Access | None
+    description: str | None
+
+
+@dataclass(frozen=True)
+class McpPolicy:
+    """Per-tool prices for one MCP route. The route ``price_sats`` field is not used."""
+
+    signal: str
+    default: ToolPrice
+    tools: tuple[tuple[str, ToolPrice], ...]
+    paid: tuple[tuple[str, Route], ...]
+    literal_path: str
+
+    def tool(self, name: str) -> ToolPrice | None:
+        for key, entry in self.tools:
+            if key == name:
+                return entry
+        return None
+
+    def paid_route(self, name: str) -> Route | None:
+        for key, route in self.paid:
+            if key == name:
+                return route
+        return None
 
 
 @dataclass(frozen=True)
@@ -331,6 +370,236 @@ def _description(value: object) -> str | None:
     return cleaned[:MEMO_MAX]
 
 
+def tool_resource(route_name: str, tool: str) -> str:
+    return f"route:{route_name}:{tool}"
+
+
+def _check_tool_resource(route_name: str, tool: str) -> None:
+    if len(tool_resource(route_name, tool)) > _RESOURCE_MAX:
+        raise ConfigError(f"route {route_name} resource too long")
+
+
+def _parse_x402(data: dict, name: str) -> tuple[bool, str]:
+    if "x402" in data and data["x402"] is not None and not isinstance(data["x402"], bool):
+        raise ConfigError(f"route {name} x402 must be true or false")
+    x402_on = bool(data.get("x402", False))
+    raw_mode = data.get("x402_mode")
+    if raw_mode is not None and not x402_on:
+        raise ConfigError(f"route {name} x402_mode requires x402: true")
+    if x402_on:
+        if raw_mode is None:
+            mode = "test"
+        elif raw_mode in {"test", "live"}:
+            mode = str(raw_mode)
+        else:
+            raise ConfigError(f"route {name} x402_mode must be test or live")
+    else:
+        mode = ""
+    return x402_on, mode
+
+
+def _parse_tool_price(value: object, label: str) -> ToolPrice:
+    if value == "free":
+        return ToolPrice(free=True, price_sats=0, access=None, description=None)
+    if not isinstance(value, dict):
+        raise ConfigError(f"{label} must be free or a price mapping")
+    unknown = sorted(set(value) - _TOOL_PRICE_KEYS)
+    if unknown:
+        raise ConfigError(f"{label}: unknown key {unknown[0]}")
+    price = _as_int(
+        _require(value, "price_sats", f"{label} price_sats"),
+        f"{label} price_sats",
+        lo=1,
+        hi=MAX_PRICE_SATS,
+    )
+    access = _parse_access(_require(value, "access", f"{label} access"))
+    description = _description(value["description"]) if "description" in value else None
+    return ToolPrice(free=False, price_sats=price, access=access, description=description)
+
+
+def _parse_tool_table(value: object, route_name: str) -> tuple[tuple[str, ToolPrice], ...]:
+    if not isinstance(value, dict):
+        raise ConfigError(f"route {route_name} mcp tools must be a mapping")
+    items: list[tuple[str, ToolPrice]] = []
+    for key, raw in value.items():
+        if not isinstance(key, str):
+            raise ConfigError(f"route {route_name} mcp tool name must be a string")
+        if not _TOOL_NAME.fullmatch(key):
+            raise ConfigError(f"route {route_name} mcp tool name is invalid: {key}")
+        _check_tool_resource(route_name, key)
+        items.append((key, _parse_tool_price(raw, f"route {route_name} tool {key}")))
+    return tuple(items)
+
+
+def _paid_tool_route(
+    *,
+    name: str,
+    methods: frozenset[str],
+    pattern: re.Pattern[str],
+    x402: bool,
+    x402_mode: str,
+    route_description: str | None,
+    tool: str,
+    entry: ToolPrice,
+) -> Route:
+    if entry.free or entry.access is None:
+        raise ConfigError(f"route {name} tool {tool} has no price")
+    description = entry.description if entry.description is not None else route_description
+    return Route(
+        name=name,
+        methods=methods,
+        pattern=pattern,
+        price_sats=entry.price_sats,
+        access=entry.access,
+        scope="route",
+        resource=tool_resource(name, tool),
+        description=description,
+        x402=x402,
+        x402_mode=x402_mode,
+    )
+
+
+def derived_route(parent: Route, tool: str) -> Route:
+    """Paid route for one tool. A listed tool is reused. A paid default is built on each call."""
+
+    policy = parent.mcp
+    if policy is None:
+        raise ConfigError(f"route {parent.name} is not an mcp route")
+    listed = policy.paid_route(tool)
+    if listed is not None:
+        return listed
+    if policy.default.free:
+        raise ConfigError(f"route {parent.name} tool {tool} is free")
+    _check_tool_resource(parent.name, tool)
+    return _paid_tool_route(
+        name=parent.name,
+        methods=parent.methods,
+        pattern=parent.pattern,
+        x402=parent.x402,
+        x402_mode=parent.x402_mode,
+        route_description=parent.description,
+        tool=tool,
+        entry=policy.default,
+    )
+
+
+def _mcp_policy(
+    raw: object,
+    *,
+    name: str,
+    methods: frozenset[str],
+    pattern: re.Pattern[str],
+    x402: bool,
+    x402_mode: str,
+    route_description: str | None,
+    literal_path: str,
+) -> McpPolicy:
+    data = _mapping(raw, f"route {name} mcp")
+    unknown = sorted(set(data) - _MCP_KEYS)
+    if unknown:
+        raise ConfigError(f"route {name} mcp: unknown key {unknown[0]}")
+    if "default" not in data or data["default"] is None:
+        raise ConfigError(f"route {name} mcp default is required")
+    if "signal" in data and data["signal"] is not None:
+        if data["signal"] != "http_402":
+            raise ConfigError(f"route {name} mcp signal must be http_402")
+        signal = "http_402"
+    elif "signal" in data:
+        raise ConfigError(f"route {name} mcp signal must be http_402")
+    else:
+        signal = ""
+    default = _parse_tool_price(data["default"], f"route {name} mcp default")
+    if "tools" in data and data["tools"] is not None:
+        tools = _parse_tool_table(data["tools"], name)
+    elif "tools" in data:
+        raise ConfigError(f"route {name} mcp tools must be a mapping")
+    else:
+        tools = ()
+    paid: list[tuple[str, Route]] = []
+    for tool, entry in tools:
+        if entry.free:
+            continue
+        paid.append(
+            (
+                tool,
+                _paid_tool_route(
+                    name=name,
+                    methods=methods,
+                    pattern=pattern,
+                    x402=x402,
+                    x402_mode=x402_mode,
+                    route_description=route_description,
+                    tool=tool,
+                    entry=entry,
+                ),
+            )
+        )
+    return McpPolicy(signal=signal, default=default, tools=tools, paid=tuple(paid), literal_path=literal_path)
+
+
+def _mcp_route(data: dict, name: str, methods: set[str], x402: bool, x402_mode: str) -> Route:
+    if "POST" not in methods or any(method not in {"POST", "DELETE"} for method in methods):
+        raise ConfigError(f"route {name} mcp methods must be POST and DELETE")
+    has_path = "path" in data and data["path"] is not None
+    has_regex = "path_regex" in data and data["path_regex"] is not None
+    if has_regex:
+        raise ConfigError(f"route {name} cannot use path_regex on an mcp route")
+    if not has_path:
+        raise ConfigError(f"route {name} mcp route needs path")
+    path_text = _as_str(data["path"], f"route {name} path")
+    if "*" in path_text:
+        raise ConfigError(f"route {name} mcp path cannot contain *")
+    if "price_sats" in data and data["price_sats"] is not None:
+        raise ConfigError(f"route {name} cannot set price_sats on an mcp route")
+    if "access" in data and data["access"] is not None:
+        raise ConfigError(f"route {name} cannot set access on an mcp route")
+    if "scope" in data and data["scope"] is not None:
+        scope = _as_str(data["scope"], f"route {name} scope")
+        if scope != "route":
+            raise ConfigError(f"route {name} scope must be route")
+    try:
+        pattern = compile_glob(path_text)
+    except MatchError as exc:
+        raise ConfigError(str(exc)) from exc
+    description = _description(data.get("description"))
+    policy = _mcp_policy(
+        data["mcp"],
+        name=name,
+        methods=frozenset(methods),
+        pattern=pattern,
+        x402=x402,
+        x402_mode=x402_mode,
+        route_description=description,
+        literal_path=path_text,
+    )
+    return Route(
+        name=name,
+        methods=frozenset(methods),
+        pattern=pattern,
+        price_sats=0,
+        access=Access("per_request", None),
+        scope="route",
+        resource=f"route:{name}",
+        description=description,
+        x402=x402,
+        x402_mode=x402_mode,
+        mcp=policy,
+    )
+
+
+def _reject_mcp_shadows(routes: tuple[Route, ...], free_patterns: tuple[re.Pattern[str], ...]) -> None:
+    for index, route in enumerate(routes):
+        if route.mcp is None:
+            continue
+        path = route.mcp.literal_path
+        for pattern in free_patterns:
+            if pattern.fullmatch(path):
+                raise ConfigError(f"route {route.name} is shadowed by a free path")
+        for earlier in routes[:index]:
+            if earlier.pattern.fullmatch(path):
+                raise ConfigError(f"route {route.name} is shadowed by route {earlier.name}")
+
+
 def _routes(value: object) -> tuple[Route, ...]:
     if not isinstance(value, list) or not value:
         raise ConfigError("routes must be a non-empty list")
@@ -357,6 +626,12 @@ def _routes(value: object) -> tuple[Route, ...]:
             if upper not in _METHODS:
                 raise ConfigError(f"route {name} method is not supported: {upper}")
             methods.add(upper)
+        x402_on, mode = _parse_x402(data, name)
+        if "mcp" in data:
+            if data["mcp"] is None:
+                raise ConfigError(f"route {name} mcp must be a mapping")
+            routes.append(_mcp_route(data, name, methods, x402_on, mode))
+            continue
         has_path = "path" in data and data["path"] is not None
         has_regex = "path_regex" in data and data["path_regex"] is not None
         if has_path == has_regex:
@@ -379,21 +654,6 @@ def _routes(value: object) -> tuple[Route, ...]:
             elif site != (price, access):
                 raise ConfigError("site-scoped routes must share price_sats and access")
         resource = "site" if scope == "site" else f"route:{name}"
-        if "x402" in data and data["x402"] is not None and not isinstance(data["x402"], bool):
-            raise ConfigError(f"route {name} x402 must be true or false")
-        x402_on = bool(data.get("x402", False))
-        raw_mode = data.get("x402_mode")
-        if raw_mode is not None and not x402_on:
-            raise ConfigError(f"route {name} x402_mode requires x402: true")
-        if x402_on:
-            if raw_mode is None:
-                mode = "test"
-            elif raw_mode in {"test", "live"}:
-                mode = str(raw_mode)
-            else:
-                raise ConfigError(f"route {name} x402_mode must be test or live")
-        else:
-            mode = ""
         routes.append(
             Route(
                 name=name,
@@ -497,6 +757,9 @@ def load_settings(path: str | Path) -> Settings:
     secret, secret_warning = _origin_secret(_env_name(origin.get("secret_env", "SATSGATE_ORIGIN_SECRET"), "secret_env"))
     inject = _inject_headers(upstream.get("inject_headers"))
     routes = _routes(_require(data, "routes", "routes"))
+    if mode == "receipt" and any(route.mcp is not None for route in routes):
+        named = next(route.name for route in routes if route.mcp is not None)
+        raise ConfigError(f"route {named}: mcp routes need mode: paywall")
     if "sats_per_credit" in pricing:
         log.info("pricing.sats_per_credit is ignored (pricing changed)")
 
@@ -513,6 +776,8 @@ def load_settings(path: str | Path) -> Settings:
         public_base = _http_base(server["public_base"], "public_base")
     if any(route.x402 for route in routes) and not public_base:
         raise ConfigError("server.public_base is required when a route sets x402: true")
+    free_patterns = _free_patterns(data.get("free_paths"))
+    _reject_mcp_shadows(routes, free_patterns)
 
     warnings: list[str] = []
     if secret_warning:
@@ -551,7 +816,7 @@ def load_settings(path: str | Path) -> Settings:
             lo=1,
             hi=MAX_RESPONSE_BYTES,
         ),
-        free_patterns=_free_patterns(data.get("free_paths")),
+        free_patterns=free_patterns,
         routes=routes,
         warnings=tuple(warnings),
         public_base=public_base,

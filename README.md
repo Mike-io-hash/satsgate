@@ -178,7 +178,7 @@ The hosted gate is closed beta. Sites are approved manually.
 
 Not built yet:
 
-- Per-tool pricing for remote MCP servers. Today a price applies to a route and method, so every tool call on `/mcp` costs the same.
+- Per-tool pricing for remote MCP servers is not in a published release yet. In the published proxy, a price applies to a route and method, so every tool call on `/mcp` costs the same.
 - A TypeScript SDK.
 
 ## Security and trust

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+`satsgate-proxy` can price MCP routes per tool. This is not in a published release yet.
+
+- Only `tools/call` is charged, and the price depends on the tool name.
+- Other MCP messages are forwarded free and signed.
+- The request is checked before an invoice is minted.
+- A failed tool call takes no unlock fee and no use.
+- `GET` on an MCP route is 405.
+- Routes that do not set `mcp` are unchanged.
+
 ## [0.20.4] - 2026-11-19
 
 Core **0.20.4**. Hosted gate stays **0.15.2**. Packages are unchanged and nothing is published. No new table, column, or environment variable.

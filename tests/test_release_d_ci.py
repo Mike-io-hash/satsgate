@@ -162,3 +162,20 @@ def test_t_d_5_1_ci_permissions_and_pins() -> None:
     assert "scripts/release/requirements-lint.txt" in text
     assert "actionlint" in text
     assert "zizmor" in text
+
+
+def test_pm_8_1_ci_runs_the_v1_origin() -> None:
+    """The SDK 1.x origin job must set its marker and run that file."""
+    path = ROOT / ".github" / "workflows" / "ci.yml"
+    workflow = _load_workflow(path)
+    job = workflow["jobs"]["proxy-mcp-v1"]
+    assert job["runs-on"] == "ubuntu-latest"
+    command = ""
+    env: dict = {}
+    for step in job["steps"]:
+        raw = step.get("run") or ""
+        if "pytest" in raw and "test_proxy_mcp_origin_v1.py" in raw:
+            command = raw
+            env = step.get("env") or {}
+    assert command
+    assert env.get("SATSGATE_MCP_V1_JOB") == "1"
