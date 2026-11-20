@@ -41,7 +41,8 @@
     "token": "cobrale",
     "internal_name": "Ia",
     "review_id": "P-C11",
-    "banned_word": "anonymous"
+    "banned_word": "anonymous",
+    "part_code": "MCP-2"
   },
   "allowlist": [
     {

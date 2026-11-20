@@ -156,6 +156,64 @@ routes:
         echo: free
 ```
 
+An MCP route speaks [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports). The proxy reads the JSON-RPC body, decides whether the call is free or priced, and only then talks to the core. `signal` may be omitted. The only accepted value in this code is `http_402`.
+
+`default` is required. It is the string `free`, or a price mapping with `price_sats`, `access`, and an optional `description`. Each key under `tools` is either `free` or the same kind of mapping. A missing `default`, a bad tool name, a route-level `price_sats` or `access`, a glob path, `path_regex`, a method other than `POST` and `DELETE`, or `mode: receipt` refuses to start.
+
+What is free: every MCP message that is not a priced `tools/call`. That includes `initialize`, `tools/list`, `ping`, resources, prompts, a tool marked `free`, an unlisted tool when `default` is `free`, notifications, client responses, and `DELETE`. A batch is free when every `tools/call` in it is free. A batch that contains a priced tool is rejected and no invoice is minted.
+
+What is charged: one `tools/call` whose name is a priced tool, or an unlisted name when `default` is a price. The resource is `route:<route>:<tool>`. A restricted key with `resource_prefix: route:` covers every one of those resources. The memo is the tool description, then the route description.
+
+The proxy checks the request before it mints an invoice. A failed check is HTTP 400, `Content-Type: application/json`, `Cache-Control: no-store`, and a JSON-RPC error. `data.error` is the code word:
+
+| Code word | Meaning |
+| --- | --- |
+| `invalid_json` | The body is empty, not UTF-8, or not strict JSON. Duplicate keys are rejected. |
+| `unsupported_content_type` | `Content-Type` is not `application/json`. |
+| `accept_json_and_sse_required` | `Accept` does not list both `application/json` and `text/event-stream`. A wildcard does not count. |
+| `invalid_message` | The JSON-RPC shape is wrong, a `tools/call` has no id, or a batch is not allowed for this protocol version. |
+| `invalid_method` | The method is a disguised form of `tools/call` or of a method this proxy does not forward. |
+| `invalid_tool_call` | A `tools/call` has no tool name. |
+| `invalid_tool_name` | The name is a look-alike of a priced tool, or it cannot be used with a priced `default`. |
+| `tasks_not_supported` | `params.task` is set. |
+| `batch_with_paid_tool` | A batch contains a priced `tools/call`. |
+| `duplicate_routing_header` | `MCP-Protocol-Version`, `Mcp-Method`, or `Mcp-Name` is repeated. |
+| `header_mismatch` | `Mcp-Method` or `Mcp-Name` does not match the body, or a 2026-07-28 request is missing one of them. |
+| `unsupported_protocol_version` | `MCP-Protocol-Version` is not one of the versions below. |
+| `missing_request_envelope` | A 2026-07-28 request is missing `params._meta`. |
+| `delete_body_not_allowed` | `DELETE` included a body. |
+
+`GET` on an MCP route is **405** from the proxy, with `Allow: DELETE, POST`. `DELETE` with an empty body is free. `subscriptions/listen` and `tasks/get`, `tasks/result`, `tasks/list`, and `tasks/cancel` are not forwarded. A request gets HTTP 200 and JSON-RPC `-32601`. A notification gets HTTP 202 and an empty body.
+
+On a free forward and on `DELETE`, the origin receives the original body bytes and these headers:
+
+| Header | Value |
+| --- | --- |
+| `X-Satsgate-Signature` | `t=<unix>, v1=<hex hmac-sha256>` over `{unix}\|{METHOD}\|{target}\|{64 zeros}` |
+| `X-Satsgate-Payment-Hash` | 64 zeros |
+| `X-Satsgate-Resource` | `free` |
+| `X-Satsgate-Paid-Sats` | `0` |
+| `X-Satsgate-Mcp-Tool` | The tool name, on a single `tools/call` only. A name that is not plain ASCII uses the `=?base64?...?=` form. |
+
+There is no `X-Satsgate-Paid-Usd-Atomic` on a free forward. A priced call adds the same signature headers the paywall uses today, with `X-Satsgate-Resource: route:<route>:<tool>`, the real payment hash, `X-Satsgate-Paid-Sats` or `X-Satsgate-Paid-Usd-Atomic`, and `X-Satsgate-Mcp-Tool`. `X-Satsgate-Mcp-Tool` is informational and is not part of the signed message. The snippets in `snippets/` verify both the free hash and a paid hash with no change. A valid signature proves the request came through the proxy. It does not by itself mean the call was paid. The origin reads `X-Satsgate-Resource` to see `free` or the tool resource.
+
+The price notice is the HTTP 402 described in [What a buyer sees](#what-a-buyer-sees). On an `x402: true` route that 402 carries both the Lightning challenge and `PAYMENT-REQUIRED`. A standard MCP client surfaces the 402 as an HTTP error, so the buyer needs an L402-aware or x402-aware client.
+
+A failed tool call takes no unlock fee and no use. That includes a JSON-RPC error, `result.isError: true`, and `resultType` other than `complete`. The same token can be retried. The Lightning payment has already reached the merchant's wallet, because the buyer paid that wallet directly. An x402 payment is not settled. Buyers pay the merchant's wallet directly. Satsgate does not hold those funds.
+
+Supported `MCP-Protocol-Version` values: `2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`, and `2026-07-28`. A missing header is treated as the handshake era, including `initialize`. The origin negotiates `params.protocolVersion`.
+
+Limits that apply to MCP routes:
+
+- There is no long-lived GET stream. Responses are buffered.
+- A tool slower than `upstream.timeout_seconds` times out.
+- `tasks/*` and `subscriptions/listen` are answered with a JSON-RPC error.
+- The proxy cannot tell whether the origin needs a session. The buyer initializes first, and that call is free.
+- `Mcp-Param-*` headers are not checked here. A mismatch is an origin error, and it is not charged.
+- The HMAC does not cover the body.
+- The origin must look up a tool by its exact name. Both official MCP SDKs do that.
+- A token is bound to one tool, not to an MCP session.
+
 ## Price
 
 A new account gets **500 free unlocks per UTC month**. After that, each unlock is **2 sats**, with a **10%** cap. The fee is taken once per payment, and only after the origin returns 2xx. `uses:N` and `pass:<seconds>` still bundle requests inside that one payment. `pricing.sats_per_credit` in an old config is ignored.
@@ -222,6 +280,7 @@ A retry of the same token takes another use when the bundle still has one. A `pe
 - The macaroon-only path decodes the macaroon to learn the payment hash. A garbage token becomes a fresh 402.
 - `scope: site` cannot mix prices. `scope: route` tokens do not unlock other routes.
 - The restricted key's `resource_prefix` is a case-sensitive prefix of the resource id the proxy sends.
+- MCP routes have further limits. See [MCP servers](#mcp-servers).
 
 ## Contributors' note
 

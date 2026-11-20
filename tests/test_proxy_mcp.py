@@ -1088,11 +1088,14 @@ def test_pm_5_7_sse_result_decides_the_fee(tmp_path: Path, monkeypatch: pytest.M
     errored = json.dumps({"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "failed"}})
     after_note = f"data: {progress}\n\ndata: {errored}\n\n".encode()
     broken = b"data: {not-json}\n\n"
+    later = json.dumps({"jsonrpc": "2.0", "id": 2, "result": {"isError": True}})
+    success_then_other = f"data: {final}\n\ndata: {later}\n\n".encode()
     cases = [
         (crlf, True),
         (lf, False),
         (after_note, False),
         (broken, False),
+        (success_then_other, True),
     ]
     for body, charged in cases:
         world = McpWorld()
