@@ -24,6 +24,7 @@ _INSTRUCTIONS = (
     "A used-up Lightning token is quoted again and is not paid inside the same call unless auto-pay is enabled "
     "and the invoice is inside the configured sats budget. "
     "On the hosted gate, content comes from the seller after a signed receipt. Satsgate does not serve it. "
+    "remote_list_tools and remote_call_tool call tools on a remote MCP server. Listing and the handshake are never paid. After paying a remote tool's invoice, call remote_call_tool again with the same url and tool, not check_payment. "
     "Do not ask the user to paste a wallet connection string, an API key, or a private key into the chat."
 )
 
@@ -99,6 +100,28 @@ def build_server(buyer: Buyer | None = None, settings: Settings | None = None) -
         """
         try:
             return _present(await buyer.pay_and_fetch(url, mode, method, body, payment_signature))
+        except (BuyerError, UrlError, ConfigError) as exc:
+            return [_error(exc)]
+
+    @mcp.tool(annotations=_READ, structured_output=False)
+    async def remote_list_tools(url: str) -> list:
+        """List the tools of a remote MCP server at url. Free: it never calls a tool and never pays."""
+        try:
+            return _present(await buyer.remote_list_tools(url))
+        except (BuyerError, UrlError, ConfigError) as exc:
+            return [_error(exc)]
+
+    @mcp.tool(annotations=_PAY, structured_output=False)
+    async def remote_call_tool(
+        url: str,
+        tool: str,
+        arguments: dict | None = None,
+        mode: str = "human",
+        payment_signature: str | None = None,
+    ) -> list:
+        """Call one tool on a remote MCP server at url with arguments. If the tool is priced, mode human returns a Lightning invoice and a QR: pay it, then call remote_call_tool again with the same url and tool. mode nwc pays from the environment wallet inside the caps. payment_signature sends an x402 PAYMENT-SIGNATURE from an external wallet. A stored token is reused for later calls to the same tool."""
+        try:
+            return _present(await buyer.remote_call_tool(url, tool, arguments, mode, payment_signature))
         except (BuyerError, UrlError, ConfigError) as exc:
             return [_error(exc)]
 

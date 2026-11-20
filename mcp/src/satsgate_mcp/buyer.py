@@ -26,6 +26,7 @@ from satsgate_mcp.x402 import ParsedX402, for_agent, payment_response_fields
 log = logging.getLogger("satsgate_mcp")
 
 _METHODS = frozenset({"GET", "HEAD", "POST"})
+_FETCH_ACCEPT = "application/json, */*"
 _QUOTE_REUSE_SECONDS = 60
 _USD_DAY = 24 * 60 * 60
 _SIGNATURE_MAX = 8192
@@ -151,6 +152,23 @@ class Buyer:
             return self._human_offer(challenge)
         return await self._pay_with_nwc(challenge, allow_autopay=False)
 
+    async def remote_list_tools(self, url: str) -> Presentation:
+        from satsgate_mcp.remote import list_remote_tools
+
+        return await list_remote_tools(self, url)
+
+    async def remote_call_tool(
+        self,
+        url: str,
+        tool: str,
+        arguments: dict | None = None,
+        mode: str = "human",
+        payment_signature: str | None = None,
+    ) -> Presentation:
+        from satsgate_mcp.remote import call_remote_tool
+
+        return await call_remote_tool(self, url, tool, arguments, mode, payment_signature)
+
     async def check_payment(self, payment_hash: str) -> Presentation:
         if not _HEX64.fullmatch(payment_hash or ""):
             raise BuyerError("invalid_payment_hash", "payment_hash must be 64 hex characters.")
@@ -175,7 +193,7 @@ class Buyer:
         fetched = await self._send(
             challenge.method,
             challenge.url,
-            {"Authorization": f"L402 {challenge.macaroon}"},
+            {"Accept": _FETCH_ACCEPT, "Authorization": f"L402 {challenge.macaroon}"},
             challenge.request_body,
         )
         return await self._interpret(fetched, challenge, preimage=None, allow_autopay=False)
@@ -344,7 +362,7 @@ class Buyer:
             cached = self._fresh_quote(_cache_key(method, target), body)
             if cached is not None:
                 return cached, cached.public()
-        response = await self._send(method, target, {"Accept": "application/json, */*"}, body)
+        response = await self._send(method, target, {"Accept": _FETCH_ACCEPT}, body)
         return self._challenge_or_content(response, method, target, body)
 
     def _challenge_or_content(
@@ -503,7 +521,7 @@ class Buyer:
         fetched = await self._send(
             challenge.method,
             challenge.url,
-            {"PAYMENT-SIGNATURE": signature},
+            {"Accept": _FETCH_ACCEPT, "PAYMENT-SIGNATURE": signature},
             challenge.request_body if payload is None else payload,
         )
         return Presentation(await self._interpret_signed(fetched, challenge, annotated, signature))
@@ -617,7 +635,7 @@ class Buyer:
         fetched = await self._send(
             challenge.method,
             challenge.url,
-            {"Authorization": f"L402 {challenge.macaroon}:{preimage.lower()}"},
+            {"Accept": _FETCH_ACCEPT, "Authorization": f"L402 {challenge.macaroon}:{preimage.lower()}"},
             challenge.request_body,
         )
         presented = await self._interpret(fetched, challenge, preimage=preimage.lower(), allow_autopay=False)
@@ -637,7 +655,12 @@ class Buyer:
         if isinstance(preimage, str) and preimage:
             header = f"{header}:{preimage}"
         request_body = body if body is not None else None
-        fetched = await self._send(str(row["method"]), str(row["url"]), {"Authorization": header}, request_body)
+        fetched = await self._send(
+            str(row["method"]),
+            str(row["url"]),
+            {"Accept": _FETCH_ACCEPT, "Authorization": header},
+            request_body,
+        )
         challenge = Challenge(
             method=str(row["method"]),
             url=str(row["url"]),
@@ -994,14 +1017,21 @@ class Buyer:
             body = None
         outbound = {"Accept": headers.get("Accept", "*/*"), "Accept-Encoding": "identity"}
         for name, value in headers.items():
-            if name.lower() in {
+            lowered = name.lower()
+            if lowered in {
                 "authorization",
                 "x-api-key",
                 "content-type",
                 "accept",
                 "payment-signature",
                 "satsgate-receipt",
-            }:
+                "mcp-session-id",
+                "mcp-protocol-version",
+                "mcp-method",
+                "mcp-name",
+            } or lowered.startswith("mcp-param-"):
+                if any(char in value for char in "\r\n\x00"):
+                    continue
                 outbound[name] = value
         if body:
             outbound.setdefault("Content-Type", "application/json")
