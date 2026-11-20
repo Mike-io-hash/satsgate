@@ -739,12 +739,18 @@ def test_rc_3_2_listing_stops_after_ten_pages(tmp_path: Path) -> None:
     assert wallet.invoices == []
 
 
-@pytest.mark.parametrize("kind", ["http_402", "in_band"])
+@pytest.mark.parametrize("kind", ["http_402", "in_band", "text_x402"])
 @pytest.mark.parametrize("entry", ["list", "call"])
 def test_rc_3_3_a_priced_list_is_refused(tmp_path: Path, kind: str, entry: str) -> None:
     def on_list(_request, body):
         if kind == "http_402":
             return httpx.Response(402, json={"error": "payment_required", "invoice": INVOICE})
+        if kind == "text_x402":
+            document = {"x402Version": 2, "accepts": [{"scheme": "exact"}], "resource": "https://shop.example/mcp"}
+            return _rpc(
+                body["id"],
+                {"isError": True, "content": [{"type": "text", "text": json.dumps(document)}]},
+            )
         return _rpc(
             body["id"],
             {

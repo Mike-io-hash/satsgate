@@ -322,13 +322,11 @@ def _list_is_priced(message: dict | None) -> bool:
     if not isinstance(result, dict) or result.get("isError") is not True:
         return False
     structured = result.get("structuredContent")
-    if not isinstance(structured, dict):
-        return False
-    if structured.get("error") == "payment_required":
+    if isinstance(structured, dict) and structured.get("error") == "payment_required":
         return True
-    if structured.get("x402Version") == 2 and isinstance(structured.get("accepts"), list):
+    if isinstance(structured, dict) and structured.get("x402Version") == 2 and isinstance(structured.get("accepts"), list):
         return True
-    return False
+    return _generic_document(result) is not None
 
 
 def _object(body: bytes) -> dict:
