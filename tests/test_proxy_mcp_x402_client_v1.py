@@ -43,6 +43,19 @@ from test_x402 import _install_poster, _poster, _verify_payee  # noqa: E402
 _TEST_NETWORK = "eip155:84532"
 
 
+class _CoreLog(HybridCore):
+    """Record each path the proxy sends to the core."""
+
+    def __init__(self, core_app) -> None:
+        super().__init__(core_app)
+        self.paths: list[str] = []
+
+    async def handle_async_request(self, request):
+        if request.url.host == "core.test":
+            self.paths.append(request.url.path)
+        return await super().handle_async_request(request)
+
+
 class _BodyLog:
     def __init__(self, app) -> None:
         self.app = app
@@ -98,6 +111,7 @@ def _boot(tmp_path, monkeypatch, *, stateless: bool, x402: bool):
     origin.start()
     proxy = None
     calls = []
+    core_log = _CoreLog(module.app)
     core_cm = TestClient(module.app)
     core = core_cm.__enter__()
     try:
@@ -122,9 +136,9 @@ def _boot(tmp_path, monkeypatch, *, stateless: bool, x402: bool):
             public_base=public,
             signal="in_band",
         )
-        proxy = LocalServer(build_app(settings, transport=HybridCore(module.app)), port=port)
+        proxy = LocalServer(build_app(settings, transport=core_log), port=port)
         proxy.start()
-        return core_cm, origin, proxy, logged, calls, buyer, f"http://127.0.0.1:{proxy.port}/mcp"
+        return core_cm, origin, proxy, logged, calls, core_log.paths, buyer, f"http://127.0.0.1:{proxy.port}/mcp"
     except Exception:
         if proxy is not None:
             proxy.stop()
@@ -160,7 +174,7 @@ def _verify_count(calls) -> int:
 
 
 def test_ib_6_1_official_client_pays_a_stateless_origin(tmp_path, monkeypatch) -> None:
-    core_cm, origin, proxy, logged, calls, buyer, url = _boot(tmp_path, monkeypatch, stateless=True, x402=True)
+    core_cm, origin, proxy, logged, calls, paths, buyer, url = _boot(tmp_path, monkeypatch, stateless=True, x402=True)
     try:
         result = asyncio.run(_paid_call(url, _TEST_NETWORK, buyer))
     finally:
@@ -171,11 +185,13 @@ def test_ib_6_1_official_client_pays_a_stateless_origin(tmp_path, monkeypatch) -
     assert result.payment_response.success is True
     assert _verify_count(calls) == 1
     assert _settle_count(calls) == 1
+    assert sum(path.endswith("/x402/verify") for path in paths) == 1
+    assert sum(path.endswith("/x402/settle") for path in paths) == 1
     assert all(b"x402/payment" not in body for body in logged.bodies)
 
 
 def test_ib_6_2_official_client_pays_a_stateful_origin(tmp_path, monkeypatch) -> None:
-    core_cm, origin, proxy, logged, calls, buyer, url = _boot(tmp_path, monkeypatch, stateless=False, x402=True)
+    core_cm, origin, proxy, logged, calls, paths, buyer, url = _boot(tmp_path, monkeypatch, stateless=False, x402=True)
     try:
         result = asyncio.run(_paid_call(url, _TEST_NETWORK, buyer))
     finally:
@@ -186,15 +202,19 @@ def test_ib_6_2_official_client_pays_a_stateful_origin(tmp_path, monkeypatch) ->
     assert result.payment_response.success is True
     assert _verify_count(calls) == 1
     assert _settle_count(calls) == 1
+    assert sum(path.endswith("/x402/verify") for path in paths) == 1
+    assert sum(path.endswith("/x402/settle") for path in paths) == 1
     assert all(b"x402/payment" not in body for body in logged.bodies)
 
 
 def test_ib_6_3_lightning_only_route_is_not_paid(tmp_path, monkeypatch) -> None:
-    core_cm, origin, proxy, _logged, calls, buyer, url = _boot(tmp_path, monkeypatch, stateless=True, x402=False)
+    core_cm, origin, proxy, _logged, _calls, paths, buyer, url = _boot(tmp_path, monkeypatch, stateless=True, x402=False)
     try:
         result = asyncio.run(_paid_call(url, _TEST_NETWORK, buyer))
     finally:
         _close(core_cm, origin, proxy)
     assert result.payment_made is False
     assert result.is_error is True
-    assert _verify_count(calls) == 0
+    assert sum(path.endswith("/v1/paywall/challenge") for path in paths) == 1
+    assert sum(path.endswith("/x402/verify") for path in paths) == 0
+    assert sum(path.endswith("/x402/settle") for path in paths) == 0
