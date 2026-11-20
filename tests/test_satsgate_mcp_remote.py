@@ -13,6 +13,7 @@ import pytest
 
 from satsgate_mcp import __version__
 from satsgate_mcp.buyer import BuyerError, _X402_ERRORS, _X402_RETRY_NEW
+from satsgate_mcp.qr import invoice_qr
 from satsgate_mcp.manual import _run
 from satsgate_mcp.nwc import NwcError
 from satsgate_mcp.server import _INSTRUCTIONS, _PAY, _READ, build_server
@@ -1297,7 +1298,7 @@ def test_rc_5_4_human_offer_uses_the_remote_wording(tmp_path: Path) -> None:
     offer = asyncio.run(buyer.remote_call_tool(URL, "echo"))
     assert offer.payload["detail"] == _REMOTE_HUMAN
     assert offer.payload["summary"].startswith("Tool echo: ")
-    assert offer.payload["qr_text"]
+    assert offer.payload["qr_text"] == invoice_qr(INVOICE)[1]
     assert offer.qr_png is not None and offer.qr_png.startswith(b"\x89PNG")
     assert buyer.store.quote_for(_key())["cache_key"] == _key()
     assert wallet.invoices == []
@@ -1517,7 +1518,7 @@ def test_rc_5_12_a_paid_failure_keeps_the_full_token(tmp_path: Path) -> None:
         again = asyncio.run(buyer.remote_call_tool(URL, "echo", mode="nwc"))
         assert again.payload["reused_token"] is True
         assert wallet.invoices == [INVOICE]
-        assert len([call for call in http.calls if call.headers.get("authorization")]) >= 2
+        assert len([call for call in _calls(http, "tools/call") if call.headers.get("authorization")]) == 2
 
 
 class _BrokenWallet:

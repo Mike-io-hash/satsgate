@@ -434,7 +434,7 @@ def test_rc_11_7_x402_payment_is_inside_the_call(tmp_path, monkeypatch) -> None:
         assert offer.payload.get("x402", {}).get("payable") is True, offer.payload
         assert result.payload["ok"] is True, result.payload
         assert result.payload["payment_response"]["success"] is True
-        assert buyer.store.spent_usd_since(0) > 0
+        assert buyer.store.spent_usd_since(0) == offer.payload["x402"]["charge_atomic"]
         assert sum(url.endswith("/settle") for url, _body in env.calls) == 1
         assert all(b"x402/payment" not in raw for raw in env.bodies)
         assert wallet.invoices == []
@@ -484,8 +484,7 @@ def test_rc_11_9_readme_examples_match_a_real_run(tmp_path, monkeypatch) -> None
         _normalize(paid.payload, env.url),
     ]
     for block, expected in zip(blocks, live):
-        assert json.loads(block) == expected
-        assert list(json.loads(block)) == list(expected)
+        assert json.dumps(expected, indent=2, ensure_ascii=False) == block
 
 
 def test_rc_11_8_legacy_sessions_are_closed(tmp_path, monkeypatch) -> None:
@@ -497,7 +496,7 @@ def test_rc_11_8_legacy_sessions_are_closed(tmp_path, monkeypatch) -> None:
             assert result.payload["ok"] is True
             if shape == "legacy_stateful":
                 assert len(env.gate.created) == env.gate.deletes
-                assert env.gate.deletes >= 1
+                assert env.gate.deletes == 1
             else:
                 assert env.gate.deletes == 0
                 assert env.gate.created == set()
