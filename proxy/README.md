@@ -131,6 +131,31 @@ First match wins. Anything that is not a free path or a route is **404**. A path
 
 `description` is sent as the challenge memo, trimmed to 250 characters.
 
+## MCP servers
+
+Not in a published release yet. The published 0.14.2 does not read MCP; this section describes the code on the main branch.
+
+```yaml
+routes:
+  - name: tools
+    path: /mcp
+    methods: [POST, DELETE]
+    x402: true            # optional, as today; applies to every paid tool
+    description: Market data tools   # optional; memo fallback
+    mcp:
+      signal: http_402    # optional; the only accepted value in this version
+      default: free       # required: free, or {price_sats, access[, description]}
+      tools:              # optional
+        quote:
+          price_sats: 21
+          access: per_request
+          description: One market quote
+        deep_search:
+          price_sats: 100
+          access: uses:10
+        echo: free
+```
+
 ## Price
 
 A new account gets **500 free unlocks per UTC month**. After that, each unlock is **2 sats**, with a **10%** cap. The fee is taken once per payment, and only after the origin returns 2xx. `uses:N` and `pass:<seconds>` still bundle requests inside that one payment. `pricing.sats_per_credit` in an old config is ignored.
