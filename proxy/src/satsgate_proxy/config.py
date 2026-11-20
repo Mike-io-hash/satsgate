@@ -412,8 +412,15 @@ def _parse_tool_price(value: object, label: str) -> ToolPrice:
         lo=1,
         hi=MAX_PRICE_SATS,
     )
-    access = _parse_access(_require(value, "access", f"{label} access"))
-    description = _description(value["description"]) if "description" in value else None
+    access_value = _require(value, "access", f"{label} access")
+    try:
+        access = _parse_access(access_value)
+    except ConfigError as exc:
+        raise ConfigError(f"{label}: {exc}") from exc
+    try:
+        description = _description(value["description"]) if "description" in value else None
+    except ConfigError as exc:
+        raise ConfigError(f"{label}: {exc}") from exc
     return ToolPrice(free=False, price_sats=price, access=access, description=description)
 
 
@@ -560,8 +567,11 @@ def _mcp_route(data: dict, name: str, methods: set[str], x402: bool, x402_mode: 
     try:
         pattern = compile_glob(path_text)
     except MatchError as exc:
-        raise ConfigError(str(exc)) from exc
-    description = _description(data.get("description"))
+        raise ConfigError(f"route {name}: {exc}") from exc
+    try:
+        description = _description(data.get("description"))
+    except ConfigError as exc:
+        raise ConfigError(f"route {name}: {exc}") from exc
     policy = _mcp_policy(
         data["mcp"],
         name=name,

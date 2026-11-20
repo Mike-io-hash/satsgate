@@ -28,7 +28,7 @@ from satsgate_proxy.core_client import (
 )
 from satsgate_proxy.forward import call_upstream, forward
 from satsgate_proxy.macaroon import macaroon_fields
-from satsgate_proxy.match import match_request
+from satsgate_proxy.match import match_request, unsafe_request_path
 from satsgate_proxy.mcp_http import (
     ZERO_PAYMENT_HASH,
     FreeForward,
@@ -336,6 +336,12 @@ async def handle(request: Request) -> Response:
     if isinstance(body, Response):
         return body
     request.state.body = body
+
+    raw_path = request.scope.get("raw_path")
+    if not isinstance(raw_path, bytes):
+        raw_path = str(request.scope.get("path") or "/").encode("utf-8")
+    if unsafe_request_path(raw_path):
+        return _json(404, "not_found")
 
     if settings.mode == "receipt":
         from satsgate_proxy.receipt_mode import handle_receipt
