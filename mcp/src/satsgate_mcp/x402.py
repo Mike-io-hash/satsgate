@@ -538,6 +538,25 @@ def _dump(parsed: ParsedX402) -> dict:
     }
 
 
+def _settlement_fields(parsed: dict) -> dict | None:
+    out: dict[str, object] = {}
+    success = parsed.get("success")
+    if isinstance(success, bool):
+        out["success"] = success
+    for key in ("transaction", "tx", "network", "payer"):
+        value = parsed.get(key)
+        if isinstance(value, str) and value and len(value) <= 200 and "\n" not in value and "\r" not in value:
+            out[key] = value
+    return out or None
+
+
+def payment_response_object(value: object) -> dict | None:
+    """Public settle fields from a JSON object. The rest of the object is dropped."""
+    if not isinstance(value, dict):
+        return None
+    return _settlement_fields(value)
+
+
 def payment_response_fields(header: str) -> dict | None:
     """Public settle fields. The raw header is not returned."""
     if not header or any(char in header for char in "\r\n"):
@@ -549,12 +568,4 @@ def payment_response_fields(header: str) -> dict | None:
         return None
     if not isinstance(parsed, dict):
         return None
-    out: dict[str, object] = {}
-    success = parsed.get("success")
-    if isinstance(success, bool):
-        out["success"] = success
-    for key in ("transaction", "tx", "network", "payer"):
-        value = parsed.get(key)
-        if isinstance(value, str) and value and len(value) <= 200 and "\n" not in value and "\r" not in value:
-            out[key] = value
-    return out or None
+    return _settlement_fields(parsed)

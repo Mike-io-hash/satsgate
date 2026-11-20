@@ -173,8 +173,20 @@ class Buyer:
         if not _HEX64.fullmatch(payment_hash or ""):
             raise BuyerError("invalid_payment_hash", "payment_hash must be 64 hex characters.")
         row = self.store.quote_by_hash(payment_hash.lower())
+        if row is not None and str(row["cache_key"]).startswith("mcp "):
+            raise BuyerError(
+                "remote_tool_payment",
+                "This payment_hash belongs to a remote MCP tool call. "
+                "Call remote_call_tool again with the same url and tool. Nothing was sent.",
+            )
         if row is None:
             token = self.store.token_by_hash(payment_hash.lower())
+            if token is not None and str(token["cache_key"]).startswith("mcp "):
+                raise BuyerError(
+                    "remote_tool_payment",
+                    "This payment_hash belongs to a remote MCP tool call. "
+                    "Call remote_call_tool again with the same url and tool. Nothing was sent.",
+                )
             if token is not None and self._token_usable(token):
                 return await self._fetch_with_cached(token, None, allow_autopay=False)
             raise BuyerError(
