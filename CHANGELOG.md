@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GET` on an MCP route is 405.
 - Routes that do not set `mcp` are unchanged.
 
+### Security
+- `satsgate-proxy`: a request path with a `.` or `..` segment, also when percent-encoded, a backslash, or an encoded slash or backslash is now 404 before free paths and routes are matched. Such a path could otherwise reach a different path on the origin than the one the proxy matched. This is not in a published release yet.
+
 ## [0.20.4] - 2026-11-19
 
 Core **0.20.4**. Hosted gate stays **0.15.2**. Packages are unchanged and nothing is published. No new table, column, or environment variable.

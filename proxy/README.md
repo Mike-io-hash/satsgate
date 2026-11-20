@@ -119,6 +119,8 @@ Core **429** (`buyer_rate_limited`, `too_many_open_challenges_for_buyer`, `rate_
 
 First match wins. Anything that is not a free path or a route is **404**. A path that matches with the wrong method is **405** and does not mint an invoice. `OPTIONS` is not special: list it, or put the path in `free_paths`, if a browser must call it.
 
+A request path with a `.` or `..` segment, also when percent-encoded (such as `%2e%2e`), a backslash, or an encoded slash or backslash (`%2F`, `%5C`) is **404** as well. It is checked before free paths and routes, so such a path never reaches the origin. This check is not in a published release yet.
+
 | `access` | Core policy | Meaning |
 | --- | --- | --- |
 | `per_request` | `max_uses: 1` | One payment, one request |
