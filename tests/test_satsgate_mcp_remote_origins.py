@@ -231,6 +231,7 @@ def _buyer(tmp_path, wallet) -> Buyer:
 @contextmanager
 def _boot(tmp_path, monkeypatch, *, shape: str, signal: str, x402: bool = False, deep: bool = False):
     module = _load_app(tmp_path)
+    _rates(module)
     app, gate = _with_deep(shape) if deep else _origin(shape)
     logged = _Bodies(app)
     origin = LocalServer(logged)
@@ -437,6 +438,54 @@ def test_rc_11_7_x402_payment_is_inside_the_call(tmp_path, monkeypatch) -> None:
         assert sum(url.endswith("/settle") for url, _body in env.calls) == 1
         assert all(b"x402/payment" not in raw for raw in env.bodies)
         assert wallet.invoices == []
+
+
+def _normalize(value, live_url: str):
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if key in {"invoice", "payment_hash", "qr_text", "pay_to", "asset", "resource", "resource_url"}:
+                out[key] = "<" + key + ">"
+            elif key == "url":
+                out[key] = "http://shop.example/mcp"
+            elif key in {"invoice_expires_at", "expires_at", "access_until"} and isinstance(item, int):
+                out[key] = 0
+            else:
+                out[key] = _normalize(item, live_url)
+        return out
+    if isinstance(value, list):
+        return [_normalize(item, live_url) for item in value]
+    if isinstance(value, str):
+        import re
+
+        text = value.replace(live_url, "http://shop.example/mcp")
+        return re.sub(r"unix \d+", "unix 0", text)
+    return value
+
+
+def test_rc_11_9_readme_examples_match_a_real_run(tmp_path, monkeypatch) -> None:
+    import re
+    from pathlib import Path
+
+    with _boot(tmp_path, monkeypatch, shape="stateless", signal="in_band", deep=True) as env:
+        wallet = _CoreWallet(env.core)
+        buyer = _buyer(tmp_path, wallet)
+        offer = asyncio.run(buyer.remote_call_tool(env.url, "quote", {"symbol": "acme"}))
+        paid = asyncio.run(buyer.remote_call_tool(env.url, "quote", {"symbol": "acme"}, mode="nwc"))
+    assert offer.payload["action"] == "pay_invoice"
+    assert paid.payload["ok"] is True
+    readme = Path(__file__).resolve().parents[1].joinpath("mcp", "README.md").read_text(encoding="utf-8")
+    blocks = re.findall(r"```json\n(.*?)\n```", readme, flags=re.S)
+    remote = readme.split("## Remote MCP servers", 1)[1].split("## NWC", 1)[0]
+    blocks = re.findall(r"```json\n(.*?)\n```", remote, flags=re.S)
+    assert len(blocks) == 2
+    live = [
+        _normalize(offer.payload, env.url),
+        _normalize(paid.payload, env.url),
+    ]
+    for block, expected in zip(blocks, live):
+        assert json.loads(block) == expected
+        assert list(json.loads(block)) == list(expected)
 
 
 def test_rc_11_8_legacy_sessions_are_closed(tmp_path, monkeypatch) -> None:

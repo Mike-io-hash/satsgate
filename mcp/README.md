@@ -73,6 +73,8 @@ Put `SATSGATE_MCP_NWC_URI` in that env block when you want the agent to pay. Do 
 | `discover` | GET (or POST) the URL with no payment. Reads `WWW-Authenticate: L402 macaroon="...", invoice="..."` and the JSON body: `amount_sats`, `max_uses`, `access_seconds`, `invoice_expires_at`. When the 402 offers x402, also reads `PAYMENT-REQUIRED` and the JSON `x402` mirror. |
 | `quote` | Same request, plus a short sentence. |
 | `pay_and_fetch` | `mode=human` (default) returns the Lightning invoice, a text QR, and a PNG when that rail is offered. `mode=nwc` pays Lightning from the environment wallet if the sats caps allow it, then fetches. An optional `payment_signature` forwards a `PAYMENT-SIGNATURE` the caller already has. This process does not sign. |
+| `remote_list_tools` | Lists the tools of a remote MCP server. Free: it never calls a tool and never pays. |
+| `remote_call_tool` | Calls one tool on a remote MCP server. Reads the price from an HTTP 402 or from the in-band price notice, then pays with the same modes and caps as `pay_and_fetch`. See [Remote MCP servers](#remote-mcp-servers). |
 | `check_payment` | One poll of a human payment. `payment_pending` means call it again after `retry_after_seconds`. On settlement it fetches the URL with `Authorization: L402 <macaroon>` and no preimage. |
 | `credits_balance` | `GET /v1/balance` with the optional restricted key. An `sgr_` key can read the balance. It cannot top up. Nothing is written. |
 | `challenge_status` | `GET /v1/paywall/status/{payment_hash}?consume=false`. The macaroon is the one stored locally. It is not a tool argument. |
@@ -111,6 +113,80 @@ The gate or proxy runs verify, then the origin, then settle. A 2xx returns the b
 Both `SATSGATE_MCP_MAX_PAYMENT_USD` and `SATSGATE_MCP_DAILY_MAX_USD` must be set or the tool will not proceed. `0` refuses every positive amount. Unset or over the cap, `discover` still returns the parsed requirements with `payable: false`. `pay_and_fetch` then refuses and does not send the header. The sats caps do not apply to USDC. An over-cap USDC amount does not block paying the Lightning invoice on the same 402.
 
 `mode=human` still returns the invoice and QR when Lightning is offered, so a person can pay from any phone wallet and the agent continues with `check_payment`. A dual 402 returns that invoice and the x402 block together. An x402-only URL has no invoice. NWC is not required for it. An `sgr_` key is still only for `challenge_status` and `credits_balance`. The x402 tools do not call a route that needs an account key.
+
+## Remote MCP servers
+
+`remote_call_tool` calls one tool on a remote MCP server, such as a route of `satsgate-proxy` priced per tool. It is not in a published release yet.
+
+Each call opens its own connection. The client first tries the 2026-07-28 `server/discover`. If the server does not answer it, the client uses `initialize` and the session the server assigns, and ends that session after the call. Then it lists the tools. The handshake and the list are never paid. A tool the server does not list is not called.
+
+An unpaid call to a priced tool gets the price either as an HTTP 402 or as an in-band price notice: a tool result with `isError: true` and the offer in `structuredContent`. Both are read the same way.
+
+- `mode=human` returns the invoice and the QR. Pay it, then call `remote_call_tool` again with the same `url` and `tool`. The same invoice is used until it expires. Do not call `check_payment` for a remote tool.
+- `mode=nwc` pays from the environment wallet if the sats caps allow it, then repeats the same call with `Authorization: L402 <macaroon>:<preimage>`.
+- `payment_signature` sends a `PAYMENT-SIGNATURE` from an external wallet inside the call, in `params._meta["x402/payment"]`. The USD caps apply. This process does not sign.
+
+A call pays at most once. The token is stored per server URL and tool name, not per argument set, and is reused while it has uses or time. A failed tool call takes no use, so the token is kept and the next call retries with it. Parallel calls to the same tool wait for one another, so a token that covers several calls is paid once. This holds inside one `satsgate-mcp` process. Two processes that share a data directory are not coordinated.
+
+Not supported: requests from the server to the client (sampling, elicitation), a tool that asks for more input, tasks, resources, and prompts. A paid call that times out is not repeated automatically. Call `remote_call_tool` again to retry with the stored token.
+
+Example: a human offer (placeholders for values that change).
+
+```json
+{
+  "ok": true,
+  "payment_required": true,
+  "url": "http://shop.example/mcp",
+  "method": "POST",
+  "resource": "<resource>",
+  "max_uses": 1,
+  "access_seconds": null,
+  "reason": null,
+  "rails": [
+    "lightning"
+  ],
+  "summary": "Tool quote: POST http://shop.example/mcp costs 21 sats. One payment covers one request. The invoice expires at unix 0.",
+  "amount_sats": 21,
+  "payment_hash": "<payment_hash>",
+  "invoice": "<invoice>",
+  "invoice_expires_at": 0,
+  "tool": "quote",
+  "protocol_version": "2026-07-28",
+  "mode": "human",
+  "action": "pay_invoice",
+  "qr_text": "<qr_text>",
+  "detail": "Pay this invoice from any Lightning wallet, then call remote_call_tool again with the same url and tool. Do not send a preimage. The same invoice is used until it expires. Do not call check_payment for a remote tool."
+}
+```
+
+Example: the result after paying.
+
+```json
+{
+  "ok": true,
+  "url": "http://shop.example/mcp",
+  "tool": "quote",
+  "protocol_version": "2026-07-28",
+  "is_error": false,
+  "content": [
+    {
+      "text": "acme",
+      "type": "text"
+    }
+  ],
+  "structured_content": {
+    "result": "acme"
+  },
+  "paid": true,
+  "paid_with": "lightning",
+  "paid_sats": 21,
+  "reused_token": false,
+  "payment_hash": "<payment_hash>",
+  "uses_remaining": 0,
+  "access_until": null,
+  "detail": "The tool returned a result after one Lightning payment. The token is stored for later calls to this tool while it has uses or time."
+}
+```
 
 ## NWC
 

@@ -1582,6 +1582,7 @@ def test_rc_5_15_a_timeout_on_the_paid_retry_keeps_the_token(tmp_path: Path) -> 
     assert result.payload["error"] == "timeout"
     assert result.payload["paid"] is True
     assert result.payload["token_kept"] is True
+    assert buyer.store.token_for(_key())["uses_remaining"] == 5
     assert buyer.store.spent_since(0) == 21
     assert wallet.invoices == [INVOICE]
 
@@ -1675,6 +1676,8 @@ def test_rc_6_4_auto_pay_pays_a_requote_once(tmp_path: Path) -> None:
 
 
 def test_rc_6_5_tokens_do_not_cross_tools_or_urls(tmp_path: Path) -> None:
+    from satsgate_mcp.remote import _cache_key
+
     other = "https://other.example/mcp"
 
     def on_call(request, body):
@@ -1682,11 +1685,15 @@ def test_rc_6_5_tokens_do_not_cross_tools_or_urls(tmp_path: Path) -> None:
         return _tool_ok(body["id"], "fresh")
 
     buyer, _http, _wallet = _buyer(tmp_path, _origin(tools=[_echo_tool("echo"), _echo_tool("other")], on_call=on_call))
+    buyer._now = Clock()
     _save_token(buyer, tool="echo")
+    stored = buyer.store.token_for(_cache_key(URL, "echo"))
+    assert stored is not None
     asyncio.run(buyer.remote_call_tool(URL, "other"))
     asyncio.run(buyer.remote_call_tool(other, "echo"))
-    assert _key("echo") != f"POST {URL}"
-    assert buyer.store.token_for(_key("echo"))["uses_remaining"] == 5
+    assert _cache_key(URL, "echo") != _cache_key(URL, "other")
+    assert _cache_key(URL, "echo") != f"POST {URL}"
+    assert buyer.store.token_for(_cache_key(URL, "echo"))["uses_remaining"] == 5
 
 
 def test_rc_6_6_the_cache_key_keeps_a_non_ascii_tool_name(tmp_path: Path) -> None:
@@ -2223,3 +2230,30 @@ def test_rc_8_5_idle_locks_are_removed(tmp_path: Path) -> None:
     asyncio.run(buyer.remote_call_tool(URL, "echo", mode="nwc"))
     assert buyer._remote_locks == {}
     assert wallet.invoices == [INVOICE]
+
+
+def test_rc_12_1_docs_describe_the_remote_tools() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    readme = (root / "mcp" / "README.md").read_text(encoding="utf-8")
+    assert "| `remote_list_tools` | Lists the tools of a remote MCP server. Free: it never calls a tool and never pays. |" in readme
+    assert "| `remote_call_tool` | Calls one tool on a remote MCP server. Reads the price from an HTTP 402 or from the in-band price notice, then pays with the same modes and caps as `pay_and_fetch`. See [Remote MCP servers](#remote-mcp-servers). |" in readme
+    section = readme.split("## Remote MCP servers", 1)[1].split("## NWC", 1)[0]
+    for sentence in (
+        "It is not in a published release yet.",
+        "The handshake and the list are never paid.",
+        "A tool the server does not list is not called.",
+        "Do not call `check_payment` for a remote tool.",
+        "This process does not sign.",
+        "A call pays at most once.",
+        "Two processes that share a data directory are not coordinated.",
+        "A paid call that times out is not repeated automatically.",
+    ):
+        assert sentence in section
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    unreleased, _security = changelog.split("### Security", 1)
+    assert "`satsgate-mcp` can call tools on a remote MCP server. This is not in a published release yet." in unreleased
+    assert "- Paid retries of `pay_and_fetch` and `check_payment` keep the `Accept` header of the first request." in unreleased
+    root_readme = (root / "README.md").read_text(encoding="utf-8")
+    assert "- Calling tools on a remote MCP server from `satsgate-mcp` is not in a published release yet." in root_readme

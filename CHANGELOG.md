@@ -19,6 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An x402 payment can be sent in `params._meta["x402/payment"]` of the `tools/call`. The proxy removes it before the request reaches the origin, and returns the settlement in `result._meta["x402/payment-response"]` and in the `PAYMENT-RESPONSE` header.
 - A Lightning payment on an MCP route still uses the `Authorization: L402` header.
 
+`satsgate-mcp` can call tools on a remote MCP server. This is not in a published release yet.
+
+- `remote_list_tools` lists the tools of a remote MCP server. It never calls a tool and never pays.
+- `remote_call_tool` calls one tool. It speaks both the session handshake and the 2026-07-28 protocol, and reads the price from an HTTP 402 or from the in-band price notice.
+- The handshake, the tool list, and an unknown tool are never paid. A failed call without a price is never paid.
+- Lightning is paid with the existing NWC wallet or by a person paying the invoice. USDC on Base is paid with a `PAYMENT-SIGNATURE` from an external wallet, sent in `params._meta["x402/payment"]`. The existing caps apply.
+- A token is stored per server and tool, and parallel calls to the same tool wait for one another, so one unlock that covers several calls is paid once.
+- Paid retries of `pay_and_fetch` and `check_payment` keep the `Accept` header of the first request.
+
 ### Security
 - `satsgate-proxy`: a request path with a `.` or `..` segment, also when percent-encoded, a backslash, or an encoded slash or backslash is now 404 before free paths and routes are matched. Such a path could otherwise reach a different path on the origin than the one the proxy matched. This is not in a published release yet.
 
