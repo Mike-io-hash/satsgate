@@ -507,14 +507,12 @@ def _mcp_policy(
         raise ConfigError(f"route {name} mcp: unknown key {unknown[0]}")
     if "default" not in data or data["default"] is None:
         raise ConfigError(f"route {name} mcp default is required")
-    if "signal" in data and data["signal"] is not None:
-        if data["signal"] != "http_402":
-            raise ConfigError(f"route {name} mcp signal must be http_402")
-        signal = "http_402"
-    elif "signal" in data:
-        raise ConfigError(f"route {name} mcp signal must be http_402")
+    if "signal" not in data:
+        signal = "in_band"
+    elif isinstance(data["signal"], str) and data["signal"] in {"in_band", "http_402"}:
+        signal = data["signal"]
     else:
-        signal = ""
+        raise ConfigError(f"route {name} mcp signal must be in_band or http_402")
     default = _parse_tool_price(data["default"], f"route {name} mcp default")
     if "tools" in data and data["tools"] is not None:
         tools = _parse_tool_table(data["tools"], name)

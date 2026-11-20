@@ -45,9 +45,10 @@ def _server(state: dict, *, stateless: bool, json_response: bool):
     return RequireSignature(app, SECRET)
 
 
-def _yaml(origin_port: int, *, x402: bool, public_base: str) -> str:
+def _yaml(origin_port: int, *, x402: bool, public_base: str, signal: str | None = "http_402") -> str:
     public = f"  public_base: {public_base}\n" if public_base else ""
     x402_line = "    x402: true\n" if x402 else ""
+    signal_line = "" if signal is None else f"      signal: {signal}\n"
     return (
         "core:\n"
         "  base_url: http://core.test\n"
@@ -69,6 +70,7 @@ def _yaml(origin_port: int, *, x402: bool, public_base: str) -> str:
         "    description: Market data tools\n"
         f"{x402_line}"
         "    mcp:\n"
+        f"{signal_line}"
         "      default: free\n"
         "      tools:\n"
         "        echo: free\n"
@@ -83,9 +85,17 @@ def _yaml(origin_port: int, *, x402: bool, public_base: str) -> str:
     )
 
 
-def _settings(tmp_path: Path, monkeypatch, origin_port: int, *, x402: bool, public_base: str):
+def _settings(
+    tmp_path: Path,
+    monkeypatch,
+    origin_port: int,
+    *,
+    x402: bool,
+    public_base: str,
+    signal: str | None = "http_402",
+):
     path = tmp_path / ("x402.yaml" if x402 else "proxy.yaml")
-    path.write_text(_yaml(origin_port, x402=x402, public_base=public_base), encoding="utf-8")
+    path.write_text(_yaml(origin_port, x402=x402, public_base=public_base, signal=signal), encoding="utf-8")
     monkeypatch.setenv("SATSGATE_ORIGIN_SECRET", SECRET)
     return load_settings(path)
 

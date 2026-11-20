@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A failed tool call takes no unlock fee and no use.
 - `GET` on an MCP route is 405.
 - Routes that do not set `mcp` are unchanged.
+- The price notice on an MCP route is a tool result in an HTTP 200 response, with `isError: true`, the offer in `structuredContent`, and the same JSON as text, so a standard MCP client can read it. Set `signal: http_402` on the route to keep the HTTP 402.
+- An x402 payment can be sent in `params._meta["x402/payment"]` of the `tools/call`. The proxy removes it before the request reaches the origin, and returns the settlement in `result._meta["x402/payment-response"]` and in the `PAYMENT-RESPONSE` header.
+- A Lightning payment on an MCP route still uses the `Authorization: L402` header.
 
 ### Security
 - `satsgate-proxy`: a request path with a `.` or `..` segment, also when percent-encoded, a backslash, or an encoded slash or backslash is now 404 before free paths and routes are matched. Such a path could otherwise reach a different path on the origin than the one the proxy matched. This is not in a published release yet.

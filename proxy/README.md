@@ -145,7 +145,7 @@ routes:
     x402: true            # optional, as today; applies to every paid tool
     description: Market data tools   # optional; memo fallback
     mcp:
-      signal: http_402    # optional; the only accepted value in this version
+      signal: in_band     # optional; in_band (default) or http_402
       default: free       # required: free, or {price_sats, access[, description]}
       tools:              # optional
         quote:
@@ -158,7 +158,7 @@ routes:
         echo: free
 ```
 
-An MCP route speaks [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports). The proxy reads the JSON-RPC body, decides whether the call is free or priced, and only then talks to the core. `signal` may be omitted. The only accepted value in this code is `http_402`.
+An MCP route speaks [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports). The proxy reads the JSON-RPC body, decides whether the call is free or priced, and only then talks to the core. `signal` is `in_band`, the default, or `http_402`. Any other value refuses to start.
 
 `default` is required. It is the string `free`, or a price mapping with `price_sats`, `access`, and an optional `description`. Each key under `tools` is either `free` or the same kind of mapping. A missing `default`, a bad tool name, a route-level `price_sats` or `access`, a glob path, `path_regex`, a method other than `POST` and `DELETE`, or `mode: receipt` refuses to start.
 
@@ -187,7 +187,7 @@ The proxy checks the request before it mints an invoice. A failed check is HTTP 
 
 `GET` on an MCP route is **405** from the proxy, with `Allow: DELETE, POST`. `DELETE` with an empty body is free. `subscriptions/listen` and `tasks/get`, `tasks/result`, `tasks/list`, and `tasks/cancel` are not forwarded. A request gets HTTP 200 and JSON-RPC `-32601`. A notification gets HTTP 202 and an empty body.
 
-On a free forward and on `DELETE`, the origin receives the original body bytes and these headers:
+On a free forward and on `DELETE`, the origin receives the original body bytes and these headers. A message that contains `params._meta["x402/payment"]` is the exception: that key is removed, `_meta` stays, and the message is sent as compact JSON.
 
 | Header | Value |
 | --- | --- |
@@ -199,7 +199,87 @@ On a free forward and on `DELETE`, the origin receives the original body bytes a
 
 There is no `X-Satsgate-Paid-Usd-Atomic` on a free forward. A priced call adds the same signature headers the paywall uses today, with `X-Satsgate-Resource: route:<route>:<tool>`, the real payment hash, `X-Satsgate-Paid-Sats` or `X-Satsgate-Paid-Usd-Atomic`, and `X-Satsgate-Mcp-Tool`. `X-Satsgate-Mcp-Tool` is informational and is not part of the signed message. The snippets in `snippets/` verify both the free hash and a paid hash with no change. A valid signature proves the request came through the proxy. It does not by itself mean the call was paid. The origin reads `X-Satsgate-Resource` to see `free` or the tool resource.
 
-The price notice is the HTTP 402 described in [What a buyer sees](#what-a-buyer-sees). On an `x402: true` route that 402 carries both the Lightning challenge and `PAYMENT-REQUIRED`. A standard MCP client surfaces the 402 as an HTTP error, so the buyer needs an L402-aware or x402-aware client.
+### Price notice and payment
+
+With `signal: in_band`, the price notice is HTTP 200 and a JSON-RPC tool result. `isError` is true. The offer is in `structuredContent`, and the same JSON is the text block, so a standard MCP client can read the price.
+
+`structuredContent` can carry the x402 document keys `accepts`, `resource`, and `x402Version` when x402 is offered, then `error`, `tool`, `lightning`, `x402`, `testing`, `x402_mode`, `reason`, and `hint`. `lightning` has eight keys: `amount_sats`, `invoice`, `invoice_expires_at`, `macaroon`, `payment_hash`, `resource`, `max_uses`, and `access_seconds`.
+
+```json
+{
+  "accepts": [
+    {
+      "amount": "10000",
+      "asset": "<USDC contract>",
+      "extra": {
+        "assetTransferMethod": "eip3009",
+        "name": "USDC",
+        "version": "2"
+      },
+      "maxTimeoutSeconds": 60,
+      "network": "eip155:84532",
+      "payTo": "<payee address>",
+      "scheme": "exact"
+    }
+  ],
+  "resource": {
+    "description": "Test payment on Base Sepolia. Not Base mainnet.",
+    "mimeType": "application/json",
+    "url": "https://pay.example/mcp"
+  },
+  "x402Version": 2,
+  "error": "payment_required",
+  "tool": "quote",
+  "lightning": {
+    "amount_sats": 21,
+    "invoice": "<invoice>",
+    "invoice_expires_at": 1893456000,
+    "macaroon": "<macaroon>",
+    "payment_hash": "<payment hash>",
+    "resource": "route:tools:quote",
+    "max_uses": 1,
+    "access_seconds": null
+  },
+  "x402": {
+    "scheme": "exact",
+    "network": "eip155:84532",
+    "asset": "<USDC contract>",
+    "amount": "10000",
+    "payTo": "<payee address>",
+    "expires_at": 1893455400,
+    "testing": true,
+    "x402_mode": "test"
+  },
+  "testing": true,
+  "x402_mode": "test",
+  "hint": "Pay the Lightning invoice, then repeat this tools/call with the HTTP header Authorization: L402 <macaroon>:<preimage>. If the wallet does not return a preimage, send Authorization: L402 <macaroon> and this proxy will poll until the invoice settles. To pay with x402, repeat this tools/call with the payment payload in params._meta[\"x402/payment\"] or in the PAYMENT-SIGNATURE header."
+}
+```
+
+`reason` appears only when the core gives one, and `lightning` or the x402 keys are absent when that rail is not offered.
+
+| `error` | When the proxy uses it |
+| --- | --- |
+| `payment_required` | The price notice. |
+| `payment_pending` | The Lightning invoice is not settled yet. |
+| `rate_limited` | A rate limit. Other rate-limit codes from the core use this same shape. |
+| `one_rail_only` | More than one payment rail was sent. |
+| `bad_signature` | The x402 payment was not accepted. The proxy answers this before any core call when the `_meta` value is not an object, the encoded `_meta` payment is longer than 8192 characters, or the `PAYMENT-SIGNATURE` header is empty, longer than 8192 bytes, or contains a line break. The core can also answer `bad_signature` at verify or settle, for example when the payment payload cannot be decoded. |
+| x402 rejection codes | Verify or settle was rejected. `reason` is present when the core sent one. |
+| `paywall_unavailable` | The paywall could not offer a price or finish the payment. |
+
+Pending and rate-limit results also keep the `Retry-After` header.
+
+`signal: http_402` keeps the classic HTTP 402 described in [What a buyer sees](#what-a-buyer-sees).
+
+To pay with Lightning, repeat the `tools/call` with `Authorization: L402 <macaroon>:<preimage>`, or send the macaroon only.
+
+To pay with x402, use one of the two ways below. Do not use both, and do not use either one together with `Authorization: L402` or `LSAT`.
+
+- In `_meta`: put the payment payload object in `params._meta["x402/payment"]`. The proxy removes `x402/payment` before the origin sees the request. When the tool call succeeds, the answer is HTTP 200 with JSON: the tool result for this call, with the settlement in `result._meta["x402/payment-response"]`. The same settlement is in the `PAYMENT-RESPONSE` header.
+- In the header: send the base64 payment payload in the `PAYMENT-SIGNATURE` header. When the tool call succeeds, the origin's status and body are returned unchanged, and the settlement is only in the `PAYMENT-RESPONSE` header.
+
+With `signal: in_band`, a verify or settle failure is an error result and does not include a new offer. Call the tool again, without payment, to get a fresh notice.
 
 A failed tool call takes no unlock fee and no use. That includes a JSON-RPC error, `result.isError: true`, and `resultType` other than `complete`. The same token can be retried. The Lightning payment has already reached the merchant's wallet, because the buyer paid that wallet directly. An x402 payment is not settled. Buyers pay the merchant's wallet directly. Satsgate does not hold those funds.
 
@@ -215,6 +295,8 @@ Limits that apply to MCP routes:
 - The HMAC does not cover the body.
 - The origin must look up a tool by its exact name. Both official MCP SDKs do that.
 - A token is bound to one tool, not to an MCP session.
+- With an x402 payment in `_meta`, a streamed origin answer is returned as one JSON response when the tool call succeeds. Notifications sent during that call are dropped.
+- A Lightning payment needs the `Authorization` header on the HTTP request. A client that cannot set a header per request can pay with x402 in `_meta`.
 
 ## Price
 
