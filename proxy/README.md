@@ -203,30 +203,31 @@ There is no `X-Satsgate-Paid-Usd-Atomic` on a free forward. A priced call adds t
 
 With `signal: in_band`, the price notice is HTTP 200 and a JSON-RPC tool result. `isError` is true. The offer is in `structuredContent`, and the same JSON is the text block, so a standard MCP client can read the price.
 
-`structuredContent` can carry the x402 document keys `x402Version`, `resource`, and `accepts` when x402 is offered, then `error`, `tool`, `lightning`, `x402`, `testing`, `x402_mode`, `reason`, and `hint`. `lightning` has eight keys: `amount_sats`, `invoice`, `invoice_expires_at`, `macaroon`, `payment_hash`, `resource`, `max_uses`, and `access_seconds`.
+`structuredContent` can carry the x402 document keys `accepts`, `resource`, and `x402Version` when x402 is offered, then `error`, `tool`, `lightning`, `x402`, `testing`, `x402_mode`, `reason`, and `hint`. `lightning` has eight keys: `amount_sats`, `invoice`, `invoice_expires_at`, `macaroon`, `payment_hash`, `resource`, `max_uses`, and `access_seconds`.
 
 ```json
 {
-  "x402Version": 2,
-  "resource": {
-    "url": "https://pay.example/mcp",
-    "description": "Priced tool access",
-    "mimeType": "application/json"
-  },
   "accepts": [
     {
-      "scheme": "exact",
-      "network": "eip155:84532",
       "amount": "10000",
       "asset": "<USDC contract>",
-      "payTo": "<payee address>",
-      "maxTimeoutSeconds": 60,
       "extra": {
+        "assetTransferMethod": "eip3009",
         "name": "USDC",
         "version": "2"
-      }
+      },
+      "maxTimeoutSeconds": 60,
+      "network": "eip155:84532",
+      "payTo": "<payee address>",
+      "scheme": "exact"
     }
   ],
+  "resource": {
+    "description": "Test payment on Base Sepolia. Not Base mainnet.",
+    "mimeType": "application/json",
+    "url": "https://pay.example/mcp"
+  },
+  "x402Version": 2,
   "error": "payment_required",
   "tool": "quote",
   "lightning": {
@@ -245,6 +246,7 @@ With `signal: in_band`, the price notice is HTTP 200 and a JSON-RPC tool result.
     "asset": "<USDC contract>",
     "amount": "10000",
     "payTo": "<payee address>",
+    "expires_at": 1893455400,
     "testing": true,
     "x402_mode": "test"
   },
@@ -262,7 +264,7 @@ With `signal: in_band`, the price notice is HTTP 200 and a JSON-RPC tool result.
 | `payment_pending` | The Lightning invoice is not settled yet. |
 | `rate_limited` | A rate limit. Other rate-limit codes from the core use this same shape. |
 | `one_rail_only` | More than one payment rail was sent. |
-| `bad_signature` | The x402 payment was not accepted before any core call: the `_meta` value was not an object, the encoded payment was longer than 8192 characters, or the `PAYMENT-SIGNATURE` header was empty, longer than 8192 characters, or contained a line break. |
+| `bad_signature` | The x402 payment was not accepted. The proxy answers this before any core call when the `_meta` value is not an object, the encoded `_meta` payment is longer than 8192 characters, or the `PAYMENT-SIGNATURE` header is empty, longer than 8192 bytes, or contains a line break. The core can also answer `bad_signature` at verify or settle, for example when the payment payload cannot be decoded. |
 | x402 rejection codes | Verify or settle was rejected. `reason` is present when the core sent one. |
 | `paywall_unavailable` | The paywall could not offer a price or finish the payment. |
 
@@ -272,7 +274,10 @@ Pending and rate-limit results also keep the `Retry-After` header.
 
 To pay with Lightning, repeat the `tools/call` with `Authorization: L402 <macaroon>:<preimage>`, or send the macaroon only.
 
-To pay with x402, put the payment payload object in `params._meta["x402/payment"]`, or send `PAYMENT-SIGNATURE`. Do not send both, and do not send either one together with `Authorization: L402` or `LSAT`. The proxy removes `x402/payment` before the origin sees the request. When the tool call succeeds, the answer is JSON. The settlement is in `result._meta["x402/payment-response"]` and in the `PAYMENT-RESPONSE` header.
+To pay with x402, use one of the two ways below. Do not use both, and do not use either one together with `Authorization: L402` or `LSAT`.
+
+- In `_meta`: put the payment payload object in `params._meta["x402/payment"]`. The proxy removes `x402/payment` before the origin sees the request. When the tool call succeeds, the answer is HTTP 200 with JSON: the tool result for this call, with the settlement in `result._meta["x402/payment-response"]`. The same settlement is in the `PAYMENT-RESPONSE` header.
+- In the header: send the base64 payment payload in the `PAYMENT-SIGNATURE` header. When the tool call succeeds, the origin's status and body are returned unchanged, and the settlement is only in the `PAYMENT-RESPONSE` header.
 
 With `signal: in_band`, a verify or settle failure is an error result and does not include a new offer. Call the tool again, without payment, to get a fresh notice.
 
