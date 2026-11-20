@@ -14,13 +14,14 @@ if _JOB == "1" and _MAJOR != 1:
 if _MAJOR != 1 and not _JOB:
     pytest.skip("needs the MCP SDK 1.x job", allow_module_level=True)
 
+from mcp.server.fastmcp import Context, FastMCP  # noqa: E402
+
 
 @pytest.mark.parametrize("shape", ["stateful", "stateless"])
 def test_pm_8_real_v1_origin(tmp_path, monkeypatch, shape: str) -> None:
     import httpx
     from fastapi.testclient import TestClient
 
-    from mcp.server.fastmcp import FastMCP
     from proxy_mcp_harness import SECRET, HybridCore, LocalServer, RequireSignature
     from satsgate_proxy.app import build_app
     from test_proxy_mcp_origins import _lightning, _restricted, _settings
@@ -34,7 +35,8 @@ def test_pm_8_real_v1_origin(tmp_path, monkeypatch, shape: str) -> None:
             return text
 
         @origin.tool()
-        def quote(symbol: str) -> str:
+        async def quote(symbol: str, ctx: Context) -> str:
+            await ctx.info("working")
             return symbol
 
         @origin.tool()

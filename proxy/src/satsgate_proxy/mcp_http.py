@@ -151,8 +151,33 @@ def _reject_constant(_value: str) -> None:
     raise ValueError("invalid number")
 
 
+def _reject_bad_text(value: object) -> None:
+    """Reject a string that cannot be encoded as UTF-8, including a lone surrogate."""
+
+    stack: list[object] = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            try:
+                item.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError("invalid text") from exc
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                if isinstance(key, str):
+                    try:
+                        key.encode("utf-8")
+                    except UnicodeEncodeError as exc:
+                        raise ValueError("invalid text") from exc
+                stack.append(child)
+        elif isinstance(item, list):
+            stack.extend(item)
+
+
 def parse_json(text: str) -> object:
-    return json.loads(text, object_pairs_hook=_pairs, parse_constant=_reject_constant)
+    parsed = json.loads(text, object_pairs_hook=_pairs, parse_constant=_reject_constant)
+    _reject_bad_text(parsed)
+    return parsed
 
 
 def _valid_request_id(value: object) -> bool:
@@ -247,7 +272,15 @@ def _single_id(value: object) -> object:
     return None
 
 
-def _header_matches(messages: tuple[dict, ...], method_header: str | None, name_header: str | None) -> str | None:
+def _header_matches(
+    messages: tuple[dict, ...],
+    method_header: str | None,
+    name_header: str | None,
+    *,
+    batch: bool,
+) -> str | None:
+    if batch and (method_header is not None or name_header is not None):
+        return "header_mismatch"
     if method_header is not None:
         if len(messages) != 1 or messages[0].get("method") != method_header:
             return "header_mismatch"
@@ -271,10 +304,12 @@ def _year_2026(
     version: str | None,
     method_header: str | None,
     name_header: str | None,
+    *,
+    batch: bool,
 ) -> str | None:
     if version != "2026-07-28":
         return None
-    if len(messages) != 1:
+    if batch:
         return "invalid_message"
     message = messages[0]
     if "method" not in message or "id" not in message:
@@ -354,10 +389,10 @@ def inspect_post(
             request_id,
             {"supported": list(PROTOCOL_VERSIONS), "requested": version},
         )
-    mismatch = _header_matches(messages, routing.get("method"), routing.get("name"))
+    mismatch = _header_matches(messages, routing.get("method"), routing.get("name"), batch=batch)
     if mismatch:
         return RpcError(mismatch, request_id)
-    envelope = _year_2026(messages, version, routing.get("method"), routing.get("name"))
+    envelope = _year_2026(messages, version, routing.get("method"), routing.get("name"), batch=batch)
     if envelope:
         return RpcError(envelope, request_id)
     return Parsed(messages=messages, batch=batch, request_id=request_id, version=version)
@@ -463,6 +498,8 @@ def _iter_sse_lines(text: str):
 
 
 def _sse_payloads(text: str) -> list[str]:
+    if text.startswith("\ufeff"):
+        text = text[1:]
     payloads: list[str] = []
     data: list[str] = []
 
@@ -488,7 +525,6 @@ def _sse_payloads(text: str) -> list[str]:
             field, value = line, ""
         if field == "data":
             data.append(value)
-    finish()
     return payloads
 
 

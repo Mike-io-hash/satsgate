@@ -403,7 +403,9 @@ def _parse_tool_price(value: object, label: str) -> ToolPrice:
         return ToolPrice(free=True, price_sats=0, access=None, description=None)
     if not isinstance(value, dict):
         raise ConfigError(f"{label} must be free or a price mapping")
-    _reject_unknown(value, _TOOL_PRICE_KEYS, "mcp")
+    unknown = sorted(set(value) - _TOOL_PRICE_KEYS)
+    if unknown:
+        raise ConfigError(f"{label}: unknown key {unknown[0]}")
     price = _as_int(
         _require(value, "price_sats", f"{label} price_sats"),
         f"{label} price_sats",
@@ -493,7 +495,9 @@ def _mcp_policy(
     literal_path: str,
 ) -> McpPolicy:
     data = _mapping(raw, f"route {name} mcp")
-    _reject_unknown(data, _MCP_KEYS, "mcp")
+    unknown = sorted(set(data) - _MCP_KEYS)
+    if unknown:
+        raise ConfigError(f"route {name} mcp: unknown key {unknown[0]}")
     if "default" not in data or data["default"] is None:
         raise ConfigError(f"route {name} mcp default is required")
     if "signal" in data and data["signal"] is not None:
@@ -538,8 +542,10 @@ def _mcp_route(data: dict, name: str, methods: set[str], x402: bool, x402_mode: 
         raise ConfigError(f"route {name} mcp methods must be POST and DELETE")
     has_path = "path" in data and data["path"] is not None
     has_regex = "path_regex" in data and data["path_regex"] is not None
-    if has_regex or not has_path:
+    if has_regex:
         raise ConfigError(f"route {name} cannot use path_regex on an mcp route")
+    if not has_path:
+        raise ConfigError(f"route {name} mcp route needs path")
     path_text = _as_str(data["path"], f"route {name} path")
     if "*" in path_text:
         raise ConfigError(f"route {name} mcp path cannot contain *")

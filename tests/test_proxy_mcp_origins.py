@@ -21,7 +21,8 @@ _ACCEPT = {"Accept": "application/json, text/event-stream", "Content-Type": "app
 
 
 def _server(state: dict, *, stateless: bool, json_response: bool):
-    from mcp.server.mcpserver import MCPServer
+    global Context
+    from mcp.server.mcpserver import Context, MCPServer
 
     origin = MCPServer("market")
 
@@ -30,7 +31,8 @@ def _server(state: dict, *, stateless: bool, json_response: bool):
         return text
 
     @origin.tool()
-    def quote(symbol: str) -> str:
+    async def quote(symbol: str, ctx: Context) -> str:
+        await ctx.info("working")
         return symbol
 
     @origin.tool()

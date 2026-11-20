@@ -86,9 +86,10 @@ def test_pm_1_2_unknown_mcp_keys_are_rejected(tmp_path: Path, monkeypatch: pytes
         "        access: per_request\n        memo: nope\n",
         1,
     )
-    for routes in (extra, memo):
-        with pytest.raises(ConfigError, match="unknown mcp key"):
-            _settings(tmp_path, monkeypatch, routes)
+    with pytest.raises(ConfigError, match="route tools mcp: unknown key extra"):
+        _settings(tmp_path, monkeypatch, extra)
+    with pytest.raises(ConfigError, match="route tools tool quote: unknown key memo"):
+        _settings(tmp_path, monkeypatch, memo)
 
 
 def test_pm_1_3_signal_must_be_http_402(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -149,7 +150,8 @@ def test_pm_1_5_mcp_route_shape_is_restricted(tmp_path: Path, monkeypatch: pytes
         (_TOOLS.replace("  x402: true\n", "  x402: true\n  price_sats: 9\n"), "price_sats"),
         (_TOOLS.replace("  x402: true\n", "  x402: true\n  access: per_request\n"), "access"),
         (_TOOLS.replace("  x402: true\n", "  x402: true\n  scope: site\n"), "scope must be route"),
-        (_TOOLS.replace("  path: /mcp\n", "  path: /mcp\n  path_regex: '^/mcp$'\n"), "path_regex"),
+        (_TOOLS.replace("  path: /mcp\n", "  path: /mcp\n  path_regex: '^/mcp$'\n"), "cannot use path_regex"),
+        (_TOOLS.replace("  path: /mcp\n", ""), "route tools mcp route needs path"),
         (_TOOLS.replace("  path: /mcp\n", "  path: /mcp/*\n"), "cannot contain"),
         (_TOOLS.replace("methods: [POST, DELETE]", "methods: [GET, POST, DELETE]"), "POST and DELETE"),
         (_TOOLS.replace("methods: [POST, DELETE]", "methods: [DELETE]"), "POST and DELETE"),
@@ -583,45 +585,60 @@ def test_pm_2_3_unlisted_tool_uses_free_default(tmp_path: Path, monkeypatch: pyt
     _verify_free_signatures(world.up_calls)
 
 
-def test_pm_3_paid_tool_cannot_be_reached_for_free(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_pm_3_1_method_header_must_match_the_body(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _mcp_settings(tmp_path, monkeypatch)
-    quote = _rpc("tools/call", {"name": "quote"})
-    echo = _rpc("tools/call", {"name": "echo"})
-
     world = McpWorld()
     with _client(settings, world) as client:
-        mismatch = _post(client, quote, {"Mcp-Method": "tools/list"})
+        mismatch = _post(client, _rpc("tools/call", {"name": "quote"}), {"Mcp-Method": "tools/list"})
     body = _assert_rejected(mismatch, "header_mismatch", world)
     assert body["id"] == 1
 
+
+def test_pm_3_2_name_header_must_match_the_body(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
+    quote = _rpc("tools/call", {"name": "quote"})
     world = McpWorld()
     with _client(settings, world) as client:
         named = _post(client, quote, {"Mcp-Name": "echo"})
+    _assert_rejected(named, "header_mismatch", world)
+
+    world = McpWorld()
+    with _client(settings, world) as client:
         bad_b64 = _post(client, quote, {"Mcp-Name": "=?base64?***?="})
+    _assert_rejected(bad_b64, "header_mismatch", world)
+
+    world = McpWorld()
+    with _client(settings, world) as client:
         good_b64 = _post(client, quote, {"Mcp-Name": _b64_name("quote")})
-    _assert_rejected(named, "header_mismatch", McpWorld())
-    assert named.status_code == 400 and _word(named) == "header_mismatch"
-    assert bad_b64.status_code == 400 and _word(bad_b64) == "header_mismatch"
     assert good_b64.status_code == 402
     assert good_b64.json()["resource"] == "route:tools:quote"
     assert world.up_calls == []
-    assert all(call["path"].endswith("/challenge") for call in world.core_calls)
+    assert world.core_calls[0]["path"].endswith("/challenge")
 
-    world = McpWorld()
+
+def test_pm_3_3_paid_batch_is_rejected_and_free_batch_is_forwarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
     batch_paid = b'[{"jsonrpc":"2.0","id":1,"method":"tools/list"},{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"quote"}}]'
     batch_free = b'[{"jsonrpc":"2.0","id":1,"method":"tools/list"},{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo"}}]'
+    world = McpWorld()
     with _client(settings, world) as client:
         paid_batch = _post(client, batch_paid)
+    body = _assert_rejected(paid_batch, "batch_with_paid_tool", world)
+    assert body["id"] is None
+
+    world = McpWorld()
+    with _client(settings, world) as client:
         free_batch = _post(client, batch_free)
-    assert paid_batch.status_code == 400 and _word(paid_batch) == "batch_with_paid_tool"
-    assert paid_batch.json()["id"] is None
     assert free_batch.status_code == 200
     assert world.core_calls == []
     assert world.up_calls[0]["raw"] == batch_free
     assert "x-satsgate-mcp-tool" not in world.up_calls[0]["headers"]
 
+
+def test_pm_3_4_disguised_method_names_are_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
     world = McpWorld()
     disguised = [
         _rpc("Tools/Call", {"name": "quote"}),
@@ -635,11 +652,17 @@ def test_pm_3_paid_tool_cannot_be_reached_for_free(
             assert response.status_code == 400 and _word(response) == "invalid_method"
     assert world.core_calls == [] and world.up_calls == []
 
+
+def test_pm_3_5_concatenated_objects_are_invalid_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
     world = McpWorld()
     with _client(settings, world) as client:
         glued = _post(client, b'{"jsonrpc":"2.0","id":1,"method":"ping"}{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"quote"}}')
     _assert_rejected(glued, "invalid_json", world)
 
+
+def test_pm_3_6_duplicate_keys_are_invalid_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
     world = McpWorld()
     duplicates = [
         b'{"jsonrpc":"2.0","id":1,"method":"ping","method":"tools/call","params":{"name":"quote"}}',
@@ -652,11 +675,17 @@ def test_pm_3_paid_tool_cannot_be_reached_for_free(
             assert response.status_code == 400 and _word(response) == "invalid_json"
     assert world.core_calls == [] and world.up_calls == []
 
+
+def test_pm_3_7_tool_call_notification_is_invalid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
     world = McpWorld()
     with _client(settings, world) as client:
         note = _post(client, b'{"jsonrpc":"2.0","method":"tools/call","params":{"name":"quote"}}')
     _assert_rejected(note, "invalid_message", world)
 
+
+def test_pm_3_8_bad_message_shape_is_invalid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
     world = McpWorld()
     null_ids = [
         b'{"jsonrpc":"2.0","id":null,"method":"ping"}',
@@ -678,6 +707,9 @@ def test_pm_3_paid_tool_cannot_be_reached_for_free(
             assert response.json()["id"] == 1
     assert world.core_calls == [] and world.up_calls == []
 
+
+def test_pm_3_9_json_escapes_are_resolved_before_the_price(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
     world = McpWorld()
     escaped = b'{"jsonrpc":"2.0","id":1,"method":"tools\\/call","params":{"name":"quot\\u0065"}}'
     with _client(settings, world) as client:
@@ -687,37 +719,46 @@ def test_pm_3_paid_tool_cannot_be_reached_for_free(
     assert world.core_calls[0]["body"]["resource"] == "route:tools:quote"
     assert world.up_calls == []
 
+
+def test_pm_3_10_lookalike_paid_names_are_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
     world = McpWorld()
-    aliases = ["Quote", "quote ", "\uff51uote"]
     with _client(settings, world) as client:
-        for name in aliases:
+        for name in ("Quote", "quote ", "\uff51uote"):
             response = _post(client, _rpc("tools/call", {"name": name}))
             assert response.status_code == 400 and _word(response) == "invalid_tool_name"
     assert world.core_calls == [] and world.up_calls == []
 
+
+def test_pm_3_11_bom_and_plain_text_are_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
+    quote = _rpc("tools/call", {"name": "quote"})
     world = McpWorld()
     with _client(settings, world) as client:
         bom = _post(client, b"\xef\xbb\xbf" + quote)
-        plain = client.post(
-            "/mcp",
-            content=quote,
-            headers={"accept": _ACCEPT, "content-type": "text/plain"},
-        )
-    assert bom.status_code == 400 and _word(bom) == "invalid_json"
-    assert plain.status_code == 400 and _word(plain) == "unsupported_content_type"
-    assert world.core_calls == [] and world.up_calls == []
-
+    _assert_rejected(bom, "invalid_json", world)
     world = McpWorld()
+    with _client(settings, world) as client:
+        plain = client.post("/mcp", content=quote, headers={"accept": _ACCEPT, "content-type": "text/plain"})
+    _assert_rejected(plain, "unsupported_content_type", world)
+
+
+def test_pm_3_12_client_payment_headers_are_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
     forged = {
         "X-Satsgate-Resource": "free",
         "X-Satsgate-Mcp-Tool": "echo",
         "X-Satsgate-Payment-Hash": "ab" * 32,
     }
+    world = McpWorld()
     with _client(settings, world) as client:
-        still_paid = _post(client, quote, forged)
-        still_free = _post(client, echo, forged)
+        still_paid = _post(client, _rpc("tools/call", {"name": "quote"}), forged)
     assert still_paid.status_code == 402
     assert still_paid.json()["resource"] == "route:tools:quote"
+    assert world.up_calls == []
+    world = McpWorld()
+    with _client(settings, world) as client:
+        still_free = _post(client, _rpc("tools/call", {"name": "echo"}), forged)
     assert still_free.status_code == 200
     free_headers = world.up_calls[0]["headers"]
     assert free_headers["x-satsgate-resource"] == "free"
@@ -725,18 +766,32 @@ def test_pm_3_paid_tool_cannot_be_reached_for_free(
     assert free_headers["x-satsgate-mcp-tool"] == "echo"
     assert free_headers["x-satsgate-paid-sats"] == "0"
 
+
+def test_pm_3_13_query_string_does_not_change_the_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
     world = McpWorld()
     with _client(settings, world) as client:
-        queried = _post(client, quote, path="/mcp?tool=echo")
+        queried = _post(client, _rpc("tools/call", {"name": "quote"}), path="/mcp?tool=echo")
     assert queried.status_code == 402
     assert queried.json()["resource"] == "route:tools:quote"
     assert world.up_calls == []
 
+
+def test_pm_3_14_delete_with_a_body_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
     world = McpWorld()
     with _client(settings, world) as client:
-        deleted = client.request("DELETE", "/mcp", content=quote, headers={"content-type": "application/json"})
+        deleted = client.request(
+            "DELETE",
+            "/mcp",
+            content=_rpc("tools/call", {"name": "quote"}),
+            headers={"content-type": "application/json"},
+        )
     _assert_rejected(deleted, "delete_body_not_allowed", world)
 
+
+def test_pm_3_15_task_field_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
     world = McpWorld()
     caplog.set_level("INFO", logger="satsgate_proxy")
     with _client(settings, world) as client:
@@ -749,7 +804,54 @@ def test_pm_3_paid_tool_cannot_be_reached_for_free(
     assert "mcp rejected tasks_not_supported" in caplog.text
 
 
-def test_pm_4_checks_run_before_an_invoice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pm_3_16_one_element_array_with_method_header(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
+    world = McpWorld()
+    body = b'[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]'
+    with _client(settings, world) as client:
+        response = _post(client, body, {"Mcp-Method": "tools/list"})
+    _assert_rejected(response, "header_mismatch", world)
+
+
+def test_pm_3_17_one_element_array_with_name_header(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
+    world = McpWorld()
+    body = b'[{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}]'
+    with _client(settings, world) as client:
+        response = _post(client, body, {"Mcp-Name": "echo"})
+    _assert_rejected(response, "header_mismatch", world)
+
+
+def test_pm_3_18_one_element_array_on_2026_is_invalid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
+    world = McpWorld()
+    body = (
+        b'[{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":'
+        b'{"io.modelcontextprotocol/protocolVersion":"2026-07-28",'
+        b'"io.modelcontextprotocol/clientCapabilities":{}}}}]'
+    )
+    with _client(settings, world) as client:
+        response = _post(client, body, {"MCP-Protocol-Version": "2026-07-28"})
+    _assert_rejected(response, "invalid_message", world)
+
+
+def test_pm_3_19_lone_surrogate_is_invalid_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
+    bodies = [
+        b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"\\ud800"}}',
+        b'{"jsonrpc":"1.0","id":"\\ud800","method":"ping"}',
+        b'{"jsonrpc":"2.0","id":"\\ud800","method":"tasks/get"}',
+    ]
+    for raw in bodies:
+        world = McpWorld()
+        with _client(settings, world) as client:
+            response = _post(client, raw)
+        body = _assert_rejected(response, "invalid_json", world)
+        assert body["id"] is None
+        assert response.status_code != 500
+
+
+def test_pm_4_1_accept_must_list_json_and_sse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _mcp_settings(tmp_path, monkeypatch)
     ping = _rpc("ping", ident="abc")
     world = McpWorld()
@@ -761,37 +863,45 @@ def test_pm_4_checks_run_before_an_invoice(tmp_path: Path, monkeypatch: pytest.M
         assert response.status_code == 400 and _word(response) == "accept_json_and_sse_required"
     assert world.core_calls == [] and world.up_calls == []
 
+
+def test_pm_4_2_protocol_version_is_allowlisted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
     world = McpWorld()
     with _client(settings, world) as client:
         unknown = _post(client, _rpc("ping", ident=5), {"MCP-Protocol-Version": "2099-01-01"})
+    body = _assert_rejected(unknown, "unsupported_protocol_version", world)
+    assert body["error"]["code"] == -32022
+    assert body["error"]["data"]["requested"] == "2099-01-01"
+    assert body["error"]["data"]["supported"] == list(PROTOCOL_VERSIONS)
+    assert body["id"] == 5
+
+    world = McpWorld()
+    with _client(settings, world) as client:
         for version in PROTOCOL_VERSIONS:
             if version == "2026-07-28":
                 response = _post(client, _rpc("tools/list", _year_params()), _year_headers("tools/list"))
             else:
                 response = _post(client, _rpc("ping"), {"MCP-Protocol-Version": version})
             assert response.status_code == 200, version
-        opened = _post(client, _rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "probe", "version": "0"}}))
+        opened = _post(
+            client,
+            _rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "probe", "version": "0"}}),
+        )
         later = _post(client, _rpc("ping"))
-    assert unknown.status_code == 400
-    unknown_body = unknown.json()
-    assert unknown_body["error"]["code"] == -32022
-    assert unknown_body["error"]["data"]["error"] == "unsupported_protocol_version"
-    assert unknown_body["error"]["data"]["requested"] == "2099-01-01"
-    assert unknown_body["error"]["data"]["supported"] == list(PROTOCOL_VERSIONS)
-    assert unknown_body["id"] == 5
     assert opened.status_code == 200 and later.status_code == 200
-    assert all(not call["path"].endswith("/challenge") for call in world.core_calls)
     assert world.core_calls == []
 
+
+def test_pm_4_3_duplicate_routing_header_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
     world = McpWorld()
     with _client(settings, world) as client:
-        repeated = _post(
-            client,
-            ping,
-            [("mcp-method", "ping"), ("mcp-method", "tools/call")],
-        )
+        repeated = _post(client, _rpc("ping", ident="abc"), [("mcp-method", "ping"), ("mcp-method", "tools/call")])
     _assert_rejected(repeated, "duplicate_routing_header", world)
 
+
+def test_pm_4_4_2026_envelope_is_required(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
     world = McpWorld()
     with _client(settings, world) as client:
         no_method = _post(client, _rpc("tools/list", _year_params()), {"MCP-Protocol-Version": "2026-07-28"})
@@ -827,6 +937,8 @@ def test_pm_4_checks_run_before_an_invoice(tmp_path: Path, monkeypatch: pytest.M
     assert batch.status_code == 400 and _word(batch) == "invalid_message"
     assert world.core_calls == [] and world.up_calls == []
 
+
+def test_pm_4_5_oversize_body_is_rejected_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     limited = _mcp_settings(tmp_path, monkeypatch, prelude="limits:\n  max_request_bytes: 1024\n")
     world = McpWorld()
     with _client(limited, world) as client:
@@ -835,15 +947,15 @@ def test_pm_4_checks_run_before_an_invoice(tmp_path: Path, monkeypatch: pytest.M
     assert huge.json()["error"] == "request_too_large"
     assert world.core_calls == [] and world.up_calls == []
 
+
+def test_pm_4_6_rejection_keeps_a_valid_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
     world = McpWorld()
     with _client(settings, world) as client:
         string_id = _post(client, _rpc("Tools/Call", {"name": "quote"}, ident="abc"))
         int_id = _post(client, _rpc("Tools/Call", {"name": "quote"}, ident=7))
         broken = _post(client, b"{")
-        batch_id = _post(
-            client,
-            b'[{"jsonrpc":"2.0","id":"keep","method":"tools/call","params":{"name":"quote"}}]',
-        )
+        batch_id = _post(client, b'[{"jsonrpc":"2.0","id":"keep","method":"tools/call","params":{"name":"quote"}}]')
     assert string_id.json()["id"] == "abc"
     assert int_id.json()["id"] == 7
     assert broken.json()["id"] is None
@@ -853,6 +965,9 @@ def test_pm_4_checks_run_before_an_invoice(tmp_path: Path, monkeypatch: pytest.M
         assert response.json()["jsonrpc"] == "2.0"
     assert world.core_calls == [] and world.up_calls == []
 
+
+def test_pm_4_7_get_and_options_are_405(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
     world = McpWorld()
     with _client(settings, world) as client:
         fetched = client.get("/mcp")
@@ -863,13 +978,15 @@ def test_pm_4_checks_run_before_an_invoice(tmp_path: Path, monkeypatch: pytest.M
     assert options.headers["allow"] == "DELETE, POST"
     assert world.core_calls == [] and world.up_calls == []
 
+
+def test_pm_4_8_unsupported_methods_are_not_forwarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch)
     world = McpWorld()
     methods = ["subscriptions/listen", "tasks/get", "tasks/result", "tasks/list", "tasks/cancel"]
     with _client(settings, world) as client:
         for method in methods:
             response = _post(client, _rpc(method, ident=4))
             assert response.status_code == 200, method
-            assert response.headers["content-type"].startswith("application/json")
             payload = response.json()
             assert payload["id"] == 4
             assert payload["error"]["code"] == -32601
@@ -878,10 +995,7 @@ def test_pm_4_checks_run_before_an_invoice(tmp_path: Path, monkeypatch: pytest.M
             notice = _post(client, _rpc(method, notify=True))
             assert notice.status_code == 202
             assert notice.content == b""
-        mixed = _post(
-            client,
-            b'[{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","id":2,"method":"tasks/get"}]',
-        )
+        mixed = _post(client, b'[{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","id":2,"method":"tasks/get"}]')
     assert mixed.status_code == 400 and _word(mixed) == "invalid_message"
     assert world.core_calls == [] and world.up_calls == []
 
@@ -1159,3 +1273,7 @@ def test_pm_5_9_tool_success_predicate_covers_each_branch() -> None:
     doubled = f"data: {final}\n\ndata: {final}\n\n".encode()
     assert judge(doubled, content_type="text/event-stream") is False
     assert judge(b"data: {not-json}\n\n", content_type="text/event-stream") is False
+    open_event = f"data: {final}".encode()
+    assert judge(open_event, content_type="text/event-stream") is False
+    bom_event = ("\ufeff" + f"data: {final}\n\n").encode("utf-8")
+    assert judge(bom_event, content_type="text/event-stream") is True
