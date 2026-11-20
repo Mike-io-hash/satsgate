@@ -7,6 +7,7 @@ import base64
 import logging
 import re
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from urllib.parse import urlencode, urlsplit
 
@@ -87,6 +88,29 @@ class Buyer:
         self.wallet = wallet if wallet is not None else NwcWallet(settings.nwc_uri, timeout=settings.timeout)
         self._transport = transport
         self._now = now or _unix
+        self._remote_locks: dict[str, asyncio.Lock] = {}
+        self._remote_waiters: dict[str, int] = {}
+        self._remote_guard = asyncio.Lock()
+
+    @asynccontextmanager
+    async def hold_remote(self, key: str):
+        """One in-process lock per remote tool, dropped when nobody is waiting."""
+        async with self._remote_guard:
+            lock = self._remote_locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._remote_locks[key] = lock
+            self._remote_waiters[key] = self._remote_waiters.get(key, 0) + 1
+        await lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
+            async with self._remote_guard:
+                self._remote_waiters[key] = self._remote_waiters.get(key, 1) - 1
+                if self._remote_waiters[key] <= 0 and not lock.locked():
+                    self._remote_locks.pop(key, None)
+                    self._remote_waiters.pop(key, None)
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(

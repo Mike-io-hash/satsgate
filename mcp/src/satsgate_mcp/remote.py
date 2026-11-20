@@ -442,6 +442,10 @@ class _Remote:
         payload = _validate_arguments(self.buyer, name, arguments)
         way = _validate_mode(mode)
         signature = _validate_signature(payment_signature)
+        async with self.buyer.hold_remote(_cache_key(target, name)):
+            return await self._locked_call(target, name, payload, way, signature, payment_signature)
+
+    async def _locked_call(self, target, name, payload, way, signature, payment_signature) -> Presentation:
         conn: _Conn | None = None
         try:
             conn = await self._connect(target)

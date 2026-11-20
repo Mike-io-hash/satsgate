@@ -2070,3 +2070,156 @@ def test_rc_9_5_pay_and_fetch_and_check_payment_keep_their_request_shape(tmp_pat
     assert http.calls[2].url == "https://shop.example/a"
     assert http.calls[2].headers["authorization"] == f"L402 {MAC}:{PREIMAGE.lower()}"
     assert again.payload["body"] == "article"
+
+
+class _GateWallet:
+    def __init__(self) -> None:
+        self.invoices: list[str] = []
+        self.active = 0
+        self.max_active = 0
+        self.arrived = 0
+        self.release = asyncio.Event()
+        self.delay = 0.05
+        self.barrier = 0
+
+    async def pay_invoice(self, invoice: str) -> str:
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        self.arrived += 1
+        if self.barrier and self.arrived >= self.barrier:
+            self.release.set()
+        if self.barrier:
+            await asyncio.wait_for(self.release.wait(), timeout=1)
+        else:
+            await asyncio.sleep(self.delay)
+        self.active -= 1
+        self.invoices.append(invoice)
+        return PREIMAGE
+
+
+def _parallel_notice(max_uses: int):
+    def on_call(request, body):
+        name = body["params"]["name"]
+        if request.headers.get("authorization"):
+            return _tool_ok(body["id"], "done")
+        structured = _lightning(name)
+        payment = PAYMENT if name == "echo" else "11" * 32
+        structured["lightning"] = dict(structured["lightning"], max_uses=max_uses, payment_hash=payment)
+        return _priced(body["id"], structured)
+
+    return on_call
+
+
+def test_rc_8_1_parallel_calls_share_one_payment(tmp_path: Path) -> None:
+    wallet = _GateWallet()
+    buyer, _http, _default = _buyer(
+        tmp_path,
+        _origin(on_call=_parallel_notice(10)),
+        wallet=wallet,
+        nwc_uri=NWC,
+        max_payment_sats=100,
+        daily_max_sats=500,
+    )
+    buyer._now = Clock()
+
+    async def run():
+        return await asyncio.gather(
+            buyer.remote_call_tool(URL, "echo", mode="nwc"),
+            buyer.remote_call_tool(URL, "echo", mode="nwc"),
+            buyer.remote_call_tool(URL, "echo", mode="nwc"),
+        )
+
+    results = asyncio.run(run())
+    assert wallet.invoices == [INVOICE]
+    assert wallet.max_active == 1
+    assert [item.payload["ok"] for item in results] == [True, True, True]
+    assert buyer.store.token_for(_key())["uses_remaining"] == 7
+
+
+def test_rc_8_2_parallel_per_request_calls_pay_one_at_a_time(tmp_path: Path) -> None:
+    wallet = _GateWallet()
+    buyer, _http, _default = _buyer(
+        tmp_path,
+        _origin(on_call=_parallel_notice(1)),
+        wallet=wallet,
+        nwc_uri=NWC,
+        max_payment_sats=100,
+        daily_max_sats=500,
+    )
+    buyer._now = Clock()
+
+    async def run():
+        return await asyncio.gather(
+            buyer.remote_call_tool(URL, "echo", mode="nwc"),
+            buyer.remote_call_tool(URL, "echo", mode="nwc"),
+        )
+
+    results = asyncio.run(run())
+    assert wallet.invoices == [INVOICE, INVOICE]
+    assert wallet.max_active == 1
+    assert [item.payload["ok"] for item in results] == [True, True]
+
+
+def test_rc_8_3_different_tools_pay_at_the_same_time(tmp_path: Path) -> None:
+    wallet = _GateWallet()
+    wallet.barrier = 2
+    buyer, _http, _default = _buyer(
+        tmp_path,
+        _origin(tools=[_echo_tool("echo"), _echo_tool("other")], on_call=_parallel_notice(1)),
+        wallet=wallet,
+        nwc_uri=NWC,
+        max_payment_sats=100,
+        daily_max_sats=500,
+    )
+    buyer._now = Clock()
+
+    async def run():
+        return await asyncio.gather(
+            buyer.remote_call_tool(URL, "echo", mode="nwc"),
+            buyer.remote_call_tool(URL, "other", mode="nwc"),
+        )
+
+    results = asyncio.run(run())
+    assert wallet.max_active == 2
+    assert len(wallet.invoices) == 2
+    assert [item.payload["ok"] for item in results] == [True, True]
+
+
+def test_rc_8_4_an_exception_releases_the_lock(tmp_path: Path) -> None:
+    state = {"boom": True}
+
+    def on_call(request, body):
+        if state["boom"]:
+            state["boom"] = False
+            raise RuntimeError("boom")
+        if request.headers.get("authorization"):
+            return _tool_ok(body["id"], "after")
+        return _priced(body["id"], _lightning())
+
+    buyer, _http, wallet = _buyer(
+        tmp_path,
+        _origin(on_call=on_call),
+        nwc_uri=NWC,
+        max_payment_sats=100,
+        daily_max_sats=500,
+    )
+    buyer._now = Clock()
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(buyer.remote_call_tool(URL, "echo", mode="nwc"))
+    done = asyncio.run(asyncio.wait_for(buyer.remote_call_tool(URL, "echo", mode="nwc"), timeout=2))
+    assert done.payload["ok"] is True
+    assert wallet.invoices == [INVOICE]
+
+
+def test_rc_8_5_idle_locks_are_removed(tmp_path: Path) -> None:
+    buyer, _http, wallet = _buyer(
+        tmp_path,
+        _origin(on_call=_parallel_notice(1)),
+        nwc_uri=NWC,
+        max_payment_sats=100,
+        daily_max_sats=500,
+    )
+    buyer._now = Clock()
+    asyncio.run(buyer.remote_call_tool(URL, "echo", mode="nwc"))
+    assert buyer._remote_locks == {}
+    assert wallet.invoices == [INVOICE]
