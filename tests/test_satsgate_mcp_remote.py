@@ -2239,6 +2239,53 @@ def test_rc_8_5_idle_locks_are_removed(tmp_path: Path) -> None:
     assert wallet.invoices == [INVOICE]
 
 
+def test_rc_8_6_a_cancelled_waiter_drops_the_lock(tmp_path: Path) -> None:
+    wallet = _HoldWallet()
+    buyer, _http, _default = _buyer(
+        tmp_path,
+        _origin(on_call=_parallel_notice(1)),
+        wallet=wallet,
+        nwc_uri=NWC,
+        max_payment_sats=100,
+        daily_max_sats=500,
+    )
+    buyer._now = Clock()
+
+    async def run():
+        first = asyncio.create_task(buyer.remote_call_tool(URL, "echo", mode="nwc"))
+        await asyncio.wait_for(wallet.started.wait(), timeout=2)
+        second = asyncio.create_task(buyer.remote_call_tool(URL, "echo", mode="nwc"))
+        for _tick in range(50):
+            if buyer._remote_waiters.get(_key()) == 2:
+                break
+            await asyncio.sleep(0.01)
+        assert buyer._remote_waiters.get(_key()) == 2
+        second.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        wallet.release.set()
+        return await first
+
+    result = asyncio.run(run())
+    assert result.payload["ok"] is True
+    assert wallet.invoices == [INVOICE]
+    assert buyer._remote_locks == {}
+    assert buyer._remote_waiters == {}
+
+
+class _HoldWallet:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.invoices: list[str] = []
+
+    async def pay_invoice(self, invoice: str) -> str:
+        self.invoices.append(invoice)
+        self.started.set()
+        await self.release.wait()
+        return PREIMAGE
+
+
 def test_rc_12_1_docs_describe_the_remote_tools() -> None:
     from pathlib import Path
 

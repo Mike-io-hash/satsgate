@@ -101,11 +101,14 @@ class Buyer:
                 lock = asyncio.Lock()
                 self._remote_locks[key] = lock
             self._remote_waiters[key] = self._remote_waiters.get(key, 0) + 1
-        await lock.acquire()
+        acquired = False
         try:
+            await lock.acquire()
+            acquired = True
             yield
         finally:
-            lock.release()
+            if acquired:
+                lock.release()
             async with self._remote_guard:
                 self._remote_waiters[key] = self._remote_waiters.get(key, 1) - 1
                 if self._remote_waiters[key] <= 0 and not lock.locked():
