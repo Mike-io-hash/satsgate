@@ -49,9 +49,15 @@ _LIST_FAILED = "tools/list failed (HTTP {status}). Nothing was paid."
 _UNKNOWN = "The server does not list a tool with that name. Nothing was sent or paid."
 _UNKNOWN_CUT = _UNKNOWN + " The listing stopped after 10 pages."
 _BAD_SCHEMA = "The tool's inputSchema has an invalid x-mcp-header annotation. Nothing was sent or paid."
-_INVALID_RESPONSE = "The server did not return a JSON-RPC response for this request. Nothing was paid."
+_SUFFIX_FREE = " Nothing was paid."
+_SUFFIX_TOKEN = " The stored token was kept. Call remote_call_tool again to retry with it. Do not pay again."
+_SUFFIX_SIGNATURE = " Retry the same payment_signature while the offer is valid. It is settled at most once."
+_SUFFIX_INVOICE = " The invoice is kept. Call remote_call_tool again with the same url and tool. Do not pay a second invoice."
+_INVALID_BASE = "The server did not return a JSON-RPC response for this request."
+_TOO_LARGE_BASE = "The response is above SATSGATE_MCP_MAX_BODY_BYTES."
+_INVALID_RESPONSE = _INVALID_BASE + _SUFFIX_FREE
 _REDIRECT = "The server redirected. This client does not follow redirects."
-_TOO_LARGE = "The response is above SATSGATE_MCP_MAX_BODY_BYTES. Nothing was paid."
+_TOO_LARGE = _TOO_LARGE_BASE + _SUFFIX_FREE
 _LIST_DETAIL = "Listing tools is free. A price, when there is one, is shown when the tool is called."
 _NWC_MISSING = (
     "SATSGATE_MCP_NWC_URI is not set. Use mode human, or set the wallet URI in the environment. "
@@ -128,6 +134,8 @@ class _Call:
     signature_text: str | None
     key: str
     paid: bool = False
+    paid_with: str | None = None
+    paid_sats: int | None = None
     token_in_use: bool = False
     signature_sent: bool = False
     secrets: tuple = ()
@@ -387,12 +395,14 @@ def _challenge_for_notice(url: str, structured: dict, *, generic: bool) -> Chall
     )
 
 
-def _suffix(ctx: "_Call", paid: bool, token_kept: bool) -> str:
-    if ctx.signature_sent or ctx.signature is not None and paid:
-        return " Retry the same payment_signature while the offer is valid. It is settled at most once."
-    if token_kept or ctx.token_in_use or paid:
-        return " The stored token was kept. Call remote_call_tool again to retry with it. Do not pay again."
-    return " Nothing was paid."
+def _suffix(ctx: "_Call", paid: bool, token_kept: bool, *, invoice_kept: bool = False) -> str:
+    if ctx.signature_sent or (ctx.signature is not None and paid):
+        return _SUFFIX_SIGNATURE
+    if paid or token_kept or ctx.token_in_use:
+        return _SUFFIX_TOKEN
+    if invoice_kept:
+        return _SUFFIX_INVOICE
+    return _SUFFIX_FREE
 
 
 def _authorization(row: dict) -> str:
@@ -452,21 +462,16 @@ class _Remote:
             if found is None:
                 raise BuyerError("unknown_tool", _UNKNOWN_CUT if truncated else _UNKNOWN)
             name_header, param_headers = self._call_headers(conn, found["input_schema"], name, payload)
-            try:
-                return await self._invoke(
-                    conn,
-                    name,
-                    payload,
-                    way,
-                    name_header,
-                    param_headers,
-                    signature,
-                    payment_signature if isinstance(payment_signature, str) else None,
-                )
-            except BuyerError as exc:
-                if exc.code not in {"timeout", "connection_failed"}:
-                    raise
-                return Presentation(self._caught(conn, name, exc))
+            return await self._invoke(
+                conn,
+                name,
+                payload,
+                way,
+                name_header,
+                param_headers,
+                signature,
+                payment_signature if isinstance(payment_signature, str) else None,
+            )
         finally:
             if conn is not None:
                 await self._close(conn)
@@ -722,7 +727,10 @@ class _Remote:
             return await self._pay_lightning(ctx, quote)
         if quote is not None and mode == "human":
             return await self._human_quote(ctx, quote)
-        raw, request_id, expired = await self._tools_call(ctx, None, None)
+        try:
+            raw, request_id, expired = await self._tools_call(ctx, None, None)
+        except BuyerError as exc:
+            return Presentation(self._transport(ctx, exc, paid=False, token_kept=False))
         if expired is not None:
             return Presentation(expired)
         return await self._after_unpaid(ctx, raw, request_id)
@@ -741,12 +749,13 @@ class _Remote:
             extra=extra,
         )
         if raw.status == 404 and ctx.conn.session_id:
-            return raw, request_id, self._expired(ctx, bool(ctx.token_in_use or ctx.paid))
+            return raw, request_id, self._expired(ctx)
         return raw, request_id, None
 
     async def _after_unpaid(self, ctx: "_Call", raw, request_id: int) -> Presentation:
         if raw.truncated:
-            return Presentation(self._fail(ctx, "response_too_large", _TOO_LARGE))
+            detail = _TOO_LARGE_BASE + _suffix(ctx, False, False)
+            return Presentation(self._fail(ctx, "response_too_large", detail, paid=False, paid_with=None, paid_sats=None, token_kept=False))
         found = self._classify(ctx, raw, request_id)
         if found.get("session"):
             return Presentation(found["session"])
@@ -821,16 +830,30 @@ class _Remote:
             if state["state"] == "preimage_required":
                 return Presentation(self._preimage(ctx, challenge.payment_hash))
             if state["state"] == "error":
-                payload = dict(state["payload"])
-                code = payload.get("error") or "unknown"
+                source = state["payload"]
+                code = source.get("error") or "unknown"
+                payload = {
+                    "ok": False,
+                    "error": code,
+                    "url": ctx.conn.url,
+                    "tool": ctx.tool,
+                    "protocol_version": ctx.conn.protocol_version,
+                }
+                for key in ("action", "payment_hash", "http_status"):
+                    if key in source:
+                        payload[key] = source[key]
+                payload["paid"] = False
+                payload["paid_with"] = None
+                payload["paid_sats"] = None
+                payload["token_kept"] = False
                 payload["detail"] = (
                     f"Core rejected the token ({code}). Call remote_call_tool again for a new quote. Nothing was paid."
                 )
-                payload["url"] = ctx.conn.url
-                payload["tool"] = ctx.tool
-                payload["protocol_version"] = ctx.conn.protocol_version
                 return Presentation(payload)
-        raw, request_id, expired = await self._tools_call(ctx, f"L402 {challenge.macaroon}", None)
+        try:
+            raw, request_id, expired = await self._tools_call(ctx, f"L402 {challenge.macaroon}", None)
+        except BuyerError as exc:
+            return Presentation(self._transport(ctx, exc, paid=False, token_kept=False, invoice_kept=True))
         if expired is not None:
             return Presentation(expired)
         found = self._classify(ctx, raw, request_id)
@@ -862,7 +885,19 @@ class _Remote:
             if fresh.payment_hash != challenge.payment_hash:
                 return self._human_offer(ctx, fresh, store=True)
             return self._human_offer(ctx, fresh, store=True)
-        if found["kind"] in {"tool_error", "rpc", "request_failed", "input_required", "invalid", "redirect", "too_large", "paywall"}:
+        if found["kind"] == "paywall":
+            return Presentation(
+                self._from_class(
+                    ctx,
+                    found,
+                    paid=False,
+                    paid_with=None,
+                    paid_sats=None,
+                    token_kept=False,
+                    invoice_kept=True,
+                )
+            )
+        if found["kind"] in {"tool_error", "rpc", "request_failed", "input_required", "invalid", "redirect", "too_large"}:
             uses = challenge.max_uses
             access_until = None if challenge.access_seconds is None else self.buyer._now() + int(challenge.access_seconds)
             self._save_token(ctx, challenge, preimage=None, uses_remaining=uses, access_until=access_until)
@@ -900,14 +935,14 @@ class _Remote:
         self._save_token(ctx, challenge, preimage=preimage, uses_remaining=challenge.max_uses, access_until=access_until)
         self.buyer.store.delete_quote(challenge.payment_hash)
         ctx.paid = True
+        ctx.paid_with = "lightning"
+        ctx.paid_sats = challenge.amount_sats
         ctx.secrets = (challenge.macaroon, preimage, ctx.signature_text)
         try:
             raw, request_id, expired = await self._tools_call(ctx, f"L402 {challenge.macaroon}:{preimage}", None)
         except BuyerError as exc:
             return Presentation(self._transport(ctx, exc, paid=True, token_kept=True, paid_with="lightning", paid_sats=challenge.amount_sats))
         if expired is not None:
-            expired["paid"] = True
-            expired["token_kept"] = True
             return Presentation(expired)
         found = self._classify(ctx, raw, request_id)
         if found["kind"] == "success":
@@ -951,31 +986,61 @@ class _Remote:
         )
 
     async def _with_signature(self, ctx: "_Call") -> Presentation:
+        compact = json.dumps(ctx.signature, separators=(",", ":"), ensure_ascii=False) if isinstance(ctx.signature, dict) else None
+        ctx.secrets = tuple(item for item in (ctx.signature_text, compact) if isinstance(item, str))
         challenge = self._fresh_x402(ctx.key)
         if challenge is None:
-            raw, request_id, expired = await self._tools_call(ctx, None, None)
+            try:
+                raw, request_id, expired = await self._tools_call(ctx, None, None)
+            except BuyerError as exc:
+                return Presentation(self._transport(ctx, exc, paid=False, token_kept=False, signature_sent=False, retry_same=False))
             if expired is not None:
                 return Presentation(expired)
             found = self._classify(ctx, raw, request_id)
+            if found["kind"] == "success":
+                return Presentation(
+                    self._ok(
+                        ctx,
+                        found["result"],
+                        detail=_D_FREE,
+                        paid=False,
+                        paid_with=None,
+                        paid_sats=None,
+                        reused=False,
+                        payment_hash=None,
+                        uses=None,
+                        access_until=None,
+                        flags={"signature_sent": False, "retry_same_payment_signature": False},
+                    )
+                )
             if found["kind"] != "notice":
-                payload = self._from_class(ctx, found, paid=False, paid_with=None, paid_sats=None, token_kept=False)
-                payload["signature_sent"] = False
-                return Presentation(payload)
+                return Presentation(
+                    self._from_class(
+                        ctx,
+                        found,
+                        paid=False,
+                        paid_with=None,
+                        paid_sats=None,
+                        token_kept=False,
+                        signature_sent=False,
+                        retry_same=False,
+                    )
+                )
             if found.get("challenge_error") is not None:
                 err = found["challenge_error"]
-                payload = self._fail(ctx, err.code, err.message)
-                payload["signature_sent"] = False
-                return Presentation(payload)
+                return Presentation(self._fail(ctx, err.code, err.message, signature_sent=False, retry_same=False))
             challenge = found["challenge"]
-            if challenge is not None:
+            if challenge is not None and self._reusable_lightning(ctx.key) is None:
                 self._store_quote(ctx, challenge)
         if challenge is None or challenge.x402 is None:
             annotated = self._annotated(ctx, challenge) if challenge is not None else {"ok": False, "url": ctx.conn.url, "tool": ctx.tool}
-            annotated["ok"] = False
-            annotated["error"] = "x402_not_offered"
-            annotated["signature_sent"] = False
-            annotated["detail"] = "This price notice does not offer x402. The PAYMENT-SIGNATURE was not sent."
-            return Presentation(annotated)
+            payload = {"ok": False, "error": "x402_not_offered"}
+            for key, value in annotated.items():
+                if key not in {"ok", "error", "signature_sent", "detail"}:
+                    payload[key] = value
+            payload["signature_sent"] = False
+            payload["detail"] = "This price notice does not offer x402. The PAYMENT-SIGNATURE was not sent."
+            return Presentation(payload)
         view = self.buyer._annotate(challenge).get("x402")
         if not isinstance(view, dict) or not view.get("offered"):
             return Presentation(self._x402_offer(ctx, challenge, signature_given=True).payload)
@@ -983,16 +1048,14 @@ class _Remote:
             offered = self._x402_offer(ctx, challenge, signature_given=True)
             offered.payload["signature_sent"] = False
             return offered
-        ctx.secrets = (challenge.macaroon, None, ctx.signature_text)
+        ctx.secrets = tuple(item for item in (challenge.macaroon, ctx.signature_text, compact) if isinstance(item, str))
+        ctx.signature_sent = True
         try:
             raw, request_id, expired = await self._tools_call(ctx, None, ctx.signature)
         except BuyerError as exc:
             return Presentation(self._transport(ctx, exc, paid=False, token_kept=False, signature_sent=True, retry_same=True))
         if expired is not None:
-            expired["signature_sent"] = True
-            expired["retry_same_payment_signature"] = True
             return Presentation(expired)
-        ctx.signature_sent = True
         found = self._classify(ctx, raw, request_id)
         if found["kind"] == "success":
             return Presentation(self._x402_success(ctx, challenge, view, found["result"], raw))
@@ -1054,7 +1117,8 @@ class _Remote:
             code,
             explanation,
             http_status=found.get("http_status"),
-            hint=found.get("hint"),
+            hint=self._hint(ctx, found.get("hint")),
+            retry=found.get("retry"),
             paywall=found["kind"] == "paywall",
             paid=False,
             signature_sent=True,
@@ -1125,7 +1189,7 @@ class _Remote:
             text = self._scrub(ctx, text)[:500]
             return {"kind": "rpc", "rpc_code": code, "rpc_message": text, "http_status": raw.status}
         if raw.status == 404 and ctx.conn.session_id:
-            return {"kind": "session", "session": self._expired(ctx, bool(ctx.token_in_use or ctx.paid))}
+            return {"kind": "session", "session": self._expired(ctx)}
         if raw.status == 200:
             return {"kind": "invalid"}
         return {"kind": "request_failed", "http_status": raw.status, "error": body.get("error") if isinstance(body.get("error"), str) else None}
@@ -1137,15 +1201,16 @@ class _Remote:
             return {"kind": "notice", "challenge": None, "challenge_error": exc}
         return {"kind": "notice", "challenge": challenge}
 
-    def _from_class(self, ctx: "_Call", found: dict, *, paid: bool, paid_with, paid_sats, token_kept: bool, uses=None, access_until=None, payment_hash=None, signature_sent=None, retry_same=None) -> dict:
+    def _from_class(self, ctx: "_Call", found: dict, *, paid: bool, paid_with, paid_sats, token_kept: bool, uses=None, access_until=None, payment_hash=None, signature_sent=None, retry_same=None, invoice_kept: bool = False) -> dict:
         kind = found["kind"]
+        suffix = _suffix(ctx, paid, token_kept, invoice_kept=invoice_kept)
         if kind == "tool_error":
             if ctx.signature_sent or signature_sent:
                 detail = "The tool returned an error result. The payment was not settled. Retry the same payment_signature while the offer is valid."
-            elif token_kept or ctx.token_in_use:
-                detail = "The tool returned an error result. A failed call takes no use, so the stored token was kept. Call remote_call_tool again to retry with it."
+            elif paid or token_kept or ctx.token_in_use:
+                detail = "The tool returned an error result." + _SUFFIX_TOKEN
             else:
-                detail = "The tool returned an error result. Nothing was paid."
+                detail = "The tool returned an error result." + _SUFFIX_FREE
             payload = self._ok(
                 ctx,
                 found.get("result") or {},
@@ -1160,37 +1225,48 @@ class _Remote:
                 tool_error=True,
                 token_kept=token_kept,
             )
-            if signature_sent or ctx.signature_sent:
-                payload["signature_sent"] = True
-                payload["retry_same_payment_signature"] = True if retry_same is None else retry_same
-                # detail must stay last
+            if signature_sent is not None or ctx.signature_sent:
+                sent = bool(signature_sent) or ctx.signature_sent
+                payload["signature_sent"] = sent
+                payload["retry_same_payment_signature"] = sent if retry_same is None else bool(retry_same)
                 detail_text = payload.pop("detail")
                 payload["detail"] = detail_text
             return payload
         if kind == "rpc":
-            detail = "The server answered with a JSON-RPC error." + _suffix(ctx, paid, token_kept)
+            detail = "The server answered with a JSON-RPC error." + suffix
             return self._fail(ctx, "rpc_error", detail, http_status=found.get("http_status"), rpc_code=found.get("rpc_code"), rpc_message=found.get("rpc_message"), paid=paid, paid_with=paid_with, paid_sats=paid_sats, token_kept=token_kept, signature_sent=signature_sent, retry_same=retry_same)
         if kind == "paywall":
             code = str(found.get("error") or "paywall")
             detail = f"The paywall answered {code}."
             if found.get("retry") is not None:
                 detail += " Retry after retry_after_seconds."
-            detail += _suffix(ctx, paid, token_kept)
-            hint = found.get("hint")
-            if isinstance(hint, str):
-                hint = self._scrub(ctx, hint)[:1000]
-            return self._fail(ctx, code, detail, hint=hint, retry=found.get("retry"), paywall=True, paid=paid, paid_with=paid_with, paid_sats=paid_sats, token_kept=token_kept, signature_sent=signature_sent, retry_same=retry_same)
+            detail += suffix
+            return self._fail(ctx, code, detail, hint=self._hint(ctx, found.get("hint")), retry=found.get("retry"), paywall=True, paid=paid, paid_with=paid_with, paid_sats=paid_sats, token_kept=token_kept, signature_sent=signature_sent, retry_same=retry_same)
         if kind == "pending":
+            if paid or token_kept or ctx.token_in_use:
+                short = "The invoice is not settled yet." + suffix
+                return self._pending(
+                    ctx,
+                    found.get("payment_hash"),
+                    found.get("retry"),
+                    paid=paid,
+                    paid_with=paid_with if paid else None,
+                    paid_sats=paid_sats if paid else None,
+                    token_kept=True,
+                    detail=short,
+                )
             return self._pending(ctx, found.get("payment_hash"), found.get("retry"))
         if kind == "input_required":
-            return self._fail(ctx, "input_required_not_supported", "The tool asked for more input. This client does not support that." + _suffix(ctx, paid, token_kept), paid=paid, paid_with=paid_with, paid_sats=paid_sats, token_kept=token_kept, signature_sent=signature_sent, retry_same=retry_same)
+            return self._fail(ctx, "input_required_not_supported", "The tool asked for more input. This client does not support that." + suffix, paid=paid, paid_with=paid_with, paid_sats=paid_sats, token_kept=token_kept, signature_sent=signature_sent, retry_same=retry_same)
         if kind == "invalid":
-            return self._fail(ctx, "invalid_response", _INVALID_RESPONSE, paid=paid, token_kept=token_kept, signature_sent=signature_sent, retry_same=retry_same)
+            return self._fail(ctx, "invalid_response", _INVALID_BASE + suffix, paid=paid, paid_with=paid_with, paid_sats=paid_sats, token_kept=token_kept, signature_sent=signature_sent, retry_same=retry_same)
         if kind == "redirect":
-            return self._fail(ctx, "redirect_not_followed", _REDIRECT, paid=paid, token_kept=token_kept, signature_sent=signature_sent, retry_same=retry_same)
+            return self._fail(ctx, "redirect_not_followed", _REDIRECT + suffix, paid=paid, paid_with=paid_with, paid_sats=paid_sats, token_kept=token_kept, signature_sent=signature_sent, retry_same=retry_same)
         if kind == "too_large":
-            return self._fail(ctx, "response_too_large", _TOO_LARGE, paid=paid, token_kept=token_kept, signature_sent=signature_sent, retry_same=retry_same)
+            return self._fail(ctx, "response_too_large", _TOO_LARGE_BASE + suffix, paid=paid, paid_with=paid_with, paid_sats=paid_sats, token_kept=token_kept, signature_sent=signature_sent, retry_same=retry_same)
         if kind == "offer_mismatch":
+            if paid or token_kept or ctx.token_in_use or ctx.signature_sent or signature_sent:
+                return self._fail(ctx, "offer_mismatch", "The price notice names another tool." + suffix, paid=paid, paid_with=paid_with, paid_sats=paid_sats, token_kept=token_kept, signature_sent=signature_sent, retry_same=retry_same)
             return self._fail(ctx, "offer_mismatch", "The price notice names another tool. It was not paid.")
         if kind == "session":
             return found["session"]
@@ -1283,15 +1359,8 @@ class _Remote:
         payload["detail"] = detail
         return payload
 
-    def _pending(self, ctx, payment_hash, retry) -> dict:
-        payload = self._fail(ctx, "payment_pending", _PENDING_DETAIL, retry=retry or 2, paid=False, token_kept=False)
-        payload.pop("paid")
-        payload.pop("paid_with")
-        payload.pop("paid_sats")
-        payload.pop("token_kept")
-        # Keep the documented order: class fields, then paid flags, then detail.
-        detail = payload.pop("detail")
-        ordered = {
+    def _pending(self, ctx, payment_hash, retry, *, paid: bool = False, paid_with=None, paid_sats=None, token_kept: bool = False, detail: str | None = None) -> dict:
+        return {
             "ok": False,
             "error": "payment_pending",
             "url": ctx.conn.url,
@@ -1299,13 +1368,12 @@ class _Remote:
             "protocol_version": ctx.conn.protocol_version,
             "payment_hash": payment_hash if isinstance(payment_hash, str) else None,
             "retry_after_seconds": retry or 2,
-            "paid": False,
-            "paid_with": None,
-            "paid_sats": None,
-            "token_kept": False,
-            "detail": detail,
+            "paid": paid,
+            "paid_with": paid_with,
+            "paid_sats": paid_sats,
+            "token_kept": token_kept,
+            "detail": _PENDING_DETAIL if detail is None else detail,
         }
-        return ordered
 
     def _preimage(self, ctx, payment_hash) -> dict:
         return {
@@ -1322,8 +1390,8 @@ class _Remote:
             "detail": _PREIMAGE_DETAIL,
         }
 
-    def _transport(self, ctx, exc: BuyerError, *, paid: bool, token_kept: bool, paid_with=None, paid_sats=None, signature_sent=None, retry_same=None) -> dict:
-        detail = exc.message + _suffix(ctx, paid, token_kept)
+    def _transport(self, ctx, exc: BuyerError, *, paid: bool, token_kept: bool, paid_with=None, paid_sats=None, signature_sent=None, retry_same=None, invoice_kept: bool = False) -> dict:
+        detail = exc.message + _suffix(ctx, paid, token_kept, invoice_kept=invoice_kept)
         return self._fail(ctx, exc.code, detail, paid=paid, paid_with=paid_with, paid_sats=paid_sats, token_kept=token_kept, signature_sent=signature_sent, retry_same=retry_same)
 
     def _annotated(self, ctx, challenge: Challenge) -> dict:
@@ -1471,33 +1539,33 @@ class _Remote:
             return None
         return challenge
 
-    def _expired(self, ctx, token_kept: bool) -> dict:
-        detail = "The MCP session expired." + (_suffix(ctx, ctx.paid, token_kept))
-        return {
-            "ok": False,
-            "error": "session_expired",
-            "url": ctx.conn.url,
-            "tool": ctx.tool,
-            "protocol_version": ctx.conn.protocol_version,
-            "token_kept": token_kept,
-            "detail": detail,
-        }
+    def _expired(self, ctx: "_Call") -> dict:
+        paid = bool(ctx.paid)
+        token_kept = bool(paid or ctx.token_in_use)
+        sent = True if ctx.signature_sent else None
+        detail = "The MCP session expired." + _suffix(ctx, paid, token_kept)
+        return self._fail(
+            ctx,
+            "session_expired",
+            detail,
+            paid=paid,
+            paid_with=ctx.paid_with if paid else None,
+            paid_sats=ctx.paid_sats if paid else None,
+            token_kept=token_kept,
+            signature_sent=sent,
+            retry_same=True if sent else None,
+        )
+
+    def _hint(self, ctx, hint) -> str | None:
+        if not isinstance(hint, str):
+            return None
+        return self._scrub(ctx, hint)[:1000]
 
     def _scrub(self, ctx, text: str) -> str:
         extra = [item for item in (ctx.secrets or ()) if isinstance(item, str)]
         if ctx.signature_text:
             extra.append(ctx.signature_text)
         return self.buyer._scrub(text, *extra)
-
-    def _caught(self, conn: _Conn, tool: str, exc: BuyerError) -> dict:
-        return {
-            "ok": False,
-            "error": exc.code,
-            "url": conn.url,
-            "tool": tool,
-            "protocol_version": conn.protocol_version,
-            "detail": exc.message,
-        }
 
     async def _close(self, conn: _Conn) -> None:
         session = conn.session_id

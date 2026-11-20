@@ -2239,6 +2239,437 @@ def test_rc_8_5_idle_locks_are_removed(tmp_path: Path) -> None:
     assert wallet.invoices == [INVOICE]
 
 
+_SUFFIX_FREE = " Nothing was paid."
+_SUFFIX_TOKEN = " The stored token was kept. Call remote_call_tool again to retry with it. Do not pay again."
+_SUFFIX_SIGNATURE = " Retry the same payment_signature while the offer is valid. It is settled at most once."
+_SUFFIX_INVOICE = " The invoice is kept. Call remote_call_tool again with the same url and tool. Do not pay a second invoice."
+_HEAD_KEYS = ["ok", "error", "url", "tool", "protocol_version"]
+_PAID_TAIL = ["paid", "paid_with", "paid_sats", "token_kept", "detail"]
+_FAILURE_KEYS = _HEAD_KEYS + _PAID_TAIL
+_PENDING_KEYS = _HEAD_KEYS + ["payment_hash", "retry_after_seconds"] + _PAID_TAIL
+_PENDING_SHORT = "The invoice is not settled yet."
+
+
+def _paid_failure(kind: str, limit: int):
+    def invalid(body):
+        return httpx.Response(200, json={"jsonrpc": "2.0", "method": "notifications/message", "params": {}})
+
+    def over_cap(_body):
+        return httpx.Response(200, content=b"z" * (limit + 1))
+
+    def redirect(_body):
+        return httpx.Response(302, headers={"location": "https://elsewhere.example/mcp"})
+
+    def pending_in_band(body):
+        return _priced(
+            body["id"],
+            {"error": "payment_pending", "tool": "echo", "payment_hash": PAYMENT, "retry_after_seconds": 2},
+        )
+
+    def pending_http(_body):
+        return httpx.Response(402, json={"error": "payment_pending", "retry_after_seconds": 2})
+
+    def session(_body):
+        return httpx.Response(404, content=b"missing")
+
+    def timeout(_body):
+        raise httpx.ReadTimeout("slow")
+
+    def connection(_body):
+        raise httpx.ConnectError("down")
+
+    return {
+        "invalid": invalid,
+        "over_cap": over_cap,
+        "redirect": redirect,
+        "pending_in_band": pending_in_band,
+        "pending_http": pending_http,
+        "session": session,
+        "timeout": timeout,
+        "connection": connection,
+    }[kind]
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["invalid", "over_cap", "redirect", "pending_in_band", "pending_http", "session", "timeout", "connection"],
+)
+def test_rc_5_16_a_paid_retry_reports_the_payment(tmp_path: Path, kind: str) -> None:
+    notice = _priced(1, _lightning())
+    limit = len(notice.content) + 100
+    state = {"fail": True}
+
+    def on_call(request, body):
+        if request.headers.get("authorization"):
+            if state["fail"]:
+                return _paid_failure(kind, limit)(body)
+            return _tool_ok(body["id"], "kept")
+        return _priced(body["id"], _lightning())
+
+    buyer, http, wallet = _buyer(
+        tmp_path,
+        _origin(modern=kind != "session", on_call=on_call),
+        nwc_uri=NWC,
+        max_payment_sats=100,
+        daily_max_sats=500,
+        max_body_bytes=limit,
+    )
+    buyer._now = Clock()
+    failed = asyncio.run(buyer.remote_call_tool(URL, "echo", mode="nwc"))
+    keys = _PENDING_KEYS if kind.startswith("pending") else _FAILURE_KEYS
+    assert list(failed.payload) == keys
+    assert failed.payload["paid"] is True
+    assert failed.payload["paid_with"] == "lightning"
+    assert failed.payload["paid_sats"] == 21
+    assert failed.payload["token_kept"] is True
+    if kind.startswith("pending"):
+        assert failed.payload["detail"] == _PENDING_SHORT + _SUFFIX_TOKEN
+    else:
+        assert failed.payload["detail"].endswith(_SUFFIX_TOKEN)
+    assert "Nothing was paid" not in failed.payload["detail"]
+    assert buyer.store.token_for(_key())["uses_remaining"] == buyer.store.token_for(_key())["max_uses"]
+    assert wallet.invoices == [INVOICE]
+    state["fail"] = False
+    again = asyncio.run(buyer.remote_call_tool(URL, "echo", mode="nwc"))
+    assert again.payload["reused_token"] is True
+    assert wallet.invoices == [INVOICE]
+    assert any(call.headers.get("authorization") for call in _calls(http, "tools/call"))
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["invalid", "over_cap", "redirect", "pending_in_band", "pending_http", "session"],
+)
+def test_rc_6_7_a_stored_token_stays_when_the_call_fails(tmp_path: Path, kind: str) -> None:
+    limit = 800
+
+    def on_call(request, body):
+        assert request.headers.get("authorization")
+        return _paid_failure(kind, limit)(body)
+
+    buyer, _http, wallet = _buyer(
+        tmp_path,
+        _origin(modern=kind != "session", on_call=on_call),
+        max_body_bytes=limit,
+    )
+    buyer._now = Clock()
+    _save_token(buyer, uses=5)
+    before = dict(buyer.store.token_for(_key()))
+    result = asyncio.run(buyer.remote_call_tool(URL, "echo"))
+    assert result.payload["paid"] is False
+    assert result.payload["paid_with"] is None
+    assert result.payload["paid_sats"] is None
+    assert result.payload["token_kept"] is True
+    if kind.startswith("pending"):
+        assert result.payload["detail"] == _PENDING_SHORT + _SUFFIX_TOKEN
+    else:
+        assert result.payload["detail"].endswith(_SUFFIX_TOKEN)
+    assert dict(buyer.store.token_for(_key())) == before
+    assert wallet.invoices == []
+
+
+def test_rc_5_17_a_paywall_error_keeps_the_human_quote(tmp_path: Path) -> None:
+    def on_call(request, body):
+        if request.headers.get("authorization"):
+            return _priced(
+                body["id"],
+                {"error": "rate_limited", "tool": "echo", "hint": "slow down", "retry_after_seconds": 7},
+            )
+        return _priced(body["id"], _lightning())
+
+    buyer, _http, wallet = _buyer(tmp_path, _origin(on_call=on_call))
+    buyer._now = Clock()
+    asyncio.run(buyer.remote_call_tool(URL, "echo"))
+    result = asyncio.run(buyer.remote_call_tool(URL, "echo"))
+    assert result.payload == {
+        "ok": False,
+        "error": "rate_limited",
+        "url": URL,
+        "tool": "echo",
+        "protocol_version": "2026-07-28",
+        "retry_after_seconds": 7,
+        "paywall": True,
+        "hint": "slow down",
+        "paid": False,
+        "paid_with": None,
+        "paid_sats": None,
+        "token_kept": False,
+        "detail": "The paywall answered rate_limited. Retry after retry_after_seconds." + _SUFFIX_INVOICE,
+    }
+    assert buyer.store.quote_for(_key())["payment_hash"] == PAYMENT
+    assert buyer.store.token_for(_key()) is None
+    assert wallet.invoices == []
+
+
+@pytest.mark.parametrize("kind", ["timeout", "renew_500", "renew_402", "human_timeout"])
+def test_rc_2_18_a_call_error_is_a_payload(tmp_path: Path, kind: str) -> None:
+    state = {"init": 0}
+
+    def on_initialize(_request, body):
+        state["init"] += 1
+        if state["init"] >= 2 and kind == "renew_500":
+            return httpx.Response(500, content=b"down")
+        if state["init"] >= 2 and kind == "renew_402":
+            return httpx.Response(402, json={"error": "payment_required"})
+        return _rpc(
+            body["id"],
+            {"protocolVersion": "2025-11-25", "capabilities": {}, "serverInfo": {"name": "origin", "version": "0"}},
+            headers={"mcp-session-id": "sess-1"},
+        )
+
+    def on_call(request, body):
+        if kind == "timeout":
+            raise httpx.ReadTimeout("slow")
+        if kind == "human_timeout":
+            if request.headers.get("authorization"):
+                raise httpx.ReadTimeout("slow")
+            return _priced(body["id"], _lightning())
+        return httpx.Response(404, content=b"missing")
+
+    buyer, _http, wallet = _buyer(
+        tmp_path,
+        _origin(modern=False, on_initialize=on_initialize, on_call=on_call),
+    )
+    buyer._now = Clock()
+    if kind == "human_timeout":
+        asyncio.run(buyer.remote_call_tool(URL, "echo"))
+    result = asyncio.run(buyer.remote_call_tool(URL, "echo"))
+    expected = {
+        "timeout": "timeout",
+        "renew_500": "connect_failed",
+        "renew_402": "handshake_not_free",
+        "human_timeout": "timeout",
+    }[kind]
+    assert list(result.payload) == _FAILURE_KEYS
+    assert result.payload["error"] == expected
+    assert result.payload["paid"] is False
+    assert result.payload["token_kept"] is False
+    if kind == "human_timeout":
+        assert result.payload["detail"].endswith(_SUFFIX_INVOICE)
+        assert buyer.store.quote_for(_key())["payment_hash"] == PAYMENT
+    else:
+        assert result.payload["detail"].endswith(_SUFFIX_FREE)
+    assert wallet.invoices == []
+
+
+@pytest.mark.parametrize("kind", ["x402_not_offered", "core_error", "session_expired"])
+def test_rc_4_13_failure_payloads_keep_detail_last(tmp_path: Path, kind: str) -> None:
+    if kind == "x402_not_offered":
+        _document, encoded = _signature_object()
+        buyer, _http, _wallet = _usd_buyer(tmp_path, _origin(on_call=lambda _request, body: _priced(body["id"], _lightning())))
+        result = asyncio.run(buyer.remote_call_tool(URL, "echo", payment_signature=encoded))
+        assert result.payload["error"] == "x402_not_offered"
+        assert list(result.payload) == [
+            "ok",
+            "error",
+            "payment_required",
+            "url",
+            "method",
+            "resource",
+            "max_uses",
+            "access_seconds",
+            "reason",
+            "rails",
+            "summary",
+            "amount_sats",
+            "payment_hash",
+            "invoice",
+            "invoice_expires_at",
+            "tool",
+            "protocol_version",
+            "signature_sent",
+            "detail",
+        ]
+        assert result.payload["signature_sent"] is False
+        assert list(result.payload)[-1] == "detail"
+        return
+    if kind == "core_error":
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "core.test":
+                return httpx.Response(400, json={"error": "token_used_up"})
+            return _origin(on_call=lambda _request, body: _priced(body["id"], _lightning()))(request)
+
+        buyer, _http, _wallet = _buyer(tmp_path, handler, api_key="sgr_testkeyvalue")
+        buyer._now = Clock()
+        asyncio.run(buyer.remote_call_tool(URL, "echo"))
+        result = asyncio.run(buyer.remote_call_tool(URL, "echo"))
+        assert list(result.payload) == _HEAD_KEYS + ["action", "payment_hash"] + _PAID_TAIL
+        assert result.payload["error"] == "token_used_up"
+        assert result.payload["detail"] == (
+            "Core rejected the token (token_used_up). Call remote_call_tool again for a new quote. Nothing was paid."
+        )
+        return
+    buyer, _http, _wallet = _buyer(tmp_path, _origin(modern=False, on_call=lambda _request, _body: httpx.Response(404)))
+    buyer._now = Clock()
+    _save_token(buyer)
+    result = asyncio.run(buyer.remote_call_tool(URL, "echo"))
+    assert result.payload["error"] == "session_expired"
+    assert list(result.payload) == _FAILURE_KEYS
+    assert result.payload["token_kept"] is True
+    assert list(result.payload)[-1] == "detail"
+
+
+@pytest.mark.parametrize("kind", ["invalid", "over_cap", "redirect"])
+def test_rc_7_13_a_sent_signature_is_still_retryable(tmp_path: Path, kind: str) -> None:
+    _document, encoded = _signature_object()
+    notice = _priced(1, _x402_notice())
+    limit = len(notice.content) + 100
+
+    def on_call(_request, body):
+        if "x402/payment" in (body.get("params") or {}).get("_meta", {}):
+            return _paid_failure(kind, limit)(body)
+        return _priced(body["id"], _x402_notice())
+
+    buyer, _http, _wallet = _usd_buyer(tmp_path, _origin(on_call=on_call), max_body_bytes=limit)
+    result = asyncio.run(buyer.remote_call_tool(URL, "echo", payment_signature=encoded))
+    assert result.payload["signature_sent"] is True
+    assert result.payload["retry_same_payment_signature"] is True
+    assert result.payload["detail"].endswith(_SUFFIX_SIGNATURE)
+    assert "Nothing was paid" not in result.payload["detail"]
+    assert buyer.store.spent_usd_since(0) == 0
+
+
+def test_rc_7_14_a_paywall_hint_hides_the_signature(tmp_path: Path) -> None:
+    document, encoded = _signature_object()
+    compact = json.dumps(document, separators=(",", ":"), ensure_ascii=False)
+    hint = encoded + compact + ("h" * 1200)
+
+    def on_call(_request, body):
+        if "x402/payment" in (body.get("params") or {}).get("_meta", {}):
+            return _priced(
+                body["id"],
+                {"error": "x402_rejected", "tool": "echo", "hint": hint, "retry_after_seconds": 3},
+            )
+        return _priced(body["id"], _x402_notice())
+
+    buyer, _http, _wallet = _usd_buyer(tmp_path, _origin(on_call=on_call))
+    result = asyncio.run(buyer.remote_call_tool(URL, "echo", payment_signature=encoded))
+    dumped = json.dumps(result.payload)
+    assert encoded not in dumped
+    assert compact not in dumped
+    assert len(result.payload["hint"]) == 1000
+    assert result.payload["retry_after_seconds"] == 3
+    assert result.payload["retry_same_payment_signature"] is True
+    assert "x402_rejected" not in _X402_RETRY_NEW
+    assert list(result.payload) == _HEAD_KEYS + [
+        "retry_after_seconds",
+        "paywall",
+        "hint",
+        "paid",
+        "paid_with",
+        "paid_sats",
+        "token_kept",
+        "signature_sent",
+        "retry_same_payment_signature",
+        "detail",
+    ]
+
+
+def test_rc_7_15_a_signature_call_keeps_the_lightning_quote(tmp_path: Path) -> None:
+    _document, encoded = _signature_object()
+    hash_b = "11" * 32
+    lightning_b = _lightning()
+    lightning_b["lightning"] = dict(lightning_b["lightning"], payment_hash=hash_b, macaroon="bWFjYXJvb24y", invoice="lnbc1otherinvoice")
+    dual = _x402_notice()
+    dual["lightning"] = dict(lightning_b["lightning"])
+
+    def scenario(answer):
+        seen = {"unpaid": 0}
+
+        def on_call(request, body):
+            meta = (body.get("params") or {}).get("_meta") or {}
+            if "x402/payment" in meta:
+                return _tool_ok(body["id"], "signed")
+            if request.headers.get("authorization"):
+                return _tool_ok(body["id"], "human")
+            seen["unpaid"] += 1
+            if seen["unpaid"] == 1:
+                return _priced(body["id"], _lightning())
+            return _priced(body["id"], answer)
+
+        return on_call
+
+    buyer, http, _wallet = _usd_buyer(tmp_path / "lightning", _origin(on_call=scenario(lightning_b)))
+    asyncio.run(buyer.remote_call_tool(URL, "echo"))
+    refused = asyncio.run(buyer.remote_call_tool(URL, "echo", payment_signature=encoded))
+    assert refused.payload["error"] == "x402_not_offered"
+    assert refused.payload["signature_sent"] is False
+    assert buyer.store.quote_for(_key())["payment_hash"] == PAYMENT
+    before = len(http.calls)
+    asyncio.run(buyer.remote_call_tool(URL, "echo"))
+    sent = [call for call in http.calls[before:] if _rpc_method(call) == "tools/call"]
+    assert sent[0].headers["authorization"] == f"L402 {MAC}"
+
+    buyer, http, _wallet = _usd_buyer(tmp_path / "dual", _origin(on_call=scenario(dual)))
+    asyncio.run(buyer.remote_call_tool(URL, "echo"))
+    paid = asyncio.run(buyer.remote_call_tool(URL, "echo", payment_signature=encoded))
+    signed = [call for call in _calls(http, "tools/call") if "x402/payment" in _body(call)["params"].get("_meta", {})]
+    assert len(signed) == 1
+    assert _body(signed[0])["params"]["_meta"]["x402/payment"]["nonce"] == "nonce-remote-tool"
+    assert buyer.store.quote_for(_key())["payment_hash"] == PAYMENT
+    assert paid.payload["signature_sent"] is True
+
+
+@pytest.mark.parametrize("kind", ["success", "tool_error"])
+def test_rc_7_16_an_unpaid_signature_call_is_classified(tmp_path: Path, kind: str) -> None:
+    _document, encoded = _signature_object()
+
+    def on_call(_request, body):
+        if kind == "success":
+            return _tool_ok(body["id"], "hello")
+        return _rpc(body["id"], {"isError": True, "content": [{"type": "text", "text": "nope"}]})
+
+    buyer, http, _wallet = _usd_buyer(tmp_path, _origin(on_call=on_call))
+    result = asyncio.run(buyer.remote_call_tool(URL, "echo", payment_signature=encoded))
+    if kind == "success":
+        assert result.payload == {
+            "ok": True,
+            "url": URL,
+            "tool": "echo",
+            "protocol_version": "2026-07-28",
+            "is_error": False,
+            "content": [{"type": "text", "text": "hello"}],
+            "structured_content": None,
+            "paid": False,
+            "paid_with": None,
+            "paid_sats": None,
+            "reused_token": False,
+            "payment_hash": None,
+            "uses_remaining": None,
+            "access_until": None,
+            "signature_sent": False,
+            "retry_same_payment_signature": False,
+            "detail": _D_FREE,
+        }
+    else:
+        assert result.payload == {
+            "ok": False,
+            "error": "tool_error",
+            "url": URL,
+            "tool": "echo",
+            "protocol_version": "2026-07-28",
+            "is_error": True,
+            "content": [{"type": "text", "text": "nope"}],
+            "structured_content": None,
+            "paid": False,
+            "paid_with": None,
+            "paid_sats": None,
+            "reused_token": False,
+            "payment_hash": None,
+            "uses_remaining": None,
+            "access_until": None,
+            "token_kept": False,
+            "signature_sent": False,
+            "retry_same_payment_signature": False,
+            "detail": "The tool returned an error result. Nothing was paid.",
+        }
+    for call in http.calls:
+        if call.content:
+            assert "x402/payment" not in call.content.decode("utf-8", errors="replace")
+    assert buyer.store.spent_usd_since(0) == 0
+
+
 def test_rc_8_6_a_cancelled_waiter_drops_the_lock(tmp_path: Path) -> None:
     wallet = _HoldWallet()
     buyer, _http, _default = _buyer(
