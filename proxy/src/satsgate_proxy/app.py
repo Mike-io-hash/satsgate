@@ -29,7 +29,7 @@ from satsgate_proxy.core_client import (
     unlock_without_preimage,
     verify_x402,
 )
-from satsgate_proxy.forward import call_upstream, forward
+from satsgate_proxy.forward import _upstream_response, call_upstream, forward
 from satsgate_proxy.macaroon import macaroon_fields
 from satsgate_proxy.match import match_request, unsafe_request_path
 from satsgate_proxy.mcp_http import (
@@ -42,10 +42,13 @@ from satsgate_proxy.mcp_http import (
     classify,
     encode_tool_header,
     inspect_post,
+    mcp_tool_response,
     mcp_tool_succeeded,
     note_rejection,
     parse_json,
     rejection_body,
+    strip_x402_payment,
+    x402_meta_payment,
 )
 
 log = logging.getLogger("satsgate_proxy")
@@ -339,6 +342,8 @@ async def _pay_x402(
     extra_headers: tuple[tuple[str, str], ...] = (),
     delivered=None,
     notice: _Notice | None = None,
+    meta_rail: bool = False,
+    request_id: object = None,
 ) -> Response:
     """Verify, call the origin, and settle only after delivery. The proxy never calls the facilitator."""
     client: httpx.AsyncClient = request.app.state.http
@@ -359,7 +364,12 @@ async def _pay_x402(
         paid_usd_atomic=verified.amount_usd_atomic,
         extra_headers=extra_headers,
     )
-    accepted = delivered(exchanged) if delivered is not None else 200 <= exchanged.status < 300
+    matched = None
+    if meta_rail:
+        matched = mcp_tool_response(exchanged.status, exchanged.header_items, exchanged.content, request_id)
+        accepted = matched is not None
+    else:
+        accepted = delivered(exchanged) if delivered is not None else 200 <= exchanged.status < 300
     if exchanged.error or not accepted:
         return exchanged.response(use_spent=False if exchanged.error else None)
     settled = await settle_x402(
@@ -371,6 +381,8 @@ async def _pay_x402(
     )
     if settled.action != "settled" or not settled.payment_response:
         return _x402_failure(settled, notice)
+    if meta_rail and isinstance(matched, dict):
+        return _meta_success(exchanged, matched, settled.payment_response)
     return exchanged.response(use_spent=None, extra=(("PAYMENT-RESPONSE", settled.payment_response),))
 
 
@@ -505,7 +517,53 @@ def _unsupported(call: UnsupportedCall) -> Response:
     return JSONResponse(body, status_code=200, headers={"Cache-Control": "no-store"})
 
 
+def _decode_settlement(encoded: str) -> dict | None:
+    try:
+        parsed = parse_json(base64.b64decode(encoded, validate=True).decode("utf-8"))
+    except (binascii.Error, UnicodeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
+def _meta_success(exchanged, matched: dict, payment_response: str) -> Response:
+    """JSON tool result with the settlement. Nothing here may raise."""
+
+    settlement = _decode_settlement(payment_response)
+    message = matched
+    if settlement is None:
+        log.warning("x402 settlement was not readable")
+    else:
+        result = message.get("result") if isinstance(message, dict) else None
+        if isinstance(result, dict):
+            meta = result.get("_meta")
+            if "_meta" not in result:
+                result["_meta"] = {"x402/payment-response": settlement}
+            elif isinstance(meta, dict):
+                meta["x402/payment-response"] = settlement
+            else:
+                log.warning("tool result _meta was not an object")
+                result["_meta"] = {"x402/payment-response": settlement}
+    try:
+        body = json.dumps(message, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError):
+        body = exchanged.content
+    kept = [
+        (name, value)
+        for name, value in exchanged.header_items
+        if str(name).lower() not in {"content-type", "content-length"}
+    ]
+    return _upstream_response(
+        body,
+        200,
+        kept,
+        (("content-type", "application/json"), ("PAYMENT-RESPONSE", payment_response)),
+    )
+
+
 async def _forward_mcp_free(request: Request, settings: Settings, tool_name: str | None) -> Response:
+    request.state.body = strip_x402_payment(request.state.body)
     extra: tuple[tuple[str, str], ...] = ()
     if tool_name is not None:
         extra = (("X-Satsgate-Mcp-Tool", encode_tool_header(tool_name)),)
@@ -528,12 +586,36 @@ async def _paywall(
     extra_headers: tuple[tuple[str, str], ...] = (),
     delivered=None,
     notice: _Notice | None = None,
+    meta_payment: tuple[bool, object] = (False, None),
+    request_id: object = None,
 ) -> Response:
     reason: str | None = None
     authorization = _l402_authorization(request)
     payment_signature = _payment_signature(request)
+    has_meta, meta_value = meta_payment
+    if has_meta and (payment_signature is not None or authorization is not None):
+        return _json(400, "one_rail_only", notice)
     if authorization is not None and payment_signature is not None:
         return _json(400, "one_rail_only", notice)
+    if has_meta:
+        if not isinstance(meta_value, dict):
+            return _json(400, "bad_signature", notice)
+        encoded = base64.standard_b64encode(
+            json.dumps(meta_value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+        if len(encoded) > _PAYMENT_SIGNATURE_MAX:
+            return _json(400, "bad_signature", notice)
+        return await _pay_x402(
+            request,
+            settings,
+            route,
+            encoded,
+            extra_headers=extra_headers,
+            delivered=delivered,
+            notice=notice,
+            meta_rail=True,
+            request_id=request_id,
+        )
     if payment_signature is not None:
         if (
             not payment_signature
@@ -618,7 +700,18 @@ async def _serve_mcp(request: Request, settings: Settings, route: PayRoute) -> R
     notice = None
     if route.mcp is not None and route.mcp.signal == "in_band":
         notice = _Notice(outcome.tool_name, outcome.request_id)
-    return await _paywall(request, settings, derived, extra_headers=extra, delivered=delivered, notice=notice)
+    present, payment = x402_meta_payment(inspected.messages[0])
+    request.state.body = strip_x402_payment(request.state.body)
+    return await _paywall(
+        request,
+        settings,
+        derived,
+        extra_headers=extra,
+        delivered=delivered,
+        notice=notice,
+        meta_payment=(present, payment),
+        request_id=outcome.request_id,
+    )
 
 
 def build_app(settings: Settings, *, transport: httpx.AsyncBaseTransport | None = None) -> Starlette:

@@ -77,6 +77,17 @@ _SUMMARY = {
 _REQUIRED = base64.standard_b64encode(
     json.dumps(_DOCUMENT, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 ).decode("ascii")
+_SETTLEMENT = {
+    "success": True,
+    "transaction": "0xabc",
+    "tx": "0xabc",
+    "network": "eip155:84532",
+    "payer": "0x0000000000000000000000000000000000000002",
+}
+_SETTLEMENT_B64 = base64.standard_b64encode(
+    json.dumps(_SETTLEMENT, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+).decode("ascii")
+_UNREADABLE_SETTLEMENT = "c2V0dGxlZA"
 _IN_BAND = _TOOLS.replace("    signal: http_402\n", "")
 _LIGHTNING = _IN_BAND.replace("  x402: true\n", "")
 _REPORT = (
@@ -102,6 +113,8 @@ class OfferWorld(McpWorld):
         self.verify_status: int | None = None
         self.settle_status: int | None = None
         self.charge_status: int | None = None
+        self.settlement: str | None = None
+        self.order: list[str] = []
 
     def _challenge(self, snap: dict) -> httpx.Response:
         if self.challenge_status == 429:
@@ -148,6 +161,16 @@ class OfferWorld(McpWorld):
 
     def _core(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        if path.endswith("/x402/verify"):
+            self.order.append("verify")
+        elif path.endswith("/x402/settle"):
+            self.order.append("settle")
+        elif path.endswith("/challenge"):
+            self.order.append("challenge")
+        elif path.endswith("/charge"):
+            self.order.append("charge")
+        elif path.endswith("/verify"):
+            self.order.append("unlock")
         if path.endswith("/charge") and self.charge_status is not None:
             self.core_calls.append(self._snap(request))
             return httpx.Response(self.charge_status, json={"ok": False, "error": "db_error"})
@@ -163,9 +186,17 @@ class OfferWorld(McpWorld):
                 self.settle_status,
                 json={"ok": False, "error": "already_settled", "reason": "duplicate"},
             )
+        if path.endswith("/x402/settle") and self.settlement is not None:
+            self.core_calls.append(self._snap(request))
+            return httpx.Response(
+                200,
+                json={"ok": True, "payment_response": self.settlement},
+                headers={"payment-response": self.settlement},
+            )
         return super()._core(request)
 
     def _upstream(self, request: httpx.Request) -> httpx.Response:
+        self.order.append("origin")
         if self.upstream == "timeout":
             self.up_calls.append(self._snap(request))
             raise httpx.ReadTimeout("timed out")
@@ -796,3 +827,383 @@ def test_ib_3_13_http_402_route_keeps_classic_answers(
         assert "retry-after" not in response.headers
     else:
         assert response.headers["retry-after"] == retry_after
+
+
+def _signature(payment: dict) -> str:
+    raw = json.dumps(payment, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return base64.standard_b64encode(raw).decode("ascii")
+
+
+def _call_with_meta(
+    payment: object,
+    *,
+    name: str = "quote",
+    ident: object = 7,
+    arguments: dict | None = None,
+    meta_before: dict | None = None,
+) -> bytes:
+    meta: dict[str, object] = {}
+    if meta_before:
+        meta.update(meta_before)
+    meta["x402/payment"] = payment
+    params: dict[str, object] = {"name": name}
+    if arguments is not None:
+        params["arguments"] = arguments
+    params["_meta"] = meta
+    return _rpc("tools/call", params, ident=ident)
+
+
+def _deliver(world: OfferWorld, result: dict | None = None, *, ident: object = 7, content_type: str = "application/json", body: bytes | None = None) -> bytes:
+    if body is None:
+        payload = {"content": [{"type": "text", "text": "ok"}]}
+        if result:
+            payload.update(result)
+        body = _result(payload, ident=ident)
+    world.queue.append(_reply(200, body, content_type))
+    return body
+
+
+def _meta_world() -> OfferWorld:
+    world = OfferWorld()
+    world.settlement = _SETTLEMENT_B64
+    return world
+
+
+def _payment_of_length(target: int) -> dict:
+    for pad in range(6000, 6200):
+        payment = {"note": "a" * pad}
+        if len(_signature(payment)) == target:
+            return payment
+    raise AssertionError(f"no payload encodes to {target}")
+
+
+def test_ib_4_1_meta_payment_uses_compact_encoding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    payment = {"scheme": "exact", "note": "\u00a5"}
+    encoded = _signature(payment)
+    world = _meta_world()
+    _deliver(world)
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    with _client(settings, world) as client:
+        _post(client, _call_with_meta(payment))
+    verify = [call for call in world.core_calls if call["path"].endswith("/x402/verify")]
+    settle = [call for call in world.core_calls if call["path"].endswith("/x402/settle")]
+    assert len(verify) == 1
+    assert len(settle) == 1
+    assert verify[0]["body"]["payment_signature"] == encoded
+    assert settle[0]["body"]["payment_signature"] == encoded
+
+
+def test_ib_4_2_meta_rail_matches_the_header_rail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    payment = {"scheme": "exact", "note": "\u00a5"}
+    encoded = _signature(payment)
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    meta = _meta_world()
+    header = _meta_world()
+    _deliver(meta)
+    _deliver(header)
+    with _client(settings, meta) as client:
+        _post(client, _call_with_meta(payment))
+    with _client(settings, header) as client:
+        _post(client, _tools_call(), {"PAYMENT-SIGNATURE": encoded})
+    meta_calls = [(call["path"], call["body"]) for call in meta.core_calls]
+    header_calls = [(call["path"], call["body"]) for call in header.core_calls]
+    assert meta_calls == header_calls
+    assert len(meta_calls) == 2
+
+
+def test_ib_4_3_meta_success_injects_the_settlement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = _meta_world()
+    origin = _deliver(world)
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    with _client(settings, world) as client:
+        response = _post(client, _call_with_meta({"scheme": "exact"}))
+    assert response.status_code == 200
+    assert response.headers["content-type"].split(";", 1)[0] == "application/json"
+    assert response.headers["payment-response"] == world.settlement
+    body = response.json()
+    assert body["result"]["_meta"]["x402/payment-response"] == _SETTLEMENT
+    rest = {key: value for key, value in body["result"].items() if key != "_meta"}
+    assert rest == json.loads(origin)["result"]
+
+
+def test_ib_4_4_origin_body_drops_only_the_payment_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    payment = {"scheme": "exact", "note": "keep-me"}
+    raw = _call_with_meta(payment, arguments={"symbol": "acme"}, meta_before={"progressToken": "tok", "custom": "keep"})
+    world = _meta_world()
+    _deliver(world)
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    with _client(settings, world) as client:
+        _post(client, raw)
+    expected = {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "quote",
+            "arguments": {"symbol": "acme"},
+            "_meta": {"progressToken": "tok", "custom": "keep"},
+        },
+        "id": 7,
+    }
+    assert world.up_calls[0]["raw"] == json.dumps(expected, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def test_ib_4_5_empty_meta_stays_in_the_origin_body(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = _meta_world()
+    _deliver(world)
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    with _client(settings, world) as client:
+        _post(client, _call_with_meta({"scheme": "exact"}))
+    sent = json.loads(world.up_calls[0]["raw"])
+    assert sent["params"]["_meta"] == {}
+
+
+def test_ib_4_6_sse_origin_becomes_one_json_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    note = json.dumps({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progress": 1}})
+    final = json.dumps({"jsonrpc": "2.0", "id": 7, "result": {"content": [{"type": "text", "text": "ok"}]}})
+    streamed = f"data: {note}\n\ndata: {final}\n\n".encode()
+    world = _meta_world()
+    world.queue.append(_reply(200, streamed, "text/event-stream"))
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    with _client(settings, world) as client:
+        response = _post(client, _call_with_meta({"scheme": "exact"}))
+    assert response.status_code == 200
+    assert response.headers["content-type"].split(";", 1)[0] == "application/json"
+    assert response.headers["payment-response"] == world.settlement
+    assert "notifications/progress" not in response.text
+    body = response.json()
+    assert body["id"] == 7
+    assert body["result"]["content"] == [{"type": "text", "text": "ok"}]
+    assert body["result"]["_meta"]["x402/payment-response"] == _SETTLEMENT
+
+
+def test_ib_4_7_origin_meta_keys_are_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = _meta_world()
+    _deliver(world, {"_meta": {"progressToken": "tok"}})
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    with _client(settings, world) as client:
+        response = _post(client, _call_with_meta({"scheme": "exact"}))
+    assert response.json()["result"]["_meta"] == {"progressToken": "tok", "x402/payment-response": _SETTLEMENT}
+
+
+def test_ib_4_8_proxy_settlement_overwrites_the_origin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = _meta_world()
+    _deliver(world, {"_meta": {"x402/payment-response": {"success": False, "forged": True}, "other": "kept"}})
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    with _client(settings, world) as client:
+        response = _post(client, _call_with_meta({"scheme": "exact"}))
+    meta = response.json()["result"]["_meta"]
+    assert meta["x402/payment-response"] == _SETTLEMENT
+    assert meta["other"] == "kept"
+
+
+def test_ib_4_9_non_object_result_meta_is_replaced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    world = _meta_world()
+    _deliver(world, {"_meta": "not-an-object"})
+    caplog.set_level(logging.WARNING, logger="satsgate_proxy")
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    with _client(settings, world) as client:
+        response = _post(client, _call_with_meta({"scheme": "exact"}))
+    assert response.json()["result"]["_meta"] == {"x402/payment-response": _SETTLEMENT}
+    assert sum(call["path"].endswith("/x402/settle") for call in world.core_calls) == 1
+    assert [record.getMessage() for record in caplog.records if record.name == "satsgate_proxy"] == [
+        "tool result _meta was not an object"
+    ]
+
+
+def test_ib_4_10_unreadable_settlement_returns_the_tool_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    world = _meta_world()
+    world.settlement = _UNREADABLE_SETTLEMENT
+    origin = {"jsonrpc": "2.0", "id": 7, "result": {"content": [{"type": "text", "text": "ok"}]}}
+    world.queue.append(_reply(200, json.dumps(origin).encode(), "application/json"))
+    caplog.set_level(logging.WARNING, logger="satsgate_proxy")
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    with _client(settings, world) as client:
+        response = _post(client, _call_with_meta({"scheme": "exact"}))
+    assert response.status_code == 200
+    assert response.json() == origin
+    assert "x402/payment-response" not in response.text
+    assert response.headers["payment-response"] == _UNREADABLE_SETTLEMENT
+    assert [record.getMessage() for record in caplog.records if record.name == "satsgate_proxy"] == [
+        "x402 settlement was not readable"
+    ]
+
+
+def test_ib_4_11_tool_failure_can_be_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = _meta_world()
+    failed = _result({"isError": True, "content": [{"type": "text", "text": "no"}]}, ident=7)
+    world.queue.append(_reply(200, failed, "application/json"))
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    raw = _call_with_meta({"scheme": "exact"})
+    with _client(settings, world) as client:
+        first = _post(client, raw)
+        assert first.status_code == 200
+        assert first.content == failed
+        assert sum(call["path"].endswith("/x402/settle") for call in world.core_calls) == 0
+        _deliver(world)
+        second = _post(client, raw)
+    assert second.status_code == 200
+    assert second.headers["payment-response"] == world.settlement
+    assert sum(call["path"].endswith("/x402/settle") for call in world.core_calls) == 1
+
+
+def test_ib_4_12_meta_and_header_conflict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = OfferWorld()
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    with _client(settings, world) as client:
+        response = _post(client, _call_with_meta({"scheme": "exact"}), {"PAYMENT-SIGNATURE": "sig-test"})
+    assert _structured(response, 7) == {"error": "one_rail_only", "tool": "quote"}
+    assert world.core_calls == []
+    assert world.up_calls == []
+
+
+def test_ib_4_13_meta_and_lightning_conflict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = OfferWorld()
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    with _client(settings, world) as client:
+        response = _post(client, _call_with_meta({"scheme": "exact"}), _auth("route:tools:quote"))
+    assert _structured(response, 7) == {"error": "one_rail_only", "tool": "quote"}
+    assert world.core_calls == []
+    assert world.up_calls == []
+
+
+@pytest.mark.parametrize("value", ["abc", [1], 1, True, None])
+def test_ib_4_14_payment_must_be_an_object(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: object) -> None:
+    world = OfferWorld()
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    with _client(settings, world) as client:
+        response = _post(client, _call_with_meta(value))
+    assert _structured(response, 7) == {"error": "bad_signature", "tool": "quote"}
+    assert world.core_calls == []
+    assert world.up_calls == []
+
+
+def test_ib_4_15_encoded_size_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    under = _payment_of_length(8192)
+    over = _payment_of_length(8196)
+    assert len(_signature(under)) == 8192
+    assert len(_signature(over)) == 8196
+    accepted = OfferWorld()
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    with _client(settings, accepted) as client:
+        _post(client, _call_with_meta(under))
+    assert sum(call["path"].endswith("/x402/verify") for call in accepted.core_calls) == 1
+    rejected = OfferWorld()
+    with _client(settings, rejected) as client:
+        response = _post(client, _call_with_meta(over))
+    assert _structured(response, 7) == {"error": "bad_signature", "tool": "quote"}
+    assert rejected.core_calls == []
+    assert rejected.up_calls == []
+
+
+def test_ib_4_16_http_402_route_accepts_the_meta_rail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = _meta_world()
+    origin = _deliver(world)
+    settings = _mcp_settings(tmp_path, monkeypatch, _TOOLS)
+    with _client(settings, world) as client:
+        response = _post(client, _call_with_meta({"scheme": "exact"}))
+    assert response.status_code == 200
+    assert response.headers["content-type"].split(";", 1)[0] == "application/json"
+    assert response.headers["payment-response"] == world.settlement
+    body = response.json()
+    assert body["result"]["_meta"]["x402/payment-response"] == _SETTLEMENT
+    rest = {key: value for key, value in body["result"].items() if key != "_meta"}
+    assert rest == json.loads(origin)["result"]
+
+
+def test_ib_4_17_http_402_route_keeps_the_classic_conflict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = OfferWorld()
+    settings = _mcp_settings(tmp_path, monkeypatch, _TOOLS)
+    with _client(settings, world) as client:
+        response = _post(client, _call_with_meta({"scheme": "exact"}), {"PAYMENT-SIGNATURE": "sig-test"})
+    assert response.status_code == 400
+    assert response.json() == {"ok": False, "error": "one_rail_only"}
+    assert world.core_calls == []
+    assert world.up_calls == []
+
+
+def test_ib_4_18_free_tool_with_a_payment_key_stays_free(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    raw = _call_with_meta({"scheme": "exact"}, name="echo", ident=4, arguments={"text": "hi"})
+    world = OfferWorld()
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    with _client(settings, world) as client:
+        response = _post(client, raw)
+    assert world.core_calls == []
+    assert response.status_code == 200
+    assert response.content == _ORIGIN_OK
+    sent = json.loads(world.up_calls[0]["raw"])
+    assert "x402/payment" not in sent["params"]["_meta"]
+    assert sent["params"]["name"] == "echo"
+    assert sent["params"]["arguments"] == {"text": "hi"}
+
+
+def test_ib_4_19_other_messages_drop_the_payment_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    raw = _rpc("tools/list", {"_meta": {"x402/payment": {"a": 1}, "progressToken": "tok"}}, ident=3)
+    world = OfferWorld()
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    with _client(settings, world) as client:
+        response = _post(client, raw)
+    assert world.core_calls == []
+    assert response.content == _ORIGIN_OK
+    sent = json.loads(world.up_calls[0]["raw"])
+    assert sent["params"]["_meta"] == {"progressToken": "tok"}
+
+
+def test_ib_4_20_free_batch_drops_the_payment_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    first = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": {"x402/payment": {"a": 1}}}}
+    second = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "ping",
+        "params": {"_meta": {"keep": "yes", "x402/payment": {"a": 2}}},
+    }
+    raw = json.dumps([first, second], separators=(",", ":")).encode()
+    world = OfferWorld()
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    with _client(settings, world) as client:
+        _post(client, raw)
+    assert world.core_calls == []
+    expected = [
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": {}}},
+        {"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {"_meta": {"keep": "yes"}}},
+    ]
+    assert world.up_calls[0]["raw"] == json.dumps(expected, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def test_ib_4_21_bodies_without_the_key_are_not_rewritten(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    free = b'{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "echo", "arguments": {"text": "caf\\u00e9"}}}'
+    paid = b'{"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "quote", "arguments": {"text": "caf\\u00e9"}}}'
+    world = OfferWorld()
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    with _client(settings, world) as client:
+        _post(client, free)
+        _post(client, paid, {"PAYMENT-SIGNATURE": "sig-test"})
+    assert world.up_calls[0]["raw"] == free
+    assert world.up_calls[1]["raw"] == paid
+
+
+def test_ib_4_22_resource_follows_the_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    quote = OfferWorld()
+    deep = OfferWorld()
+    with _client(settings, quote) as client:
+        _post(client, _call_with_meta({"scheme": "exact"}, name="quote"))
+    with _client(settings, deep) as client:
+        _post(client, _call_with_meta({"scheme": "exact"}, name="deep_search"))
+    quote_verify = [call for call in quote.core_calls if call["path"].endswith("/x402/verify")]
+    deep_verify = [call for call in deep.core_calls if call["path"].endswith("/x402/verify")]
+    assert len(quote_verify) == 1
+    assert len(deep_verify) == 1
+    assert quote_verify[0]["body"]["resource"] == "route:tools:quote"
+    assert deep_verify[0]["body"]["resource"] == "route:tools:deep_search"
+
+
+def test_ib_4_23_settle_follows_a_successful_origin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = _meta_world()
+    _deliver(world)
+    settings = _mcp_settings(tmp_path, monkeypatch, _IN_BAND)
+    with _client(settings, world) as client:
+        response = _post(client, _call_with_meta({"scheme": "exact"}))
+    assert response.status_code == 200
+    assert world.order == ["verify", "origin", "settle"]

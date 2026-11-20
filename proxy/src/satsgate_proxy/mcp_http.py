@@ -541,18 +541,18 @@ def _tool_result_ok(message: dict) -> bool:
     return "task" not in result
 
 
-def mcp_tool_succeeded(status: int, headers: object, body: bytes, request_id: object) -> bool:
-    """True only when the origin returned the tool result for this request id."""
+def mcp_tool_response(status: int, headers: object, body: bytes, request_id: object) -> dict | None:
+    """The one tool result for this request id, or None when the call did not succeed."""
 
     try:
         if status < 0 or not body:
-            return False
+            return None
         media = _content_type(headers)
         found: list[dict] = []
         if media == "application/json":
             parsed = parse_json(body.decode("utf-8"))
             if not isinstance(parsed, dict):
-                return False
+                return None
             if _client_response(parsed):
                 found.append(parsed)
         elif media == "text/event-stream":
@@ -561,10 +561,53 @@ def mcp_tool_succeeded(status: int, headers: object, body: bytes, request_id: ob
                 if _client_response(parsed):
                     found.append(parsed)
         else:
-            return False
+            return None
         matched = [item for item in found if _same_id(item.get("id"), request_id)]
-        if len(matched) != 1:
-            return False
-        return _tool_result_ok(matched[0])
+        if len(matched) != 1 or not _tool_result_ok(matched[0]):
+            return None
+        return matched[0]
     except Exception:
-        return False
+        return None
+
+
+def mcp_tool_succeeded(status: int, headers: object, body: bytes, request_id: object) -> bool:
+    """True only when the origin returned the tool result for this request id."""
+
+    return mcp_tool_response(status, headers, body, request_id) is not None
+
+
+def x402_meta_payment(message: dict) -> tuple[bool, object]:
+    """Return whether params._meta contains x402/payment, and the value when it does."""
+
+    params = message.get("params")
+    if not isinstance(params, dict):
+        return False, None
+    meta = params.get("_meta")
+    if not isinstance(meta, dict) or "x402/payment" not in meta:
+        return False, None
+    return True, meta["x402/payment"]
+
+
+def strip_x402_payment(body: bytes) -> bytes:
+    """Remove x402/payment from forwarded messages. Leave every other byte as it arrived."""
+
+    try:
+        parsed = parse_json(body.decode("utf-8"))
+    except (UnicodeError, ValueError):
+        return body
+    messages = parsed if isinstance(parsed, list) else [parsed]
+    changed = False
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        params = message.get("params")
+        if not isinstance(params, dict):
+            continue
+        meta = params.get("_meta")
+        if not isinstance(meta, dict) or "x402/payment" not in meta:
+            continue
+        del meta["x402/payment"]
+        changed = True
+    if not changed:
+        return body
+    return json.dumps(parsed, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
