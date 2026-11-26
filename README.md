@@ -54,7 +54,7 @@ satsgate init --docker
 docker compose -f docker-compose.satsgate.yml up
 ```
 
-The image is `ghcr.io/mike-io-hash/satsgate-proxy:0.14.x`. The compose file pins the proxy version you installed.
+The image is `ghcr.io/mike-io-hash/satsgate-proxy:0.15.x`. The compose file pins the proxy version you installed.
 
 Copy an origin HMAC check with `--framework fastapi`, `express`, or `nginx`. A client that can reach the origin directly must fail closed.
 
@@ -103,6 +103,8 @@ Three ways to integrate:
 1. Self-hosted proxy in front of an HTTP API you already run.
 2. The Python SDK, if you mint challenges in your own code.
 3. The hosted gate, which sells a signed receipt for an approved site.
+
+Per-tool pricing for remote MCP servers: put the proxy in front of the server and add `mcp` to the route. Only `tools/call` is charged, at the price of that tool. The handshake, the tool list, and other MCP messages pass free. See [MCP servers](proxy/README.md#mcp-servers).
 
 ### Hosted gate (x402)
 
@@ -155,6 +157,8 @@ or `pip install "satsgate[mcp]"`.
 
 Paying also needs `SATSGATE_MCP_NWC_URI` or the USD caps in that env block. Wallet setup is in [mcp/README.md](mcp/README.md).
 
+`remote_list_tools` and `remote_call_tool` call tools on a remote MCP server and pay its price with the same caps. See [Remote MCP servers](mcp/README.md#remote-mcp-servers).
+
 `satsgate-mcp --help` lists the environment variables it reads and exits. `--version` prints the package version. With no arguments it speaks MCP on stdio.
 
 ## Packages
@@ -163,8 +167,8 @@ Paying also needs `SATSGATE_MCP_NWC_URI` or the USD caps in that env block. Wall
 | --- | --- |
 | `satsgate` | [PyPI](https://pypi.org/project/satsgate/) 0.1.x |
 | `satsgate-sdk` | [PyPI](https://pypi.org/project/satsgate-sdk/) 0.10.x |
-| `satsgate-proxy` | [PyPI](https://pypi.org/project/satsgate-proxy/) 0.14.x and [GHCR](https://github.com/Mike-io-hash/satsgate/pkgs/container/satsgate-proxy) |
-| `satsgate-mcp` | [PyPI](https://pypi.org/project/satsgate-mcp/) 0.13.x |
+| `satsgate-proxy` | [PyPI](https://pypi.org/project/satsgate-proxy/) 0.15.x and [GHCR](https://github.com/Mike-io-hash/satsgate/pkgs/container/satsgate-proxy) |
+| `satsgate-mcp` | [PyPI](https://pypi.org/project/satsgate-mcp/) 0.14.x |
 
 OpenAPI: [https://api.satsgate.org/openapi.json](https://api.satsgate.org/openapi.json). Works with core 0.20.3 or later.
 
@@ -178,8 +182,6 @@ The hosted gate is closed beta. Sites are approved manually.
 
 Not built yet:
 
-- Per-tool pricing for remote MCP servers is not in a published release yet. In the published proxy, a price applies to a route and method, so every tool call on `/mcp` costs the same.
-- Calling tools on a remote MCP server from `satsgate-mcp` is not in a published release yet.
 - A TypeScript SDK.
 
 ## Security and trust

@@ -4,7 +4,7 @@ Charge AI agents in Lightning and USDC on the same 402. Payments go straight to 
 
 A reverse proxy a merchant runs beside an existing HTTP API. The buyer hits the proxy. The proxy sells the request through [Satsgate](https://api.satsgate.org) and forwards only a paid request to the origin. The merchant does not write paywall code.
 
-The proxy is version **0.14.2**. It works with core 0.20.3 or later and with gate 0.15.2 or later. Default `mode: paywall` talks to the Satsgate core paywall (challenge, verify, status, charge, and x402 verify/settle). `mode: receipt` does not call core and does not use an API key. It checks `Satsgate-Receipt` with the site secret and forwards a successful check to the origin. The proxy does not sell prepaid balance and does not call the facilitator. Top up on the core with `POST /v1/topup/lightning` or `POST /v1/topup/usdc`. On api.satsgate.org a USDC top-up is Base mainnet USDC (a self-hosted core needs `SATSGATE_X402_CDP=1`; see [self-hosting](https://github.com/Mike-io-hash/satsgate/blob/main/docs/self-hosting.md)). The hosted gate is a separate program and only sells receipts. Buyer USDC on a proxied paywall route goes to the merchant's verified `payTo`. In receipt mode the buyer already paid the gate.
+The proxy is version **0.15.0**. It works with core 0.20.3 or later and with gate 0.15.2 or later. Default `mode: paywall` talks to the Satsgate core paywall (challenge, verify, status, charge, and x402 verify/settle). `mode: receipt` does not call core and does not use an API key. It checks `Satsgate-Receipt` with the site secret and forwards a successful check to the origin. The proxy does not sell prepaid balance and does not call the facilitator. Top up on the core with `POST /v1/topup/lightning` or `POST /v1/topup/usdc`. On api.satsgate.org a USDC top-up is Base mainnet USDC (a self-hosted core needs `SATSGATE_X402_CDP=1`; see [self-hosting](https://github.com/Mike-io-hash/satsgate/blob/main/docs/self-hosting.md)). The hosted gate is a separate program and only sells receipts. Buyer USDC on a proxied paywall route goes to the merchant's verified `payTo`. In receipt mode the buyer already paid the gate.
 
 ## Install
 
@@ -21,10 +21,10 @@ uvx --env-file .env satsgate-proxy --config satsgate-proxy.yaml
 or
 
 ```bash
-docker pull ghcr.io/mike-io-hash/satsgate-proxy:0.14.2
+docker pull ghcr.io/mike-io-hash/satsgate-proxy:0.15.0
 ```
 
-`satsgate init --docker` writes a compose file for that image. The minor tag is `ghcr.io/mike-io-hash/satsgate-proxy:0.14`.
+`satsgate init --docker` writes a compose file for that image. The minor tag is `ghcr.io/mike-io-hash/satsgate-proxy:0.15`.
 
 ## USDC payments: Base network only
 
@@ -66,7 +66,7 @@ Satsgate never custodies, receives, forwards, or refunds buyer funds. The USDC m
    uvx --env-file .env satsgate-proxy --config satsgate-proxy.yaml
    ```
 
-   Buyers use the proxy's published port. `GET /healthz` is the proxy (`{"ok":true,"component":"satsgate-proxy","version":"0.14.2"}`). It is not forwarded.
+   Buyers use the proxy's published port. `GET /healthz` is the proxy (`{"ok":true,"component":"satsgate-proxy","version":"0.15.0"}`). It is not forwarded.
 
    Startup logs `key fp` and 12 hex characters. That is the start of SHA-256 of the API key. It is not a prefix of the key, and the key itself is not written to the log.
 
@@ -119,7 +119,7 @@ Core **429** (`buyer_rate_limited`, `too_many_open_challenges_for_buyer`, `rate_
 
 First match wins. Anything that is not a free path or a route is **404**. A path that matches with the wrong method is **405** and does not mint an invoice. `OPTIONS` is not special: list it, or put the path in `free_paths`, if a browser must call it.
 
-A request path with a `.` or `..` segment, also when percent-encoded (such as `%2e%2e`), a backslash, or an encoded slash or backslash (`%2F`, `%5C`) is **404** as well. It is checked before free paths and routes, so such a path never reaches the origin. This check is not in a published release yet.
+A request path with a `.` or `..` segment, also when percent-encoded (such as `%2e%2e`), a backslash, or an encoded slash or backslash (`%2F`, `%5C`) is **404** as well. It is checked before free paths and routes, so such a path never reaches the origin. This check was added in 0.15.0.
 
 | `access` | Core policy | Meaning |
 | --- | --- | --- |
@@ -135,7 +135,7 @@ A request path with a `.` or `..` segment, also when percent-encoded (such as `%
 
 ## MCP servers
 
-Not in a published release yet. The published 0.14.2 does not read MCP; this section describes the code on the main branch.
+Added in 0.15.0. Earlier versions do not read MCP, so one price covers the whole route.
 
 ```yaml
 routes:
@@ -368,7 +368,7 @@ A retry of the same token takes another use when the bundle still has one. A `pe
 
 ## Contributors' note
 
-From a checkout: `pip install -e proxy`. Build the image from the repo root with `docker build -f proxy/Dockerfile -t satsgate-proxy:0.14.2 .`, or `docker compose -f proxy/docker-compose.yml up --build`.
+From a checkout: `pip install -e proxy`. Build the image from the repo root with `docker build -f proxy/Dockerfile -t satsgate-proxy:0.15.0 .`, or `docker compose -f proxy/docker-compose.yml up --build`.
 
 ## Mainnet check with a small payment
 

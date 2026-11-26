@@ -628,6 +628,7 @@ def _predicate_rows():
     rows.append(pytest.param(b"/", False, id="pt9-root"))
     rows.append(pytest.param(b"/a?x=/../b", False, id="pt9-query"))
     wide = b"/" + b"%25" * 5461
+    assert len(wide) == 16 * 1024
     rows.append(pytest.param(wide, False, id="pt9-wide"))
     return rows
 
@@ -636,8 +637,6 @@ def _predicate_rows():
 def test_pt_9_predicate_table(raw: bytes, expected: bool) -> None:
     from satsgate_proxy.match import unsafe_request_path
 
-    if len(raw) == 16 * 1024:
-        assert len(raw) == 16 * 1024
     assert unsafe_request_path(raw) is expected
 
 

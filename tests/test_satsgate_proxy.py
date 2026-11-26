@@ -259,7 +259,7 @@ def test_example_config_loads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_versions() -> None:
-    assert __version__ == "0.14.2"
+    assert __version__ == "0.15.0"
     assert 'APP_VERSION = "0.20.4"' in (ROOT / "app" / "config.py").read_text(encoding="utf-8")
     compose = (ROOT / "proxy" / "docker-compose.yml").read_text(encoding="utf-8")
     assert f"image: satsgate-proxy:{__version__}" in compose
@@ -456,7 +456,7 @@ def test_health_and_free_and_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     with _client(settings, world) as client:
         health = client.get("/healthz")
         assert health.status_code == 200
-        assert health.json() == {"ok": True, "component": "satsgate-proxy", "version": "0.14.2"}
+        assert health.json() == {"ok": True, "component": "satsgate-proxy", "version": "0.15.0"}
         assert client.head("/healthz").status_code == 200
         free = client.get("/health", headers={"Authorization": "Bearer keep-me", "X-Satsgate-Payment-Hash": "forged"})
         missing = client.get("/nope")

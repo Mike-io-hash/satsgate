@@ -1,6 +1,6 @@
 [project]
 name = "satsgate-proxy"
-version = "0.14.2"
+version = "0.15.0"
 description = "Charge AI agents in Lightning and USDC on the same 402. Payments go straight to your wallet. 500 free unlocks a month."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-`satsgate-proxy` can price MCP routes per tool. This is not in a published release yet.
+## [Package releases] - 2026-11-26
+
+`satsgate-proxy` 0.15.0 (and the image `ghcr.io/mike-io-hash/satsgate-proxy:0.15.0`), `satsgate-mcp` 0.14.0, and `satsgate` 0.1.3. `satsgate-sdk` stays 0.10.1.
+
+Core stays 0.20.4 and the hosted gate 0.15.2. No production change.
+
+`satsgate` 0.1.3 requires `satsgate-proxy` 0.15 and, with the `mcp` extra, `satsgate-mcp` 0.14. `satsgate init --docker` writes the 0.15.0 image.
+
+`satsgate-proxy` 0.15.0 can price MCP routes per tool.
 
 - Only `tools/call` is charged, and the price depends on the tool name.
 - Other MCP messages are forwarded free and signed.
@@ -19,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An x402 payment can be sent in `params._meta["x402/payment"]` of the `tools/call`. The proxy removes it before the request reaches the origin, and returns the settlement in `result._meta["x402/payment-response"]` and in the `PAYMENT-RESPONSE` header.
 - A Lightning payment on an MCP route still uses the `Authorization: L402` header.
 
-`satsgate-mcp` can call tools on a remote MCP server. This is not in a published release yet.
+`satsgate-mcp` 0.14.0 can call tools on a remote MCP server.
 
 - `remote_list_tools` lists the tools of a remote MCP server. It never calls a tool and never pays.
 - `remote_call_tool` calls one tool. It speaks both the session handshake and the 2026-07-28 protocol, and reads the price from an HTTP 402 or from the in-band price notice.
@@ -29,7 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Paid retries of `pay_and_fetch` and `check_payment` keep the `Accept` header of the first request.
 
 ### Security
-- `satsgate-proxy`: a request path with a `.` or `..` segment, also when percent-encoded, a backslash, or an encoded slash or backslash is now 404 before free paths and routes are matched. Such a path could otherwise reach a different path on the origin than the one the proxy matched. This is not in a published release yet.
+- `satsgate-proxy`: a request path with a `.` or `..` segment, also when percent-encoded, a backslash, or an encoded slash or backslash is now 404 before free paths and routes are matched. Such a path could otherwise reach a different path on the origin than the one the proxy matched.
 
 ## [0.20.4] - 2026-11-19
 

@@ -4,7 +4,7 @@ Charge AI agents in Lightning and USDC on the same 402. Payments go straight to 
 
 A buyer-side MCP server. An agent (Claude Desktop, Cursor, or any stdio MCP client) can see the price of a Satsgate-paywalled URL, pay it, and read the response.
 
-This package is version **0.13.1**. It talks to whatever URL returned the 402. Works with core 0.20.3 or later. The self-hosted proxy is **0.14.2**. Works with gate 0.15.2 or later. On a gate host (`SATSGATE_MCP_GATE_HOSTS`, default `gate.satsgate.org`) `pay_and_fetch` pays the gate, keeps the receipt, and repeats the request at `redeem_url` when that host is on the allowlist. The receipt is not logged. A stored receipt is returned by `challenge_status`. The body sent to a gate host is not forwarded. A 402 may offer Lightning, x402 (USDC on Base), or both. One 402 lists one USDC network. `list_sites` includes a public route priced only in USD, with `price_currency` and `price_usd_atomic`. This process cannot load a seller's prepaid service balance, and it does not hold a buyer private key. An account tops up on the core with `POST /v1/topup/lightning` or `POST /v1/topup/usdc`. On api.satsgate.org a USDC top-up is Base mainnet USDC (a self-hosted core needs `SATSGATE_X402_CDP=1`; see [self-hosting](https://github.com/Mike-io-hash/satsgate/blob/main/docs/self-hosting.md)). The USDC path is not an MCP tool.
+This package is version **0.14.0**. It talks to whatever URL returned the 402. Works with core 0.20.3 or later. The self-hosted proxy is **0.15.0**. Works with gate 0.15.2 or later. On a gate host (`SATSGATE_MCP_GATE_HOSTS`, default `gate.satsgate.org`) `pay_and_fetch` pays the gate, keeps the receipt, and repeats the request at `redeem_url` when that host is on the allowlist. The receipt is not logged. A stored receipt is returned by `challenge_status`. The body sent to a gate host is not forwarded. A 402 may offer Lightning, x402 (USDC on Base), or both. One 402 lists one USDC network. `list_sites` includes a public route priced only in USD, with `price_currency` and `price_usd_atomic`. This process cannot load a seller's prepaid service balance, and it does not hold a buyer private key. An account tops up on the core with `POST /v1/topup/lightning` or `POST /v1/topup/usdc`. On api.satsgate.org a USDC top-up is Base mainnet USDC (a self-hosted core needs `SATSGATE_X402_CDP=1`; see [self-hosting](https://github.com/Mike-io-hash/satsgate/blob/main/docs/self-hosting.md)). The USDC path is not an MCP tool.
 
 ## Install
 
@@ -116,7 +116,7 @@ Both `SATSGATE_MCP_MAX_PAYMENT_USD` and `SATSGATE_MCP_DAILY_MAX_USD` must be set
 
 ## Remote MCP servers
 
-`remote_call_tool` calls one tool on a remote MCP server, such as a route of `satsgate-proxy` priced per tool. It is not in a published release yet.
+`remote_call_tool` calls one tool on a remote MCP server, such as a route of `satsgate-proxy` priced per tool. Added in 0.14.0.
 
 Each call opens its own connection. The client first tries the 2026-07-28 `server/discover`. If the server does not answer it, the client uses `initialize` and the session the server assigns, and ends that session after the call. Then it lists the tools. The handshake and the list are never paid. A tool the server does not list is not called.
 
