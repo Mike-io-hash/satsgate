@@ -103,8 +103,8 @@ def test_t_b_4_3_public_text_does_not_name_rate_sources() -> None:
 def test_t_b_4_4_versions_match() -> None:
     proxy_project = tomllib.loads(_text(ROOT / "proxy" / "pyproject.toml"))
     proxy_init = _text(ROOT / "proxy" / "src" / "satsgate_proxy" / "__init__.py")
-    assert proxy_project["project"]["version"] == "0.14.2"
-    assert '__version__ = "0.14.2"' in proxy_init
+    assert proxy_project["project"]["version"] == "0.15.0"
+    assert '__version__ = "0.15.0"' in proxy_init
 
     sdk_project = tomllib.loads(_text(ROOT / "sdk" / "python" / "pyproject.toml"))
     sdk_init = _text(ROOT / "sdk" / "python" / "src" / "satsgate_sdk" / "__init__.py")
@@ -113,8 +113,8 @@ def test_t_b_4_4_versions_match() -> None:
 
     mcp_project = tomllib.loads(_text(ROOT / "mcp" / "pyproject.toml"))
     mcp_init = _text(ROOT / "mcp" / "src" / "satsgate_mcp" / "__init__.py")
-    assert mcp_project["project"]["version"] == "0.13.1"
-    assert '__version__ = "0.13.1"' in mcp_init
+    assert mcp_project["project"]["version"] == "0.14.0"
+    assert '__version__ = "0.14.0"' in mcp_init
 
     assert 'APP_VERSION = "0.20.4"' in _text(ROOT / "app" / "config.py")
     assert '__version__ = "0.15.2"' in _text(ROOT / "gate" / "src" / "satsgate_gate" / "__init__.py")

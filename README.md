@@ -54,7 +54,7 @@ satsgate init --docker
 docker compose -f docker-compose.satsgate.yml up
 ```
 
-The image is `ghcr.io/mike-io-hash/satsgate-proxy:0.14.x`. The compose file pins the proxy version you installed.
+The image is `ghcr.io/mike-io-hash/satsgate-proxy:0.15.x`. The compose file pins the proxy version you installed.
 
 Copy an origin HMAC check with `--framework fastapi`, `express`, or `nginx`. A client that can reach the origin directly must fail closed.
 
@@ -163,8 +163,8 @@ Paying also needs `SATSGATE_MCP_NWC_URI` or the USD caps in that env block. Wall
 | --- | --- |
 | `satsgate` | [PyPI](https://pypi.org/project/satsgate/) 0.1.x |
 | `satsgate-sdk` | [PyPI](https://pypi.org/project/satsgate-sdk/) 0.10.x |
-| `satsgate-proxy` | [PyPI](https://pypi.org/project/satsgate-proxy/) 0.14.x and [GHCR](https://github.com/Mike-io-hash/satsgate/pkgs/container/satsgate-proxy) |
-| `satsgate-mcp` | [PyPI](https://pypi.org/project/satsgate-mcp/) 0.13.x |
+| `satsgate-proxy` | [PyPI](https://pypi.org/project/satsgate-proxy/) 0.15.x and [GHCR](https://github.com/Mike-io-hash/satsgate/pkgs/container/satsgate-proxy) |
+| `satsgate-mcp` | [PyPI](https://pypi.org/project/satsgate-mcp/) 0.14.x |
 
 OpenAPI: [https://api.satsgate.org/openapi.json](https://api.satsgate.org/openapi.json). Works with core 0.20.3 or later.
 

@@ -60,7 +60,7 @@ def test_t_d_11_2_published_install_text_replaced_the_forthcoming_lines() -> Non
             assert phrase not in text, f"{phrase} in {path}"
 
 
-_CURRENT = {"0.20.3", "0.15.2", "0.14.2", "0.13.1", "0.10.1", "0.1.2"}
+_CURRENT = {"0.20.3", "0.15.2", "0.15.0", "0.14.0", "0.10.1", "0.1.3"}
 _VERSION_FILES = (
     "README.md",
     "CUSTOMER_QUICKSTART.md",
@@ -160,7 +160,7 @@ def test_i5_proxy_and_mcp_publish_an_install_section() -> None:
     assert "## Install" in proxy
     assert "pip install satsgate-proxy" in proxy
     assert "uvx --env-file .env satsgate-proxy --config" in proxy
-    assert "docker pull ghcr.io/mike-io-hash/satsgate-proxy:0.14.2" in proxy
+    assert "docker pull ghcr.io/mike-io-hash/satsgate-proxy:0.15.0" in proxy
     assert "## Install" in mcp
     assert "pip install satsgate-mcp" in mcp
     assert "satsgate-mcp" in mcp

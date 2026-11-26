@@ -92,16 +92,16 @@ def test_t_c_1_3_wheels_declare_apache_and_cli_license_matches(tmp_path: Path) -
 def test_t_c_1_4_versions_match() -> None:
     """Pinned versions. T-D.1.3 below reuses this instead of copying it."""
     projects = {path: project for path, project in _projects()}
-    assert projects[ROOT / "cli" / "pyproject.toml"]["version"] == "0.1.2"
-    assert '__version__ = "0.1.2"' in _text(ROOT / "cli" / "src" / "satsgate" / "__init__.py")
+    assert projects[ROOT / "cli" / "pyproject.toml"]["version"] == "0.1.3"
+    assert '__version__ = "0.1.3"' in _text(ROOT / "cli" / "src" / "satsgate" / "__init__.py")
     assert projects[ROOT / "sdk" / "python" / "pyproject.toml"]["version"] == "0.10.1"
     assert '__version__ = "0.10.1"' in _text(ROOT / "sdk" / "python" / "src" / "satsgate_sdk" / "__init__.py")
-    assert projects[ROOT / "proxy" / "pyproject.toml"]["version"] == "0.14.2"
-    assert '__version__ = "0.14.2"' in _text(ROOT / "proxy" / "src" / "satsgate_proxy" / "__init__.py")
+    assert projects[ROOT / "proxy" / "pyproject.toml"]["version"] == "0.15.0"
+    assert '__version__ = "0.15.0"' in _text(ROOT / "proxy" / "src" / "satsgate_proxy" / "__init__.py")
     assert 'APP_VERSION = "0.20.4"' in _text(ROOT / "app" / "config.py")
     assert '__version__ = "0.15.2"' in _text(ROOT / "gate" / "src" / "satsgate_gate" / "__init__.py")
-    assert projects[ROOT / "mcp" / "pyproject.toml"]["version"] == "0.13.1"
-    assert '__version__ = "0.13.1"' in _text(ROOT / "mcp" / "src" / "satsgate_mcp" / "__init__.py")
+    assert projects[ROOT / "mcp" / "pyproject.toml"]["version"] == "0.14.0"
+    assert '__version__ = "0.14.0"' in _text(ROOT / "mcp" / "src" / "satsgate_mcp" / "__init__.py")
 
 
 def test_t_d_1_3_pyproject_version_equals_dunder_version() -> None:
@@ -134,9 +134,9 @@ def test_t_c_1_6_installed_script_and_module_print_the_version(tmp_path: Path) -
     from satsgate_proxy import __version__ as proxy_version
     from satsgate_sdk import __version__ as sdk_version
 
-    assert satsgate.__version__ == "0.1.2"
+    assert satsgate.__version__ == "0.1.3"
     assert sdk_version == "0.10.1"
-    assert proxy_version == "0.14.2"
+    assert proxy_version == "0.15.0"
     if shutil.which("python3") is None:
         pytest.skip("cannot create a venv: python3 is not on PATH")
     wheels = tmp_path / "wheels"
@@ -170,9 +170,9 @@ def test_t_c_1_6_installed_script_and_module_print_the_version(tmp_path: Path) -
     assert module.returncode == 0, module.stderr
     assert command.returncode == 0, command.stderr
     assert module.stdout == command.stdout
-    assert module.stdout.startswith("satsgate 0.1.2\n")
+    assert module.stdout.startswith("satsgate 0.1.3\n")
     assert "satsgate-sdk 0.10.1\n" in module.stdout
-    assert "satsgate-proxy 0.14.2\n" in module.stdout
+    assert "satsgate-proxy 0.15.0\n" in module.stdout
 
 
 def test_t_d_7_1_pip_install_failure_is_a_failure(tmp_path: Path) -> None:
