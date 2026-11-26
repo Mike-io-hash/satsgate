@@ -104,6 +104,8 @@ Three ways to integrate:
 2. The Python SDK, if you mint challenges in your own code.
 3. The hosted gate, which sells a signed receipt for an approved site.
 
+Per-tool pricing for remote MCP servers: put the proxy in front of the server and add `mcp` to the route. Only `tools/call` is charged, at the price of that tool. The handshake, the tool list, and other MCP messages pass free. See [MCP servers](proxy/README.md#mcp-servers).
+
 ### Hosted gate (x402)
 
 The hosted gate at `https://gate.satsgate.org` is in closed beta. Sites are approved manually. The buyer pays the seller's wallet, then repeats the request at the seller with `Satsgate-Receipt`. See [docs/api.md](docs/api.md).
@@ -155,6 +157,8 @@ or `pip install "satsgate[mcp]"`.
 
 Paying also needs `SATSGATE_MCP_NWC_URI` or the USD caps in that env block. Wallet setup is in [mcp/README.md](mcp/README.md).
 
+`remote_list_tools` and `remote_call_tool` call tools on a remote MCP server and pay its price with the same caps. See [Remote MCP servers](mcp/README.md#remote-mcp-servers).
+
 `satsgate-mcp --help` lists the environment variables it reads and exits. `--version` prints the package version. With no arguments it speaks MCP on stdio.
 
 ## Packages
@@ -178,8 +182,6 @@ The hosted gate is closed beta. Sites are approved manually.
 
 Not built yet:
 
-- Per-tool pricing for remote MCP servers is not in a published release yet. In the published proxy, a price applies to a route and method, so every tool call on `/mcp` costs the same.
-- Calling tools on a remote MCP server from `satsgate-mcp` is not in a published release yet.
 - A TypeScript SDK.
 
 ## Security and trust

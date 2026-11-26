@@ -119,7 +119,7 @@ Core **429** (`buyer_rate_limited`, `too_many_open_challenges_for_buyer`, `rate_
 
 First match wins. Anything that is not a free path or a route is **404**. A path that matches with the wrong method is **405** and does not mint an invoice. `OPTIONS` is not special: list it, or put the path in `free_paths`, if a browser must call it.
 
-A request path with a `.` or `..` segment, also when percent-encoded (such as `%2e%2e`), a backslash, or an encoded slash or backslash (`%2F`, `%5C`) is **404** as well. It is checked before free paths and routes, so such a path never reaches the origin. This check is not in a published release yet.
+A request path with a `.` or `..` segment, also when percent-encoded (such as `%2e%2e`), a backslash, or an encoded slash or backslash (`%2F`, `%5C`) is **404** as well. It is checked before free paths and routes, so such a path never reaches the origin. This check was added in 0.15.0.
 
 | `access` | Core policy | Meaning |
 | --- | --- | --- |
@@ -135,7 +135,7 @@ A request path with a `.` or `..` segment, also when percent-encoded (such as `%
 
 ## MCP servers
 
-Not in a published release yet. The published 0.14.2 does not read MCP; this section describes the code on the main branch.
+Added in 0.15.0. Earlier versions do not read MCP, so one price covers the whole route.
 
 ```yaml
 routes:

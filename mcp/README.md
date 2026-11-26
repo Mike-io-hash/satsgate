@@ -116,7 +116,7 @@ Both `SATSGATE_MCP_MAX_PAYMENT_USD` and `SATSGATE_MCP_DAILY_MAX_USD` must be set
 
 ## Remote MCP servers
 
-`remote_call_tool` calls one tool on a remote MCP server, such as a route of `satsgate-proxy` priced per tool. It is not in a published release yet.
+`remote_call_tool` calls one tool on a remote MCP server, such as a route of `satsgate-proxy` priced per tool. Added in 0.14.0.
 
 Each call opens its own connection. The client first tries the 2026-07-28 `server/discover`. If the server does not answer it, the client uses `initialize` and the session the server assigns, and ends that session after the call. Then it lists the tools. The handshake and the list are never paid. A tool the server does not list is not called.
 

@@ -2778,7 +2778,7 @@ def test_rc_12_1_docs_describe_the_remote_tools() -> None:
     assert "| `remote_call_tool` | Calls one tool on a remote MCP server. Reads the price from an HTTP 402 or from the in-band price notice, then pays with the same modes and caps as `pay_and_fetch`. See [Remote MCP servers](#remote-mcp-servers). |" in readme
     section = readme.split("## Remote MCP servers", 1)[1].split("## NWC", 1)[0]
     for sentence in (
-        "It is not in a published release yet.",
+        "Added in 0.14.0.",
         "The handshake and the list are never paid.",
         "A tool the server does not list is not called.",
         "Do not call `check_payment` for a remote tool.",
@@ -2789,8 +2789,8 @@ def test_rc_12_1_docs_describe_the_remote_tools() -> None:
     ):
         assert sentence in section
     changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
-    unreleased, _security = changelog.split("### Security", 1)
-    assert "`satsgate-mcp` can call tools on a remote MCP server. This is not in a published release yet." in unreleased
-    assert "- Paid retries of `pay_and_fetch` and `check_payment` keep the `Accept` header of the first request." in unreleased
+    release = changelog.split("## [Package releases] - ", 1)[1].split("### Security", 1)[0]
+    assert "`satsgate-mcp` 0.14.0 can call tools on a remote MCP server." in release
+    assert "- Paid retries of `pay_and_fetch` and `check_payment` keep the `Accept` header of the first request." in release
     root_readme = (root / "README.md").read_text(encoding="utf-8")
-    assert "- Calling tools on a remote MCP server from `satsgate-mcp` is not in a published release yet." in root_readme
+    assert "not in a published release yet" not in root_readme
