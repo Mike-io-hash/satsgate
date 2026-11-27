@@ -66,7 +66,7 @@ Lightning has no test network. A paid Lightning request moves real sats to the m
 uvx --env-file .env satsgate-proxy --config satsgate-proxy.yaml
 ```
 
-`satsgate` 0.1.3. `--docker` writes `docker-compose.satsgate.yml` and prints `docker compose -f docker-compose.satsgate.yml up`. The compose file uses the public image `ghcr.io/mike-io-hash/satsgate-proxy:0.15.0`. The generated service listens on `0.0.0.0`; the YAML written for `uvx` stays on `127.0.0.1`.
+`satsgate` 0.1.4. `--docker` writes `docker-compose.satsgate.yml` and prints `docker compose -f docker-compose.satsgate.yml up`. The compose file uses the public image `ghcr.io/mike-io-hash/satsgate-proxy:0.15.1`. The generated service listens on `0.0.0.0`; the YAML written for `uvx` stays on `127.0.0.1`.
 
 ## Contributors' note
 

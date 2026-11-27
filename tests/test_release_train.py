@@ -32,9 +32,9 @@ def _check_tag():
 def test_rl_1_1_release_tags_match_the_tree() -> None:
     check_tag = _check_tag()
     expected = {
-        "proxy-v0.15.0": ("satsgate-proxy", "0.15.0"),
-        "mcp-v0.14.0": ("satsgate-mcp", "0.14.0"),
-        "satsgate-v0.1.3": ("satsgate", "0.1.3"),
+        "proxy-v0.15.1": ("satsgate-proxy", "0.15.1"),
+        "mcp-v0.14.1": ("satsgate-mcp", "0.14.1"),
+        "satsgate-v0.1.4": ("satsgate", "0.1.4"),
         "sdk-v0.10.1": ("satsgate-sdk", "0.10.1"),
     }
     for tag, (dist, version) in expected.items():
@@ -47,8 +47,8 @@ def test_rl_1_2_satsgate_pins_the_new_minors() -> None:
     import tomllib
 
     project = tomllib.loads((ROOT / "cli" / "pyproject.toml").read_text(encoding="utf-8"))["project"]
-    assert project["dependencies"] == ["satsgate-sdk>=0.10.1,<0.11", "satsgate-proxy>=0.15.0,<0.16"]
-    assert project["optional-dependencies"]["mcp"] == ["satsgate-mcp>=0.14.0,<0.15"]
+    assert project["dependencies"] == ["satsgate-sdk>=0.10.1,<0.11", "satsgate-proxy>=0.15.1,<0.16"]
+    assert project["optional-dependencies"]["mcp"] == ["satsgate-mcp>=0.14.1,<0.15"]
 
 
 def test_rl_1_3_current_docs_do_not_call_released_features_unreleased() -> None:
@@ -61,9 +61,9 @@ def test_rl_1_3_current_docs_do_not_call_released_features_unreleased() -> None:
 def test_rl_1_4_changelog_promotes_the_unreleased_entry() -> None:
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     unreleased = text.split("## [Unreleased]\n", 1)[1]
-    assert unreleased.lstrip("\n").startswith("## [Package releases] - ")
+    assert unreleased.lstrip("\n").startswith("## [Package patch releases] - ")
     entry = unreleased.split("## [0.20.4]", 1)[0]
     assert "not in a published release" not in entry
-    assert "`satsgate-proxy` 0.15.0" in entry
-    assert "`satsgate-mcp` 0.14.0" in entry
-    assert "`satsgate` 0.1.3" in entry
+    assert "`satsgate-proxy` 0.15.1" in entry
+    assert "`satsgate-mcp` 0.14.1" in entry
+    assert "`satsgate` 0.1.4" in entry
