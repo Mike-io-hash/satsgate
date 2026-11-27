@@ -1376,7 +1376,7 @@ def test_rc_5_6_human_settlement_stores_a_token_without_a_preimage(tmp_path: Pat
     done = asyncio.run(buyer.remote_call_tool(URL, "echo"))
     token = buyer.store.token_for(_key())
     assert done.payload["detail"] == _D_SETTLED
-    assert done.payload["paid"] is False
+    assert done.payload["paid"] is True
     assert done.payload["paid_with"] == "lightning"
     assert token["preimage"] is None
     assert token["uses_remaining"] == 4

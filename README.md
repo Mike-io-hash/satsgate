@@ -20,7 +20,7 @@ uvx satsgate init
 
 ## Why Satsgate
 
-- No node to run. Payouts go to a Lightning Address. LUD-21 lets the buyer pay from any wallet.
+- No node to run. Payouts go to a Lightning Address. An agent pays and sends the preimage. A person who pays the QR from a wallet that does not show the preimage needs a Lightning Address that advertises LUD-21 verify. `satsgate init` checks yours.
 - No custody. The buyer pays the seller's wallet. Satsgate does not hold, receive, forward, or refund that payment.
 - Lightning and USDC on the same 402, with L402 and x402 v2. Works with Lightning Labs `lnget` and Alby `fetch402`. The client table is in [docs/api.md](docs/api.md).
 - Plug in the proxy, or call the API. The core, the proxy, the SDK, and the buyer MCP are open source.

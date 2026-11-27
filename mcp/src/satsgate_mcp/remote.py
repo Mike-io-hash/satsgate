@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -29,6 +30,8 @@ from satsgate_mcp.nwc import NwcError
 from satsgate_mcp.qr import invoice_qr
 from satsgate_mcp.urls import validate_url
 from satsgate_mcp.x402 import payment_response_fields, payment_response_object
+
+log = logging.getLogger("satsgate_mcp")
 
 _MODERN = "2026-07-28"
 _PROPOSED = "2025-11-25"
@@ -58,6 +61,10 @@ _TOO_LARGE_BASE = "The response is above SATSGATE_MCP_MAX_BODY_BYTES."
 _INVALID_RESPONSE = _INVALID_BASE + _SUFFIX_FREE
 _REDIRECT = "The server redirected. This client does not follow redirects."
 _TOO_LARGE = _TOO_LARGE_BASE + _SUFFIX_FREE
+_DISCOVER_FALLBACK = (
+    "server/discover at %s%s answered HTTP %s. Using initialize instead. "
+    "Servers on an earlier MCP version answer this way. It is not an error."
+)
 _LIST_DETAIL = "Listing tools is free. A price, when there is one, is shown when the tool is called."
 _NWC_MISSING = (
     "SATSGATE_MCP_NWC_URI is not set. Use mode human, or set the wallet URI in the environment. "
@@ -520,6 +527,8 @@ class _Remote:
             return True
         if _disjoint_modern(message):
             raise BuyerError("incompatible_protocol", _INCOMPATIBLE)
+        parts = urlsplit(conn.url)
+        log.info(_DISCOVER_FALLBACK, parts.hostname or "", parts.path, raw.status)
         return False
 
     async def _legacy(self, conn: _Conn) -> None:
@@ -867,9 +876,9 @@ class _Remote:
                     ctx,
                     found["result"],
                     detail=_D_SETTLED,
-                    paid=False,
+                    paid=True,
                     paid_with="lightning",
-                    paid_sats=None,
+                    paid_sats=challenge.amount_sats,
                     reused=False,
                     payment_hash=challenge.payment_hash,
                     uses=uses,
@@ -902,7 +911,7 @@ class _Remote:
             access_until = None if challenge.access_seconds is None else self.buyer._now() + int(challenge.access_seconds)
             self._save_token(ctx, challenge, preimage=None, uses_remaining=uses, access_until=access_until)
             self.buyer.store.delete_quote(challenge.payment_hash)
-            return Presentation(self._from_class(ctx, found, paid=False, paid_with="lightning", paid_sats=None, token_kept=True, uses=uses, access_until=access_until, payment_hash=challenge.payment_hash))
+            return Presentation(self._from_class(ctx, found, paid=True, paid_with="lightning", paid_sats=challenge.amount_sats, token_kept=True, uses=uses, access_until=access_until, payment_hash=challenge.payment_hash))
         return Presentation(self._from_class(ctx, found, paid=False, paid_with=None, paid_sats=None, token_kept=False))
 
     async def _pay_lightning(self, ctx: "_Call", challenge: Challenge) -> Presentation:

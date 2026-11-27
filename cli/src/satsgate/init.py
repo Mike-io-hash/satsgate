@@ -8,6 +8,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import re
 import secrets
 import sys
 from datetime import datetime, timezone
@@ -29,6 +30,17 @@ from satsgate import files
 DEFAULT_API = "https://api.satsgate.org"
 _LOCAL_HTTP = frozenset({"localhost", "127.0.0.1", "::1"})
 _HTTP_LOGGERS = ("httpx", "httpcore", "httpx2", "httpcore2")
+_MACAROON = re.compile(r'macaroon="([^"]+)"')
+_LUD21_TIMEOUT = 10.0
+_LUD21_YES = "The Lightning Address advertises LUD-21 verify. A person can pay the QR from any Lightning wallet."
+_LUD21_NO = (
+    "The Lightning Address does not advertise LUD-21 verify. Agents can still pay: they send the preimage. "
+    "A person who pays the QR from a wallet that does not show the preimage cannot finish. "
+    "To accept those payments, use a Lightning Address that advertises LUD-21 verify."
+)
+_LUD21_UNKNOWN = "LUD-21 verify could not be checked. Nothing was paid. Run satsgate init again to check."
+
+
 def start_command(config: str = "satsgate-proxy.yaml") -> str:
     return f"uvx --env-file .env satsgate-proxy --config {config}"
 
@@ -90,6 +102,9 @@ class _Run:
     connect_expires: int | None = None
     route: dict[str, Any] | None = None
     test_402: dict[str, Any] | None = None
+    lud21: dict[str, Any] | None = None
+    probe_payment_hash: str = ""
+    probe_macaroon: str = ""
     start_command: str | None = None
     next_steps: list[str] = field(default_factory=list)
 
@@ -210,6 +225,7 @@ def _payload(run: _Run) -> dict[str, Any]:
         "files": run.files,
         "route": run.route,
         "test_402": run.test_402,
+        "lud21": run.lud21,
         "start_command": run.start_command,
         "next_steps": list(run.next_steps),
         "warnings": list(run.warnings),
@@ -839,6 +855,14 @@ def _probe(
                 return False
             rail_x402 = True
         run.test_402 = {"ok": True, "rail_lightning": True, "rail_x402": rail_x402, "debited": False}
+        found = _MACAROON.search(challenge)
+        try:
+            payment_hash = response.json().get("payment_hash")
+        except ValueError:
+            payment_hash = None
+        if found and isinstance(payment_hash, str):
+            run.probe_macaroon = found.group(1)
+            run.probe_payment_hash = payment_hash
         return True
     if response.status_code == 502:
         diagnostic = _client(settings.core_base_url, settings.api_key, sdk_transport)
@@ -869,6 +893,37 @@ def _probe(
         status="failed",
     )
     return False
+
+
+def _check_lud21(run: _Run, settings: Settings, transport: Any) -> None:
+    """One status read of the unpaid test challenge. It never pays, never debits, and never fails init."""
+    state: bool | None = None
+    if run.probe_payment_hash and run.probe_macaroon:
+        try:
+            with httpx.Client(timeout=_LUD21_TIMEOUT, transport=transport) as http:
+                response = http.get(
+                    f"{settings.core_base_url.rstrip('/')}/v1/paywall/status/{run.probe_payment_hash}",
+                    params={"expected_resource": "route:first", "consume": "false", "charge": "false"},
+                    headers={"X-Api-Key": settings.api_key, "Authorization": f"L402 {run.probe_macaroon}"},
+                )
+            body = response.json()
+        except (httpx.HTTPError, ValueError):
+            body = None
+        if isinstance(body, dict):
+            if response.status_code == 200 and body.get("status") == "pending":
+                state = True
+            elif response.status_code == 401 and body.get("error") == "preimage_required":
+                state = False
+    run.probe_macaroon = ""
+    if state is True:
+        run.lud21 = {"supported": True, "detail": _LUD21_YES}
+        return
+    if state is False:
+        run.lud21 = {"supported": False, "detail": _LUD21_NO}
+        run.warnings.append("lud21_not_supported")
+        return
+    run.lud21 = {"supported": None, "detail": _LUD21_UNKNOWN}
+    run.warnings.append("lud21_not_checked")
 
 
 def _block_existing_outputs(
@@ -997,6 +1052,8 @@ def _finish_success(run: _Run, console: _Console) -> None:
             console.say(f"Proxy key {key_preview(run.api_key)} fp {key_fingerprint(run.api_key)}")
         if run.payee:
             console.say(f"Lightning Address {run.payee}")
+        if run.lud21:
+            console.say(str(run.lud21["detail"]))
         if run.terms_url:
             console.say(f"Terms {run.terms_url}")
         for step in run.next_steps:
@@ -1208,6 +1265,7 @@ def _execute(options: InitOptions, console: _Console, transport: Any, run: _Run)
             return
         if not _probe(run, settings, proxy_transport, sdk_transport, options.path):
             return
+        _check_lud21(run, settings, sdk_transport)
         if not _copy_snippets(run, root, console, options.framework or "none"):
             return
         if options.docker:

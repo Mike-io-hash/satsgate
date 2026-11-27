@@ -109,7 +109,7 @@ WWW-Authenticate: L402 macaroon="<standard base64>", invoice="<bolt11>"
 
 A paid retry is `Authorization: L402 <macaroon>:<64-hex-preimage>` (`LSAT` is accepted too). The proxy calls `POST /v1/paywall/verify` with `consume=true`.
 
-`Authorization: L402 <macaroon>` with no preimage calls `GET /v1/paywall/status/{payment_hash}?consume=true`. That is the phone-wallet path: the wallet pays the invoice and does not return a preimage. While the invoice is unpaid the proxy answers **402** `payment_pending` with `Retry-After` and does **not** mint a second invoice. Pending does not consume a use.
+`Authorization: L402 <macaroon>` with no preimage calls `GET /v1/paywall/status/{payment_hash}?consume=true`. That is the phone-wallet path: the wallet pays the invoice and does not return a preimage. While the invoice is unpaid the proxy answers **402** `payment_pending` with `Retry-After` and does **not** mint a second invoice. Pending does not consume a use. This path needs a payee Lightning Address that advertises LUD-21 verify. Without it, the proxy cannot confirm the payment: it answers a fresh **402** with `reason: preimage_required` and a new invoice. Do not pay that new invoice. Send `Authorization: L402 <macaroon>:<preimage>` for the invoice you already paid. `satsgate init` reports whether the address advertises LUD-21 verify.
 
 A token for another route, a used-up bundle, or an expired pass becomes a **fresh 402**, not 401, so a standard client can pay again. The body includes `reason` (`token_used_up`, `token_expired`, `resource mismatch`, and the other core reject strings).
 

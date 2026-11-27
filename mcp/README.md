@@ -118,13 +118,20 @@ Both `SATSGATE_MCP_MAX_PAYMENT_USD` and `SATSGATE_MCP_DAILY_MAX_USD` must be set
 
 `remote_call_tool` calls one tool on a remote MCP server, such as a route of `satsgate-proxy` priced per tool. Added in 0.14.0.
 
-Each call opens its own connection. The client first tries the 2026-07-28 `server/discover`. If the server does not answer it, the client uses `initialize` and the session the server assigns, and ends that session after the call. Then it lists the tools. The handshake and the list are never paid. A tool the server does not list is not called.
+Each call opens its own connection. The client first tries the 2026-07-28 `server/discover`. If the server does not answer it, the client uses `initialize` and the session the server assigns, and ends that session after the call. A server on an earlier MCP version can answer `server/discover` with an HTTP error such as 400. `satsgate-proxy` forwards that answer from the server. It is expected, not a failure. `satsgate-mcp` logs one INFO line on stderr that says so. The HTTP client libraries log only warnings. Then it lists the tools. The handshake and the list are never paid. A tool the server does not list is not called.
 
 An unpaid call to a priced tool gets the price either as an HTTP 402 or as an in-band price notice: a tool result with `isError: true` and the offer in `structuredContent`. Both are read the same way.
 
 - `mode=human` returns the invoice and the QR. Pay it, then call `remote_call_tool` again with the same `url` and `tool`. The same invoice is used until it expires. Do not call `check_payment` for a remote tool.
 - `mode=nwc` pays from the environment wallet if the sats caps allow it, then repeats the same call with `Authorization: L402 <macaroon>:<preimage>`.
 - `payment_signature` sends a `PAYMENT-SIGNATURE` from an external wallet inside the call, in `params._meta["x402/payment"]`. The USD caps apply. This process does not sign.
+
+Result fields:
+
+- `paid`: `true` when this call was paid: by the NWC wallet, by a `payment_signature`, or, in `mode=human`, by the person who paid the invoice before this call. `false` when nothing new was paid.
+- `paid_with`: `lightning` or `x402` when `paid` is `true`, otherwise `null`.
+- `paid_sats`: the invoice amount for a Lightning payment, otherwise `null`.
+- `reused_token`: `true` when the call used a stored token. Nothing new was paid.
 
 A call pays at most once. The token is stored per server URL and tool name, not per argument set, and is reused while it has uses or time. A failed tool call takes no use, so the token is kept and the next call retries with it. Parallel calls to the same tool wait for one another, so a token that covers several calls is paid once. This holds inside one `satsgate-mcp` process. Two processes that share a data directory are not coordinated.
 
