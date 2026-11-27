@@ -61,7 +61,12 @@ def test_rl_1_3_current_docs_do_not_call_released_features_unreleased() -> None:
 def test_rl_1_4_changelog_promotes_the_unreleased_entry() -> None:
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     unreleased = text.split("## [Unreleased]\n", 1)[1]
-    assert unreleased.lstrip("\n").startswith("## [Package patch releases] - ")
+    rest = unreleased.lstrip("\n")
+    assert rest.startswith("## [Terms] - 2026-11-27\n")
+    after_terms = rest.split("## [Terms] - 2026-11-27\n", 1)[1]
+    package_at = after_terms.find("## [Package patch releases] - ")
+    assert package_at != -1
+    assert "## [" not in after_terms[:package_at]
     entry = unreleased.split("## [0.20.4]", 1)[0]
     assert "not in a published release" not in entry
     assert "`satsgate-proxy` 0.15.1" in entry

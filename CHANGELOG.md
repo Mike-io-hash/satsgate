@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [Terms] - 2026-11-27
+
+The hosted-gate terms at `https://satsgate.org/terms` take effect on 2026-11-27. The previous terms stay at `/terms/2026-11-13`. Core stays 0.20.4 and the hosted gate 0.15.2. This release does not publish packages and does not turn auto-approve on.
+
+- The terms name the existing public contact for abuse reports and for a manual prepaid-balance credit claimed within about 30 days.
+- They state that a paid tool call on a remote MCP server is the same live unlock, that `satsgate init` opens the free test account, that a person paying a Lightning QR needs LUD-21 verify (otherwise USDC on Base or the payment preimage), and that USDC on Base uses x402 and is paid to the vendor's wallet.
+
 ## [Package patch releases] - 2026-11-27
 
 `satsgate-proxy` 0.15.1 (and the image `ghcr.io/mike-io-hash/satsgate-proxy:0.15.1`), `satsgate-mcp` 0.14.1, and `satsgate` 0.1.4. `satsgate-sdk` stays 0.10.1.

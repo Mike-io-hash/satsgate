@@ -112,7 +112,7 @@ WORDING_PATTERNS = (
     r"when the operator sets",
     r"after the operator has",
 )
-FROZEN_PARTS = ("docs/hosted-gate-terms.md", "docs/terms/", "tests/fixtures/terms-")
+FROZEN_PARTS = ("docs/terms/2026-11-13.md", "tests/fixtures/terms-")
 COMMENT_ROOTS = ("app", "cli", "sdk", "proxy", "mcp", "gate", "scripts", "web/connect/src")
 ACCENTS = set("áéíóúÁÉÍÓÚñÑ¿¡")
 OPENAPI_ENV = {
@@ -825,7 +825,6 @@ _APP_TEXT_MAP = {
     "app/migrate_credits_to_msat.py": {_HELP_NEW: _HELP_OLD, _ERROR_NEW: _ERROR_OLD},
 }
 _SPELLING_EXEMPT = {
-    "docs/hosted-gate-terms.md": "Frozen terms.",
     "docs/terms/2026-11-13.md": "Frozen terms.",
     "tests/fixtures/terms-2026-11-13-index.html": "Frozen terms.",
     "tests/fixtures/openapi-0.20.3.json": "Historical production snapshot.",

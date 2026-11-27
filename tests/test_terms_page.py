@@ -51,6 +51,21 @@ NO_DUTY = (
     "Satsgate has no duty to monitor vendor content or activity. "
     "It may disable a site or account used for illegal or sanctioned activity."
 )
+CURRENT_DATE = "2026-11-27"
+ARCHIVE_DATE = "2026-11-13"
+CONTACT = "satsgateapp@proton.me"
+_OLD_UNIT = "mili" + "satoshis"
+CURRENT_ONLY = (
+    CURRENT_DATE,
+    "millisatoshis",
+    "LUD-21",
+    "satsgate init",
+    "MCP",
+    "x402",
+    "USDC on Base",
+    CONTACT,
+)
+_ARCHIVE_NOTE = '<p>Archived copy. <a href="https://satsgate.org/terms">Current terms</a>.</p>\n'
 TERMS_CSP = (
     "default-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; "
     "base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'"
@@ -70,9 +85,8 @@ def _build_to(dest: Path, source: Path | None = None) -> subprocess.CompletedPro
     return _run_build(*args)
 
 
-def _assert_page(html: str) -> None:
+def _assert_shared(html: str) -> None:
     lowered = html.lower()
-    assert "2026-11-13" in html
     assert '<html lang="en">' in html
     assert "<title>Satsgate terms of use</title>" in html
     assert "<script" not in lowered
@@ -82,16 +96,57 @@ def _assert_page(html: str) -> None:
         assert banned not in lowered, banned
 
 
+def _assert_current(html: str) -> None:
+    _assert_shared(html)
+    lowered = html.lower()
+    assert f"Effective date: {CURRENT_DATE}." in html
+    assert ARCHIVE_DATE not in html
+    assert "millisatoshis" in lowered
+    assert _OLD_UNIT not in lowered
+    for phrase in CURRENT_ONLY:
+        assert phrase in html, phrase
+
+
+def _assert_archive(html: str) -> None:
+    _assert_shared(html)
+    lowered = html.lower()
+    assert f"Effective date: {ARCHIVE_DATE}." in html
+    assert CURRENT_DATE not in html
+    assert _OLD_UNIT in lowered
+    assert "millisatoshis" not in lowered
+    for phrase in CURRENT_ONLY:
+        if phrase == "millisatoshis":
+            continue
+        assert phrase not in html, phrase
+
+
+def _current_body(dated_html: str, date: str = CURRENT_DATE) -> str:
+    """Drop the archive note and the dated canonical and stylesheet paths."""
+    assert dated_html.count(_ARCHIVE_NOTE) == 1
+    normalized = dated_html.replace(_ARCHIVE_NOTE, "", 1)
+    canonical = f'<link rel="canonical" href="https://satsgate.org/terms/{date}">'
+    stylesheet = f'<link rel="stylesheet" href="/terms/{date}/terms.css">'
+    assert canonical in normalized
+    assert stylesheet in normalized
+    normalized = normalized.replace(canonical, '<link rel="canonical" href="https://satsgate.org/terms">', 1)
+    normalized = normalized.replace(stylesheet, '<link rel="stylesheet" href="/terms/terms.css">', 1)
+    return normalized
+
+
 def test_t_b_1_1_build_contains_date_and_model_b_phrases(tmp_path: Path) -> None:
     dest = tmp_path / "dist"
     built = _build_to(dest)
     assert built.returncode == 0, built.stderr
     current = (dest / "index.html").read_text(encoding="utf-8")
-    dated = (dest / "2026-11-13" / "index.html").read_text(encoding="utf-8")
-    _assert_page(current)
-    _assert_page(dated)
+    dated = (dest / CURRENT_DATE / "index.html").read_text(encoding="utf-8")
+    archive = (dest / ARCHIVE_DATE / "index.html").read_text(encoding="utf-8")
+    _assert_current(current)
+    _assert_current(dated)
+    _assert_archive(archive)
     assert '<link rel="canonical" href="https://satsgate.org/terms">' in current
-    assert '<link rel="canonical" href="https://satsgate.org/terms/2026-11-13">' in dated
+    assert f'<link rel="canonical" href="https://satsgate.org/terms/{ARCHIVE_DATE}">' in archive
+    assert f'<link rel="canonical" href="https://satsgate.org/terms/{CURRENT_DATE}">' in dated
+    assert _current_body(dated) == current
 
 
 def test_t_b_1_2_vendor_sentences_in_markdown_and_html(tmp_path: Path) -> None:
@@ -101,7 +156,7 @@ def test_t_b_1_2_vendor_sentences_in_markdown_and_html(tmp_path: Path) -> None:
     dest = tmp_path / "dist"
     built = _build_to(dest)
     assert built.returncode == 0, built.stderr
-    for path in (dest / "index.html", dest / "2026-11-13" / "index.html"):
+    for path in (dest / "index.html", dest / CURRENT_DATE / "index.html", dest / ARCHIVE_DATE / "index.html"):
         html = path.read_text(encoding="utf-8")
         assert VENDOR_CONTENT in html
         assert NO_DUTY in html
@@ -428,7 +483,7 @@ def test_t_b_1_6_live_caddy_serves_terms(tmp_path: Path) -> None:
         assert slash_status == 200
         assert current_body == slash_body
         current_text = current_body.decode("utf-8")
-        _assert_page(current_text)
+        _assert_current(current_text)
         _assert_security_headers(current_headers, cache="no-store")
         assert '<link rel="canonical" href="https://satsgate.org/terms">' in current_text
 
@@ -438,10 +493,21 @@ def test_t_b_1_6_live_caddy_serves_terms(tmp_path: Path) -> None:
         assert dated_slash_status == 200
         assert dated_body == dated_slash_body
         dated_text = dated_body.decode("utf-8")
-        _assert_page(dated_text)
+        _assert_archive(dated_text)
         _assert_security_headers(dated_headers, cache="public, max-age=31536000")
         assert '<link rel="canonical" href="https://satsgate.org/terms/2026-11-13">' in dated_text
         assert "https://satsgate.org/terms" in dated_text
+
+        fresh_status, fresh_headers, fresh_body = _get(port, "/terms/2026-11-27")
+        fresh_slash_status, _, fresh_slash_body = _get(port, "/terms/2026-11-27/")
+        assert fresh_status == 200
+        assert fresh_slash_status == 200
+        assert fresh_body == fresh_slash_body
+        fresh_text = fresh_body.decode("utf-8")
+        _assert_current(fresh_text)
+        _assert_security_headers(fresh_headers, cache="public, max-age=31536000")
+        assert '<link rel="canonical" href="https://satsgate.org/terms/2026-11-27">' in fresh_text
+        assert _current_body(fresh_text) == current_text
 
         # T-C.9.1: a dated 404 must not keep the year-long cache.
         future_status, future_headers, _future_body = _get(port, "/terms/2099-01-01")
@@ -480,7 +546,14 @@ def test_t_b_1_7_html_has_no_script_or_third_party_urls(tmp_path: Path) -> None:
     dest = tmp_path / "dist"
     built = _build_to(dest)
     assert built.returncode == 0, built.stderr
-    files = [dest / "index.html", dest / "terms.css", dest / "2026-11-13" / "index.html", dest / "2026-11-13" / "terms.css"]
+    files = [
+        dest / "index.html",
+        dest / "terms.css",
+        dest / "2026-11-27" / "index.html",
+        dest / "2026-11-27" / "terms.css",
+        dest / "2026-11-13" / "index.html",
+        dest / "2026-11-13" / "terms.css",
+    ]
     for path in files:
         text = path.read_text(encoding="utf-8")
         lowered = text.lower()
