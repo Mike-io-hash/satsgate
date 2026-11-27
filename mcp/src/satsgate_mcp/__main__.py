@@ -37,6 +37,21 @@ def usage_text() -> str:
     return "\n".join(lines) + "\n"
 
 
+_QUIET_LOGGERS = ("httpx", "httpcore", "httpx2", "httpcore2")
+
+
+def configure_logging() -> None:
+    """INFO for this package on stderr. The HTTP client libraries log only warnings."""
+    import logging
+
+    logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(name)s %(message)s")
+    for name in _QUIET_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+    from satsgate_mcp.redact import install
+
+    install()
+
+
 def main(argv: list[str] | None = None) -> None:
     args = list(sys.argv[1:] if argv is None else argv)
     if args in (["--help"], ["-h"]):
@@ -49,12 +64,7 @@ def main(argv: list[str] | None = None) -> None:
         sys.stderr.write(usage_text())
         raise SystemExit(2)
 
-    import logging
-
-    logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(name)s %(message)s")
-    from satsgate_mcp.redact import install
-
-    install()
+    configure_logging()
     from satsgate_mcp.server import build_server
 
     build_server().run(transport="stdio")

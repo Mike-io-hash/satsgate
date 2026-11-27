@@ -4,7 +4,7 @@ Charge AI agents in Lightning and USDC on the same 402. Payments go straight to 
 
 No node to run, and no custody: the buyer pays the seller's wallet. After 500 free unlocks in a UTC month, each paid unlock debits 2 sats from a prepaid service balance, capped at 10% of the item price.
 
-`satsgate init` takes a merchant from nothing to a self-hosted paywall config. It opens a free account, saves the account key in `.satsgate/account.env`, asks for a Lightning Address, mints a restricted proxy key, writes `.env` and `satsgate-proxy.yaml`, and checks the paywall with a real 402. That check does not pay, verify, or settle.
+`satsgate init` takes a merchant from nothing to a self-hosted paywall config. It opens a free account, saves the account key in `.satsgate/account.env`, asks for a Lightning Address, mints a restricted proxy key, writes `.env` and `satsgate-proxy.yaml`, and checks the paywall with a real 402. That check does not pay, verify, or settle. It also reads whether the Lightning Address advertises LUD-21 verify.
 
 Terms: https://satsgate.org/terms. Source: https://github.com/Mike-io-hash/satsgate. API reference: https://github.com/Mike-io-hash/satsgate/blob/main/docs/api.md.
 
@@ -26,7 +26,25 @@ satsgate init --json --lightning-address merchant@pay.example --want-usdc
 satsgate init --docker --framework fastapi
 ```
 
-JSON (`schema_version` 1) includes `ok`, `status`, `exit_code`, `api_url`, `account` (`client_id`, `key_preview`, `fingerprint`, `reused`), `payee_lightning_address`, `usdc`, `files`, `route`, `test_402`, `start_command`, `next_steps`, `warnings`, and `error`. A key is shown as `sg_…` or `sgr_…` plus the last four characters, and as a fingerprint. The connect link is not a JSON field.
+JSON (`schema_version` 1) includes `ok`, `status`, `exit_code`, `api_url`, `account` (`client_id`, `key_preview`, `fingerprint`, `reused`), `payee_lightning_address`, `usdc`, `files`, `route`, `test_402`, `lud21`, `start_command`, `next_steps`, `warnings`, and `error`. A key is shown as `sg_…` or `sgr_…` plus the last four characters, and as a fingerprint. The connect link is not a JSON field.
+
+## LUD-21 check
+
+After the test 402, `init` asks the core once for the status of that unpaid test invoice. It is a read: nothing is paid, nothing is debited, and no second invoice is created. The answer shows whether the Lightning Address advertises LUD-21 verify.
+
+- `lud21.supported: true`: a person can pay the QR from any Lightning wallet, and the proxy confirms the payment without a preimage.
+- `lud21.supported: false` and the warning `lud21_not_supported`: agents can still pay, because they send the preimage. A person who pays the QR from a wallet that does not show the preimage cannot finish. To accept those payments, use a Lightning Address that advertises LUD-21 verify.
+- `lud21.supported: null` and the warning `lud21_not_checked`: the check did not get an answer. Run `satsgate init` again to check.
+
+The check never fails `init` and does not change the exit code. `lud21` is `null` when `init` stopped before the check, for example when the test 402 failed. Human mode prints the same sentence after the Lightning Address.
+
+```json
+"lud21": {
+  "supported": false,
+  "detail": "The Lightning Address does not advertise LUD-21 verify. Agents can still pay: they send the preimage. A person who pays the QR from a wallet that does not show the preimage cannot finish. To accept those payments, use a Lightning Address that advertises LUD-21 verify."
+},
+"warnings": ["lud21_not_supported"]
+```
 
 Exit codes: 0 done, 1 the API or the network failed, 2 usage, 3 a human has to decide, 4 rate-limited. A 429 includes `retry_after_seconds` and is not retried.
 
@@ -66,7 +84,7 @@ Lightning has no test network. A paid Lightning request moves real sats to the m
 uvx --env-file .env satsgate-proxy --config satsgate-proxy.yaml
 ```
 
-`satsgate` 0.1.3. `--docker` writes `docker-compose.satsgate.yml` and prints `docker compose -f docker-compose.satsgate.yml up`. The compose file uses the public image `ghcr.io/mike-io-hash/satsgate-proxy:0.15.0`. The generated service listens on `0.0.0.0`; the YAML written for `uvx` stays on `127.0.0.1`.
+`satsgate` 0.1.4. `--docker` writes `docker-compose.satsgate.yml` and prints `docker compose -f docker-compose.satsgate.yml up`. The compose file uses the public image `ghcr.io/mike-io-hash/satsgate-proxy:0.15.1`. The generated service listens on `0.0.0.0`; the YAML written for `uvx` stays on `127.0.0.1`.
 
 ## Contributors' note
 

@@ -4,7 +4,7 @@ Charge AI agents in Lightning and USDC on the same 402. Payments go straight to 
 
 A reverse proxy a merchant runs beside an existing HTTP API. The buyer hits the proxy. The proxy sells the request through [Satsgate](https://api.satsgate.org) and forwards only a paid request to the origin. The merchant does not write paywall code.
 
-The proxy is version **0.15.0**. It works with core 0.20.3 or later and with gate 0.15.2 or later. Default `mode: paywall` talks to the Satsgate core paywall (challenge, verify, status, charge, and x402 verify/settle). `mode: receipt` does not call core and does not use an API key. It checks `Satsgate-Receipt` with the site secret and forwards a successful check to the origin. The proxy does not sell prepaid balance and does not call the facilitator. Top up on the core with `POST /v1/topup/lightning` or `POST /v1/topup/usdc`. On api.satsgate.org a USDC top-up is Base mainnet USDC (a self-hosted core needs `SATSGATE_X402_CDP=1`; see [self-hosting](https://github.com/Mike-io-hash/satsgate/blob/main/docs/self-hosting.md)). The hosted gate is a separate program and only sells receipts. Buyer USDC on a proxied paywall route goes to the merchant's verified `payTo`. In receipt mode the buyer already paid the gate.
+The proxy is version **0.15.1**. It works with core 0.20.3 or later and with gate 0.15.2 or later. Default `mode: paywall` talks to the Satsgate core paywall (challenge, verify, status, charge, and x402 verify/settle). `mode: receipt` does not call core and does not use an API key. It checks `Satsgate-Receipt` with the site secret and forwards a successful check to the origin. The proxy does not sell prepaid balance and does not call the facilitator. Top up on the core with `POST /v1/topup/lightning` or `POST /v1/topup/usdc`. On api.satsgate.org a USDC top-up is Base mainnet USDC (a self-hosted core needs `SATSGATE_X402_CDP=1`; see [self-hosting](https://github.com/Mike-io-hash/satsgate/blob/main/docs/self-hosting.md)). The hosted gate is a separate program and only sells receipts. Buyer USDC on a proxied paywall route goes to the merchant's verified `payTo`. In receipt mode the buyer already paid the gate.
 
 ## Install
 
@@ -21,7 +21,7 @@ uvx --env-file .env satsgate-proxy --config satsgate-proxy.yaml
 or
 
 ```bash
-docker pull ghcr.io/mike-io-hash/satsgate-proxy:0.15.0
+docker pull ghcr.io/mike-io-hash/satsgate-proxy:0.15.1
 ```
 
 `satsgate init --docker` writes a compose file for that image. The minor tag is `ghcr.io/mike-io-hash/satsgate-proxy:0.15`.
@@ -66,7 +66,7 @@ Satsgate never custodies, receives, forwards, or refunds buyer funds. The USDC m
    uvx --env-file .env satsgate-proxy --config satsgate-proxy.yaml
    ```
 
-   Buyers use the proxy's published port. `GET /healthz` is the proxy (`{"ok":true,"component":"satsgate-proxy","version":"0.15.0"}`). It is not forwarded.
+   Buyers use the proxy's published port. `GET /healthz` is the proxy (`{"ok":true,"component":"satsgate-proxy","version":"0.15.1"}`). It is not forwarded.
 
    Startup logs `key fp` and 12 hex characters. That is the start of SHA-256 of the API key. It is not a prefix of the key, and the key itself is not written to the log.
 
@@ -109,7 +109,7 @@ WWW-Authenticate: L402 macaroon="<standard base64>", invoice="<bolt11>"
 
 A paid retry is `Authorization: L402 <macaroon>:<64-hex-preimage>` (`LSAT` is accepted too). The proxy calls `POST /v1/paywall/verify` with `consume=true`.
 
-`Authorization: L402 <macaroon>` with no preimage calls `GET /v1/paywall/status/{payment_hash}?consume=true`. That is the phone-wallet path: the wallet pays the invoice and does not return a preimage. While the invoice is unpaid the proxy answers **402** `payment_pending` with `Retry-After` and does **not** mint a second invoice. Pending does not consume a use.
+`Authorization: L402 <macaroon>` with no preimage calls `GET /v1/paywall/status/{payment_hash}?consume=true`. That is the phone-wallet path: the wallet pays the invoice and does not return a preimage. While the invoice is unpaid the proxy answers **402** `payment_pending` with `Retry-After` and does **not** mint a second invoice. Pending does not consume a use. This path needs a payee Lightning Address that advertises LUD-21 verify. Without it, the proxy cannot confirm the payment: it answers a fresh **402** with `reason: preimage_required` and a new invoice. Do not pay that new invoice. Send `Authorization: L402 <macaroon>:<preimage>` for the invoice you already paid. `satsgate init` reports whether the address advertises LUD-21 verify.
 
 A token for another route, a used-up bundle, or an expired pass becomes a **fresh 402**, not 401, so a standard client can pay again. The body includes `reason` (`token_used_up`, `token_expired`, `resource mismatch`, and the other core reject strings).
 
@@ -368,7 +368,7 @@ A retry of the same token takes another use when the bundle still has one. A `pe
 
 ## Contributors' note
 
-From a checkout: `pip install -e proxy`. Build the image from the repo root with `docker build -f proxy/Dockerfile -t satsgate-proxy:0.15.0 .`, or `docker compose -f proxy/docker-compose.yml up --build`.
+From a checkout: `pip install -e proxy`. Build the image from the repo root with `docker build -f proxy/Dockerfile -t satsgate-proxy:0.15.1 .`, or `docker compose -f proxy/docker-compose.yml up --build`.
 
 ## Mainnet check with a small payment
 

@@ -4,7 +4,7 @@ Charge AI agents in Lightning and USDC on the same 402. Payments go straight to 
 
 A buyer-side MCP server. An agent (Claude Desktop, Cursor, or any stdio MCP client) can see the price of a Satsgate-paywalled URL, pay it, and read the response.
 
-This package is version **0.14.0**. It talks to whatever URL returned the 402. Works with core 0.20.3 or later. The self-hosted proxy is **0.15.0**. Works with gate 0.15.2 or later. On a gate host (`SATSGATE_MCP_GATE_HOSTS`, default `gate.satsgate.org`) `pay_and_fetch` pays the gate, keeps the receipt, and repeats the request at `redeem_url` when that host is on the allowlist. The receipt is not logged. A stored receipt is returned by `challenge_status`. The body sent to a gate host is not forwarded. A 402 may offer Lightning, x402 (USDC on Base), or both. One 402 lists one USDC network. `list_sites` includes a public route priced only in USD, with `price_currency` and `price_usd_atomic`. This process cannot load a seller's prepaid service balance, and it does not hold a buyer private key. An account tops up on the core with `POST /v1/topup/lightning` or `POST /v1/topup/usdc`. On api.satsgate.org a USDC top-up is Base mainnet USDC (a self-hosted core needs `SATSGATE_X402_CDP=1`; see [self-hosting](https://github.com/Mike-io-hash/satsgate/blob/main/docs/self-hosting.md)). The USDC path is not an MCP tool.
+This package is version **0.14.1**. It talks to whatever URL returned the 402. Works with core 0.20.3 or later. The self-hosted proxy is **0.15.1**. Works with gate 0.15.2 or later. On a gate host (`SATSGATE_MCP_GATE_HOSTS`, default `gate.satsgate.org`) `pay_and_fetch` pays the gate, keeps the receipt, and repeats the request at `redeem_url` when that host is on the allowlist. The receipt is not logged. A stored receipt is returned by `challenge_status`. The body sent to a gate host is not forwarded. A 402 may offer Lightning, x402 (USDC on Base), or both. One 402 lists one USDC network. `list_sites` includes a public route priced only in USD, with `price_currency` and `price_usd_atomic`. This process cannot load a seller's prepaid service balance, and it does not hold a buyer private key. An account tops up on the core with `POST /v1/topup/lightning` or `POST /v1/topup/usdc`. On api.satsgate.org a USDC top-up is Base mainnet USDC (a self-hosted core needs `SATSGATE_X402_CDP=1`; see [self-hosting](https://github.com/Mike-io-hash/satsgate/blob/main/docs/self-hosting.md)). The USDC path is not an MCP tool.
 
 ## Install
 
@@ -118,13 +118,20 @@ Both `SATSGATE_MCP_MAX_PAYMENT_USD` and `SATSGATE_MCP_DAILY_MAX_USD` must be set
 
 `remote_call_tool` calls one tool on a remote MCP server, such as a route of `satsgate-proxy` priced per tool. Added in 0.14.0.
 
-Each call opens its own connection. The client first tries the 2026-07-28 `server/discover`. If the server does not answer it, the client uses `initialize` and the session the server assigns, and ends that session after the call. Then it lists the tools. The handshake and the list are never paid. A tool the server does not list is not called.
+Each call opens its own connection. The client first tries the 2026-07-28 `server/discover`. If the server does not answer it, the client uses `initialize` and the session the server assigns, and ends that session after the call. A server on an earlier MCP version can answer `server/discover` with an HTTP error such as 400. `satsgate-proxy` forwards that answer from the server. It is expected, not a failure. `satsgate-mcp` logs one INFO line on stderr that says so. The HTTP client libraries log only warnings. Then it lists the tools. The handshake and the list are never paid. A tool the server does not list is not called.
 
 An unpaid call to a priced tool gets the price either as an HTTP 402 or as an in-band price notice: a tool result with `isError: true` and the offer in `structuredContent`. Both are read the same way.
 
 - `mode=human` returns the invoice and the QR. Pay it, then call `remote_call_tool` again with the same `url` and `tool`. The same invoice is used until it expires. Do not call `check_payment` for a remote tool.
 - `mode=nwc` pays from the environment wallet if the sats caps allow it, then repeats the same call with `Authorization: L402 <macaroon>:<preimage>`.
 - `payment_signature` sends a `PAYMENT-SIGNATURE` from an external wallet inside the call, in `params._meta["x402/payment"]`. The USD caps apply. This process does not sign.
+
+Result fields:
+
+- `paid`: `true` when this call was paid: by the NWC wallet, by a `payment_signature`, or, in `mode=human`, by the person who paid the invoice before this call. `false` when nothing new was paid.
+- `paid_with`: `lightning` or `x402` when `paid` is `true`, otherwise `null`.
+- `paid_sats`: the invoice amount for a Lightning payment, otherwise `null`.
+- `reused_token`: `true` when the call used a stored token. Nothing new was paid.
 
 A call pays at most once. The token is stored per server URL and tool name, not per argument set, and is reused while it has uses or time. A failed tool call takes no use, so the token is kept and the next call retries with it. Parallel calls to the same tool wait for one another, so a token that covers several calls is paid once. This holds inside one `satsgate-mcp` process. Two processes that share a data directory are not coordinated.
 

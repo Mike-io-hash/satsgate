@@ -52,7 +52,7 @@ def test_smoke_install_never_uses_testpypi_as_an_index(tmp_path: Path) -> None:
         if dist == "satsgate" and mode == "tag":
             joined = " ".join(planned[0])
             assert "satsgate-sdk==0.10.1" in joined
-            assert "satsgate-proxy==0.15.0" in joined
+            assert "satsgate-proxy==0.15.1" in joined
 
 
 def test_hash_mismatch_names_the_file_only(tmp_path: Path) -> None:

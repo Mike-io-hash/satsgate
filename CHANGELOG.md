@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [Package patch releases] - 2026-11-27
+
+`satsgate-proxy` 0.15.1 (and the image `ghcr.io/mike-io-hash/satsgate-proxy:0.15.1`), `satsgate-mcp` 0.14.1, and `satsgate` 0.1.4. `satsgate-sdk` stays 0.10.1.
+
+Core stays 0.20.4 and the hosted gate 0.15.2. No production change.
+
+`satsgate` 0.1.4 requires `satsgate-proxy` 0.15.1 or later 0.15 and, with the `mcp` extra, `satsgate-mcp` 0.14.1 or later 0.14. `satsgate init --docker` writes the 0.15.1 image.
+
+- `satsgate init` reports whether the Lightning Address advertises LUD-21 verify, in the new `lud21` JSON field and in human mode. It reads the status of the unpaid test invoice once. Nothing is paid or debited, and no second invoice is created. An address without LUD-21 verify adds the warning `lud21_not_supported`. A check without an answer adds `lud21_not_checked`. Neither changes the exit code.
+- The README says when a person paying the QR needs LUD-21 verify.
+- `satsgate-mcp`: `remote_call_tool` now reports `paid: true` and `paid_sats` when it finishes a call that a person paid in `mode=human`. A call with a stored token still reports `paid: false`.
+- `satsgate-mcp`: when a server answers `server/discover` with an HTTP error and the client uses `initialize`, one INFO line says so. The HTTP client libraries log only warnings.
+- `satsgate-proxy`: `GET /healthz` returns compact JSON.
+
 ## [Package releases] - 2026-11-26
 
 `satsgate-proxy` 0.15.0 (and the image `ghcr.io/mike-io-hash/satsgate-proxy:0.15.0`), `satsgate-mcp` 0.14.0, and `satsgate` 0.1.3. `satsgate-sdk` stays 0.10.1.

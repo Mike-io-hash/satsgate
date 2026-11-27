@@ -459,7 +459,7 @@ async def handle(request: Request) -> Response:
         if method == "HEAD":
             return Response(status_code=200, media_type="application/json")
         payload = {"ok": True, "component": "satsgate-proxy", "version": __version__}
-        return Response(json.dumps(payload).encode("utf-8"), status_code=200, media_type="application/json")
+        return Response(json.dumps(payload, separators=(",", ":")).encode("utf-8"), status_code=200, media_type="application/json")
 
     body = await _read_body(request, settings.max_request_bytes)
     if isinstance(body, Response):
