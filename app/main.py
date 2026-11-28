@@ -422,7 +422,7 @@ def well_known_satsgate(request: Request) -> dict:
         "name": "satsgate",
         "version": app.version,
         "token_version": TOKEN_VERSION,
-        "description": "Lightning L402 paywall + prepaid payment verifications (credits). 1 verification = 1 successful paid unlock.",
+        "description": "Lightning L402 and x402 (USDC on Base) paywall. Payments go straight to the seller's wallet. Each successful paid unlock after the monthly free quota debits the seller's prepaid balance.",
         "generated_at": int(time.time()),
         "api": {
             "base_url": base_url,
@@ -502,6 +502,7 @@ def well_known_satsgate(request: Request) -> dict:
         },
         "abuse_contact": config.ABUSE_CONTACT or None,
         "terms_url": config.TERMS_URL or None,
+        "terms_version": config.TERMS_VERSION or None,
         "delivery": "receipt",
     }
 
@@ -1356,8 +1357,22 @@ def _geoblock_quote(request: Request) -> JSONResponse | None:
     )
 
 
+def _terms_not_accepted() -> JSONResponse:
+    return JSONResponse(
+        status_code=400,
+        content={
+            "ok": False,
+            "error": "terms_not_accepted",
+            "terms_version": config.TERMS_VERSION or None,
+            "terms_url": config.TERMS_URL or None,
+        },
+    )
+
+
 def _sites_error(exc: Exception) -> JSONResponse:
     code = getattr(exc, "code", None) or str(exc)
+    if code == "terms_not_accepted":
+        return _terms_not_accepted()
     if code in {"slug_taken", "route_exists", "site_limit", "route_limit"}:
         status = 409
     elif code == "site_secret_key_unconfigured":
@@ -1418,6 +1433,59 @@ def _without_secret(site: dict) -> dict:
     return view
 
 
+def _activation(site: dict, client_id: int) -> dict:
+    """Why an owner's site is or is not live on the hosted gate, and the next step."""
+    slug = site["slug"]
+    reasons: list[dict] = []
+    if db.client_is_suspended(config.DB_PATH, client_id=client_id):
+        reasons.append({"code": "account_suspended", "detail": "This account is suspended. Its sites cannot take payments."})
+    status = site.get("status")
+    if status == "disabled":
+        detail = "The operator turned this site off."
+        if config.ABUSE_CONTACT:
+            detail += f" Write to {config.ABUSE_CONTACT} to ask why."
+        reasons.append({"code": "site_disabled", "detail": detail})
+    elif status == "pending" and not config.SITES_AUTO_APPROVE:
+        reasons.append(
+            {"code": "operator_review", "detail": "On this server an operator approves new sites. Nothing else is needed from you."}
+        )
+    elif status == "pending":
+        if site.get("origin_verified_at") is None:
+            reasons.append(
+                {
+                    "code": "origin_not_verified",
+                    "detail": (
+                        "Run the SDK receipt middleware or the proxy in receipt mode at your origin so it answers "
+                        "/.well-known/satsgate-check, "
+                        f"then call POST /v1/sites/{slug}/verify-origin."
+                    ),
+                }
+            )
+        if site.get("terms_version") != config.TERMS_VERSION:
+            reasons.append(
+                {
+                    "code": "terms_not_accepted",
+                    "detail": f'Accept the current terms with PATCH /v1/sites/{slug} and {{"accept_terms": "{config.TERMS_VERSION}"}}.',
+                    "terms_version": config.TERMS_VERSION,
+                    "terms_url": config.TERMS_URL or None,
+                }
+            )
+        if not reasons:
+            reasons.append(
+                {
+                    "code": "recheck_needed",
+                    "detail": f"Origin and terms are in place. Call POST /v1/sites/{slug}/verify-origin once more to finish.",
+                }
+            )
+    return {"live": status == "approved" and not reasons, "reasons": reasons}
+
+
+def _owner_view(site: dict, client_id: int) -> dict:
+    view = _without_secret(site)
+    view["activation"] = _activation(view, client_id)
+    return view
+
+
 def _with_derived(site: dict) -> dict:
     view = dict(site)
     routes = []
@@ -1448,7 +1516,7 @@ def v1_sites_mine(x_api_key: str | None = Header(default=None, alias="X-Api-Key"
     if isinstance(auth, JSONResponse):
         return auth
     sites = db_sites.list_sites_for_client(config.DB_PATH, client_id=auth.client.id)
-    return {"ok": True, "sites": [_with_derived(_without_secret(site)) for site in sites]}
+    return {"ok": True, "sites": [_with_derived(_owner_view(site, auth.client.id)) for site in sites]}
 
 
 @app.post("/v1/sites")
@@ -1463,7 +1531,7 @@ def v1_sites_create(
     if db.client_is_suspended(config.DB_PATH, client_id=auth.client.id):
         return JSONResponse(status_code=403, content={"ok": False, "error": "account_suspended"})
     if config.TERMS_VERSION and body.accept_terms != config.TERMS_VERSION:
-        return JSONResponse(status_code=400, content={"ok": False, "error": "terms_not_accepted"})
+        return _terms_not_accepted()
     try:
         created = db_sites.create_site(
             config.DB_PATH,
@@ -1479,14 +1547,20 @@ def v1_sites_create(
     except (ValueError, db_sites.OriginError) as exc:
         return _sites_error(exc)
     secret = created.pop("origin_secret")
+    if config.SITES_AUTO_APPROVE:
+        next_step = (
+            "The site goes live by itself after a successful origin check and acceptance of the current terms. "
+            "site.activation lists what is still missing."
+        )
+    else:
+        next_step = "On this server an operator approves new sites. site.activation shows the current state."
     return {
         "ok": True,
         "origin_secret": secret,
-        "site": created,
+        "site": _owner_view(created, auth.client.id),
         "note": (
             "Save this origin secret. We will not show it again. "
-            "The hosted proxy will sign X-Satsgate-Signature with it. "
-            "New sites stay pending until an operator approves them."
+            "Your origin uses it to check Satsgate-Receipt and to answer the origin check. " + next_step
         ),
     }
 
@@ -1499,7 +1573,7 @@ def v1_sites_get(slug: str, x_api_key: str | None = Header(default=None, alias="
     site = db_sites.get_site_for_client(config.DB_PATH, client_id=auth.client.id, slug=slug)
     if site is None:
         return JSONResponse(status_code=404, content={"ok": False, "error": "site_not_found"})
-    public = _without_secret(site)
+    public = _owner_view(site, auth.client.id)
     tip = _site_lightning_advice(auth.client, public)
     body = {"ok": True, "site": public}
     if tip is not None:
@@ -1540,7 +1614,7 @@ def v1_sites_update(
         return _sites_error(exc)
     if updated is None:
         return JSONResponse(status_code=404, content={"ok": False, "error": "site_not_found"})
-    return {"ok": True, "site": _without_secret(updated)}
+    return {"ok": True, "site": _owner_view(updated, auth.client.id)}
 
 
 @app.delete("/v1/sites/{slug}")
@@ -1595,7 +1669,7 @@ def v1_sites_verify_origin(slug: str, x_api_key: str | None = Header(default=Non
         "ok": True,
         "origin_verified_at": checked.get("origin_verified_at"),
         "status": checked.get("status"),
-        "site": _without_secret(checked),
+        "site": _owner_view(checked, auth.client.id),
     }
 
 

@@ -129,13 +129,16 @@ def _json(result: JSONResponse | dict) -> JSONResponse | dict:
 
 @router.get("/internal/gate/sites/{slug}/status")
 def internal_site_status(slug: str, request: Request):
-    """Approved or not. No secret, and no distinction between missing, pending, and disabled."""
+    """Approved, registered but not active, or missing. Pending and disabled look the same."""
     denied = _authorized(request)
     if denied is not None:
         return denied
     cleaned = _clean_slug(slug)
-    if cleaned is None or _approved(cleaned) is None:
+    site = db_sites.get_site_by_slug(config.DB_PATH, cleaned) if cleaned is not None else None
+    if site is None:
         return _not_found()
+    if site.get("status") != "approved":
+        return JSONResponse(status_code=404, content={"ok": False, "error": "site_not_active"}, headers=_NO_STORE)
     return JSONResponse(content={"ok": True, "status": "approved"}, headers=_NO_STORE)
 
 

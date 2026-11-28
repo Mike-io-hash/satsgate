@@ -1,7 +1,7 @@
 """Public text guard: style, placeholders, internal names.
 
 T-DM.1 through T-DM.9. ``tests/fixtures/openapi-0.20.3.json`` is the historical
-production snapshot of core 0.20.3. The OpenAPI test pins the exact 0.20.4
+production snapshot of core 0.20.3. The OpenAPI test pins the exact 0.20.5
 delta against that snapshot: ``info.version`` and the two route descriptions.
 An unknown core version fails instead of skipping.
 """
@@ -795,7 +795,7 @@ def _app_version() -> str:
     return re.search(r'^APP_VERSION = "([^"]+)"', text, re.M).group(1)
 
 
-_CORE_VERSION = "0.20.4"
+_CORE_VERSION = "0.20.5"
 _VERSION_REFRESH = "core version changed: refresh the OpenAPI snapshot and its expected delta"
 _OPENAPI_SHA256 = "f93c71e3b43da7f9fe3acaabefeaa3ce559c09e7cb998713518f84fdc1f4ff8b"
 _TREE_SHA256 = "5e6a383386d43a51f6276340078265bee6c715707f0114114af3c3e66c780af2"
@@ -812,7 +812,7 @@ _TOPUP_NEW = (
     "key cannot top up. The credited millisatoshis include the per-top-up bonus."
 )
 _OPENAPI_DELTA = (
-    (("info", "version"), "0.20.3", "0.20.4"),
+    (("info", "version"), "0.20.3", "0.20.5"),
     (("paths", "/v1/usage/forecast", "get", "description"), _FORECAST_OLD, _FORECAST_NEW),
     (("paths", "/v1/topup/lightning", "post", "description"), _TOPUP_OLD, _TOPUP_NEW),
 )

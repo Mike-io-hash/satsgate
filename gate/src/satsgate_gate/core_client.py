@@ -245,7 +245,7 @@ def _optional_int(value: object) -> int | None:
 
 
 async def fetch_status(client: httpx.AsyncClient, settings: Settings, slug: str) -> str:
-    """``approved``, ``missing``, or ``unavailable``. Not cached by the caller."""
+    """``approved``, ``inactive``, ``missing``, or ``unavailable``. Not cached by the caller."""
     request = client.build_request(
         "GET",
         f"{settings.core_base_url}/internal/gate/sites/{slug}/status",
@@ -259,9 +259,9 @@ async def fetch_status(client: httpx.AsyncClient, settings: Settings, slug: str)
     except httpx.HTTPError:
         log.warning("core status failed")
         return "unavailable"
-    if response.status_code == 404:
-        return "missing"
     body = _json_body(response)
+    if response.status_code == 404:
+        return "inactive" if body.get("error") == "site_not_active" else "missing"
     if response.status_code == 200 and body.get("status") == "approved":
         return "approved"
     log.warning("core site status http %s", response.status_code)

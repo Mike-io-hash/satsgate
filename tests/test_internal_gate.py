@@ -121,7 +121,7 @@ def test_internal_routes_are_hidden_without_a_token(tmp_path, monkeypatch):
     module = _load_app(tmp_path, SATSGATE_GATE_TOKEN="")
     _patch_dns(monkeypatch, module)
     with TestClient(module.app) as http:
-        assert http.get("/health").json()["version"] == "0.20.4"
+        assert http.get("/health").json()["version"] == "0.20.5"
         hidden = http.get("/internal/gate/sites/my-shop/status", headers={"X-Satsgate-Gate-Token": _GATE_TOKEN})
         assert hidden.status_code == 404
         assert hidden.json()["error"] == "not_found"
@@ -230,7 +230,7 @@ def test_disabled_and_pending_look_the_same(tmp_path, monkeypatch):
         http.post("/v1/admin/sites/my-shop/disable", headers={"X-Admin-Token": "test-admin-token"})
         disabled = _gate(http, "GET", "/internal/gate/sites/my-shop/status")
         assert disabled.status_code == 404
-        assert disabled.json() == {"ok": False, "error": "not_found"}
+        assert disabled.json() == {"ok": False, "error": "site_not_active"}
         assert _gate(http, "GET", "/internal/gate/sites/my-shop").status_code == 404
         created = http.post(
             "/v1/sites",
