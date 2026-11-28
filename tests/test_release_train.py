@@ -62,7 +62,8 @@ def test_rl_1_4_changelog_promotes_the_unreleased_entry() -> None:
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     unreleased = text.split("## [Unreleased]\n", 1)[1]
     rest = unreleased.lstrip("\n")
-    assert rest.startswith("## [Terms] - 2026-11-27\n")
+    assert rest.startswith("## [0.20.5] - ")
+    assert "## [" not in rest.split("\n", 1)[1].split("## [Terms] - 2026-11-27\n", 1)[0]
     after_terms = rest.split("## [Terms] - 2026-11-27\n", 1)[1]
     package_at = after_terms.find("## [Package patch releases] - ")
     assert package_at != -1

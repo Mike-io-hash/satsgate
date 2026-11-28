@@ -108,7 +108,7 @@ Per-tool pricing for remote MCP servers: put the proxy in front of the server an
 
 ### Hosted gate (x402)
 
-The hosted gate at `https://gate.satsgate.org` is in closed beta. Sites are approved manually. The buyer pays the seller's wallet, then repeats the request at the seller with `Satsgate-Receipt`. See [docs/api.md](docs/api.md).
+The hosted gate at `https://gate.satsgate.org` is open to everyone. A new site goes live by itself after a successful origin check and acceptance of the current terms. The self-hosted proxy needs no approval. The buyer pays the seller's wallet, then repeats the request at the seller with `Satsgate-Receipt`. See [docs/api.md](docs/api.md#hosted-sites).
 
 ## Pricing
 
@@ -176,9 +176,7 @@ OpenAPI: [https://api.satsgate.org/openapi.json](https://api.satsgate.org/openap
 
 Beta. Tested end-to-end on mainnet with small amounts.
 
-Open to everyone: accounts, the self-hosted proxy, the SDK, and the buyer MCP.
-
-The hosted gate is closed beta. Sites are approved manually.
+Open to everyone: accounts, the self-hosted proxy, the SDK, the buyer MCP, and the hosted gate. A new site goes live by itself after a successful origin check and acceptance of the current terms.
 
 Not built yet:
 
