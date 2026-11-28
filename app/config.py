@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # Load env vars from .env if present. Existing process env wins.
 load_dotenv()
 
-APP_VERSION = "0.20.4"
+APP_VERSION = "0.20.5"
 
 # production is the safe default. Local mock/dev only runs when this is explicit.
 SATSGATE_ENV = os.environ.get("SATSGATE_ENV", "production").strip().lower() or "production"
@@ -178,7 +178,7 @@ if BUYER_LIMIT_SCOPE not in _BUYER_LIMIT_SCOPES:
 # When set, enables /v1/admin/* endpoints (protected via X-Admin-Token header).
 ADMIN_TOKEN = os.environ.get("SATSGATE_ADMIN_TOKEN", "").strip()
 
-# Hosted-proxy sites registry. Unset limits keep the closed-beta defaults.
+# Hosted-gate sites registry. Unset limits keep the defaults.
 # The secret key is optional at boot so a restart without it still serves
 # current clients. Creating or rotating a site secret requires it.
 SITES_MAX_PER_ACCOUNT = _optional_int("SATSGATE_SITES_MAX_PER_ACCOUNT", 3, minimum=1, maximum=100)

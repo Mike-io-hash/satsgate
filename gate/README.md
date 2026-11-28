@@ -1,10 +1,10 @@
 # satsgate-gate
 
-Closed beta, sites approved manually.
+Open to everyone. On `gate.satsgate.org`, a new site goes live by itself after a successful origin check and acceptance of the current terms. A self-hosted core with `SATSGATE_SITES_AUTO_APPROVE` off keeps operator approval.
 
 The hosted gate. One process serves many approved sites at `https://gate.satsgate.org/<slug>/<path>`.
 
-Version **0.15.2**. Works with core 0.20.3 or later and gate 0.15.2 or later. This process sells a signed receipt and nothing else. It does not call the origin, relay the buyer, or serve seller content. A site can offer Lightning, x402 (USDC on one Base network), or both. x402 is off until the merchant turns it on. A new site stores no mode. Turning x402 on without a mode stores test (Base Sepolia). Live (Base) is a separate choice and is on by default on api.satsgate.org. Test mode issues a receipt and does not debit the prepaid service balance. Live mode and Lightning debit the unlock fee from the prepaid service balance when the receipt is issued. The self-hosted proxy, `satsgate-proxy`, is a different program. In `mode: paywall` it still forwards and still charges after a successful origin. In `mode: receipt` it checks `Satsgate-Receipt` and does not call core. This process has no origin secret and does not call the facilitator. A debit from this gate still has a null `api_key_id`, because the gate authenticates with `GATE_TOKEN` rather than an `sgr_` key.
+Version **0.15.3**. Works with core 0.20.3 or later and gate 0.15.2 or later. This process sells a signed receipt and nothing else. It does not call the origin, relay the buyer, or serve seller content. A site can offer Lightning, x402 (USDC on one Base network), or both. x402 is off until the merchant turns it on. A new site stores no mode. Turning x402 on without a mode stores test (Base Sepolia). Live (Base) is a separate choice and is on by default on api.satsgate.org. Test mode issues a receipt and does not debit the prepaid service balance. Live mode and Lightning debit the unlock fee from the prepaid service balance when the receipt is issued. The self-hosted proxy, `satsgate-proxy`, is a different program. In `mode: paywall` it still forwards and still charges after a successful origin. In `mode: receipt` it checks `Satsgate-Receipt` and does not call core. This process has no origin secret and does not call the facilitator. A debit from this gate still has a null `api_key_id`, because the gate authenticates with `GATE_TOKEN` rather than an `sgr_` key.
 
 ## USDC payments: Base network only
 
@@ -29,9 +29,9 @@ The routes are not in the public OpenAPI document. When the token is unset they 
 
 ## What a request does
 
-`GET /` is service JSON (`name`, `version`, `delivery`, `terms`, `abuse`). `GET /healthz` stays `{"ok": true, "component": "satsgate-gate", "version": "0.15.2"}`. The gate does not read the request body. `HEAD` returns the same headers and no body. Responses set `Cache-Control: no-store`.
+`GET /` is service JSON (`name`, `version`, `delivery`, `terms`, `abuse`). `GET /healthz` stays `{"ok": true, "component": "satsgate-gate", "version": "0.15.3"}`. The gate does not read the request body. `HEAD` returns the same headers and no body. Responses set `Cache-Control: no-store`.
 
-1. `GET /internal/gate/sites/<slug>/status` on every request. This is not cached. Anything other than `approved` is HTTP 404, with no distinction between missing, pending, and disabled.
+1. `GET /internal/gate/sites/<slug>/status` on every request. This is not cached. Anything other than `approved` is HTTP 404. A registered site that is pending or disabled answers `site_not_active` with a short `hint`, and nothing is charged. Pending and disabled look the same. An unknown slug answers `not_found`.
 2. The site record (origin URL, routes, rails, `x402_mode`) is cached for `SATSGATE_GATE_CACHE_SECONDS` (default 5). A config that still contains `origin_secret` is rejected. A disable still takes effect on the next request because step 1 is uncached.
 3. The path after the slug is an exact route. `/slug` and `/slug/` are the route `/`. The query string is not part of the match and is not copied onto `redeem_url`. Unknown paths are 404. There is no free path.
 4. No payment header yet: core mints a challenge for resource `gate:<slug>:<path>`. The 402 adds `delivery: receipt`, `redeem_url` (origin plus path), `receipt_header: Satsgate-Receipt`, `seller_host`, and `terms_url` when `SATSGATE_TERMS_URL` is set. `Link` is `<redeem_url>; rel="satsgate-redeem"`. Lightning still sends `WWW-Authenticate: L402`. x402 still sends `PAYMENT-REQUIRED`. The resource description is `Satsgate receipt for {host}{path}`. Test mode prefixes the Base Sepolia test sentence. Nothing is debited yet.
@@ -62,7 +62,7 @@ Compose builds this directory and does not publish a port. Caddy is the only pub
 | `SATSGATE_ABUSE_CONTACT` | empty | Bare email included on `GET /`. |
 | `SATSGATE_TERMS_URL` | empty | https URL included on the 402 when set. |
 
-`GET /healthz` returns `{"ok": true, "component": "satsgate-gate", "version": "0.15.2"}`.
+`GET /healthz` returns `{"ok": true, "component": "satsgate-gate", "version": "0.15.3"}`.
 
 ## Turn on x402
 

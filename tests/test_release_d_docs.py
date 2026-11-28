@@ -60,7 +60,7 @@ def test_t_d_11_2_published_install_text_replaced_the_forthcoming_lines() -> Non
             assert phrase not in text, f"{phrase} in {path}"
 
 
-_CURRENT = {"0.20.3", "0.15.2", "0.15.1", "0.14.1", "0.10.1", "0.1.4"}
+_CURRENT = {"0.20.3", "0.15.3", "0.15.2", "0.15.1", "0.14.1", "0.10.1", "0.1.4"}
 _VERSION_FILES = (
     "README.md",
     "CUSTOMER_QUICKSTART.md",
@@ -98,7 +98,7 @@ def test_t_d_11_1_current_component_versions() -> None:
             for found in pattern.findall(text):
                 assert found in _CURRENT, f"{found} in {rel}"
     gate = (ROOT / "gate" / "README.md").read_text(encoding="utf-8")
-    assert '"version": "0.15.2"' in gate
+    assert '"version": "0.15.3"' in gate
     assert "0.15.0" not in gate
 
 

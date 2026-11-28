@@ -98,8 +98,8 @@ def test_t_c_1_4_versions_match() -> None:
     assert '__version__ = "0.10.1"' in _text(ROOT / "sdk" / "python" / "src" / "satsgate_sdk" / "__init__.py")
     assert projects[ROOT / "proxy" / "pyproject.toml"]["version"] == "0.15.1"
     assert '__version__ = "0.15.1"' in _text(ROOT / "proxy" / "src" / "satsgate_proxy" / "__init__.py")
-    assert 'APP_VERSION = "0.20.4"' in _text(ROOT / "app" / "config.py")
-    assert '__version__ = "0.15.2"' in _text(ROOT / "gate" / "src" / "satsgate_gate" / "__init__.py")
+    assert 'APP_VERSION = "0.20.5"' in _text(ROOT / "app" / "config.py")
+    assert '__version__ = "0.15.3"' in _text(ROOT / "gate" / "src" / "satsgate_gate" / "__init__.py")
     assert projects[ROOT / "mcp" / "pyproject.toml"]["version"] == "0.14.1"
     assert '__version__ = "0.14.1"' in _text(ROOT / "mcp" / "src" / "satsgate_mcp" / "__init__.py")
 

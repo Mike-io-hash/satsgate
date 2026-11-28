@@ -220,7 +220,7 @@ FastAPI examples:
 
 ## Hosted gate
 
-Core stores a site, and `satsgate-gate` charges at `https://gate.satsgate.org/<slug>/...` after an operator approves it. The gate returns a signed receipt. It does not call your origin. The buyer repeats the request at your origin with `Satsgate-Receipt`. The Caddy site block for that hostname is in the repo. Registering a site does not change challenge, verify, or status on `api.satsgate.org`. Details are in the README section "Hosted sites (closed beta)" and in `gate/README.md`.
+Core stores a site, and `satsgate-gate` charges at `https://gate.satsgate.org/<slug>/...` once the site is approved. A new site goes live by itself after a successful origin check and acceptance of the current terms. `GET /v1/sites/{slug}` shows what is missing in `site.activation`. The gate returns a signed receipt. It does not call your origin. The buyer repeats the request at your origin with `Satsgate-Receipt`. The Caddy site block for that hostname is in the repo. Registering a site does not change challenge, verify, or status on `api.satsgate.org`. Details are in [docs/api.md](docs/api.md#hosted-sites) and in `gate/README.md`.
 
 ## Usage & automation
 

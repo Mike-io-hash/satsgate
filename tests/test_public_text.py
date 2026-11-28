@@ -1,7 +1,7 @@
 """Public text guard: style, placeholders, internal names.
 
 T-DM.1 through T-DM.9. ``tests/fixtures/openapi-0.20.3.json`` is the historical
-production snapshot of core 0.20.3. The OpenAPI test pins the exact 0.20.4
+production snapshot of core 0.20.3. The OpenAPI test pins the exact 0.20.5
 delta against that snapshot: ``info.version`` and the two route descriptions.
 An unknown core version fails instead of skipping.
 """
@@ -32,7 +32,6 @@ BASE = "c66646745328eb4c6a1bd33c6668a4b549298af3"
 RULES_PATH = ROOT / "tests" / "data" / "public_text_rules.json"
 GOLDEN = ROOT / "tests" / "fixtures" / "openapi-0.20.3.json"
 README_TOKENS = ROOT / "tests" / "fixtures" / "readme-base-tokens.json"
-TREE_BASE = ROOT / "tests" / "fixtures" / "tree-base.json"
 HEADLINE = (
     "Charge AI agents in Lightning and USDC on the same 402. "
     "Payments go straight to your wallet. 500 free unlocks a month."
@@ -49,6 +48,7 @@ DROPPED = {
     "Prepaid balance (milisatoshis)": "Spelling corrected to millisatoshis.",
     "x402 on Base Sepolia (0.12.0)": "Recorded in the 0.12.0 changelog entry.",
     "Hosted gate x402 (gate 0.12.0)": "Recorded in the 0.12.0 changelog entry.",
+    "Hosted sites (closed beta)": "The hosted gate is open; the heading is now Hosted sites.",
 }
 README_HEADINGS = (
     "Who it is for",
@@ -371,7 +371,6 @@ def scan(root: Path = ROOT, *, extra_digests: set[str] | None = None) -> list[tu
         if rel in {
             "tests/data/public_text_rules.json",
             "tests/test_public_text.py",
-            "tests/fixtures/tree-base.json",
             "tests/fixtures/openapi-0.20.3.json",
         } or _frozen(rel):
             continue
@@ -582,17 +581,6 @@ def _load_production_openapi(db_path: Path) -> dict:
         os.environ.update(saved)
 
 
-def _strip_docstrings(tree: ast.AST) -> None:
-    for node in ast.walk(tree):
-        body = getattr(node, "body", None)
-        if not isinstance(body, list) or not body:
-            continue
-        first = body[0]
-        if isinstance(first, ast.Expr) and isinstance(getattr(first, "value", None), ast.Constant):
-            if isinstance(first.value.value, str):
-                node.body = body[1:]
-
-
 def _metadata_text(path: Path) -> str:
     if path.suffix == ".whl":
         with zipfile.ZipFile(path) as archive:
@@ -706,7 +694,7 @@ def test_t_dm_3_2_readme_shape() -> None:
     assert "Tested end-to-end on mainnet with small amounts" in text
     assert "Per-tool pricing for remote MCP servers" in text
     assert "TypeScript SDK" in text
-    assert "closed beta" in text.lower()
+    assert "closed beta" not in text.lower()
     for url in (
         "https://satsgate.org/terms",
         "https://pypi.org/project/satsgate/",
@@ -795,10 +783,9 @@ def _app_version() -> str:
     return re.search(r'^APP_VERSION = "([^"]+)"', text, re.M).group(1)
 
 
-_CORE_VERSION = "0.20.4"
+_CORE_VERSION = "0.20.5"
 _VERSION_REFRESH = "core version changed: refresh the OpenAPI snapshot and its expected delta"
 _OPENAPI_SHA256 = "f93c71e3b43da7f9fe3acaabefeaa3ce559c09e7cb998713518f84fdc1f4ff8b"
-_TREE_SHA256 = "5e6a383386d43a51f6276340078265bee6c715707f0114114af3c3e66c780af2"
 _FORECAST_OLD = "Pace of recent paid unlocks, in milisatoshis. Never names a pack."
 _FORECAST_NEW = "Pace of recent paid unlocks, in millisatoshis. Never names a pack."
 _TOPUP_OLD = (
@@ -812,23 +799,14 @@ _TOPUP_NEW = (
     "key cannot top up. The credited millisatoshis include the per-top-up bonus."
 )
 _OPENAPI_DELTA = (
-    (("info", "version"), "0.20.3", "0.20.4"),
+    (("info", "version"), "0.20.3", "0.20.5"),
     (("paths", "/v1/usage/forecast", "get", "description"), _FORECAST_OLD, _FORECAST_NEW),
     (("paths", "/v1/topup/lightning", "post", "description"), _TOPUP_OLD, _TOPUP_NEW),
 )
-_HELP_NEW = "Convert satsgate credits to millisatoshis (1 credit = 2000 msat)."
-_HELP_OLD = "Convert satsgate credits to milisatoshis (1 credit = 2000 msat)."
-_ERROR_NEW = "refusing to overwrite millisat balances: "
-_ERROR_OLD = "refusing to overwrite milisat balances: "
-_APP_TEXT_MAP = {
-    "app/config.py": {"0.20.4": "0.20.3"},
-    "app/migrate_credits_to_msat.py": {_HELP_NEW: _HELP_OLD, _ERROR_NEW: _ERROR_OLD},
-}
 _SPELLING_EXEMPT = {
     "docs/terms/2026-11-13.md": "Frozen terms.",
     "tests/fixtures/terms-2026-11-13-index.html": "Frozen terms.",
     "tests/fixtures/openapi-0.20.3.json": "Historical production snapshot.",
-    "tests/fixtures/tree-base.json": "Historical AST snapshot.",
     "tests/fixtures/readme-base-tokens.json": "Historical README heading tokens.",
     "tests/test_public_text.py": "This guard names the pattern it rejects.",
 }
@@ -865,61 +843,6 @@ def test_t_m1_2_openapi_delta_is_exact(tmp_path: Path) -> None:
         _put(expected, path, new)
     live = _load_production_openapi(tmp_path / "openapi.sqlite3")
     assert _canonical(live) == _canonical(expected)
-
-
-def _stripped_dump(text: str) -> str:
-    tree = ast.parse(text)
-    _strip_docstrings(tree)
-    return ast.dump(tree)
-
-
-def _mapped_dump(rel: str, text: str) -> str:
-    replacements = _APP_TEXT_MAP.get(rel, {})
-    if "0.20.4" in replacements and rel != "app/config.py":
-        raise AssertionError(f"core version mapping applies only to app/config.py, not {rel}")
-    tree = ast.parse(text)
-    _strip_docstrings(tree)
-    if replacements:
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in replacements:
-                node.value = replacements[node.value]
-    return ast.dump(tree)
-
-
-def test_t_m1_3_app_changes_are_text_only() -> None:
-    """T-M1.3. Docstring-stripped app trees match the snapshot after the pinned text map.
-
-    The base commit is cross-checked when this clone has it.
-    """
-    _require_current_core()
-    assert hashlib.sha256(TREE_BASE.read_bytes()).hexdigest() == _TREE_SHA256
-    snapshot = json.loads(TREE_BASE.read_text(encoding="utf-8"))
-    current_app: dict[str, str] = {}
-    for path in sorted((ROOT / "app").rglob("*.py")):
-        rel = path.relative_to(ROOT).as_posix()
-        current_app[rel] = _mapped_dump(rel, path.read_text(encoding="utf-8"))
-    assert current_app.keys() == snapshot["app"].keys()
-    for rel, dumped in current_app.items():
-        assert dumped == snapshot["app"][rel], rel
-    for rel, digest in snapshot["unchanged"].items():
-        assert hashlib.sha256((ROOT / rel).read_bytes()).hexdigest() == digest, rel
-    proc = subprocess.run(
-        ["git", "diff", "--name-only", BASE, "--", "app", "gate/src", "web/connect/src"],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        return
-    changed = [line for line in proc.stdout.splitlines() if line]
-    assert not any(line.startswith("gate/src/") or line.startswith("web/connect/src/") for line in changed)
-    for rel in changed:
-        assert rel.endswith(".py"), rel
-        old = _git_bytes(f"{BASE}:{rel}")
-        assert old is not None
-        current = _mapped_dump(rel, (ROOT / rel).read_text(encoding="utf-8"))
-        assert current == _stripped_dump(old.decode()), rel
 
 
 def test_t_m1_4_spelling_scan() -> None:

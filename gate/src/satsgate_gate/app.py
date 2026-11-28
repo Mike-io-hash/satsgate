@@ -37,8 +37,13 @@ _METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 _ALLOWED = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"})
 _POLL_HINT = (
     "Pay the invoice, then retry with Authorization: L402 <macaroon>:<preimage>. "
-    "If the wallet does not return a preimage, retry with Authorization: L402 <macaroon> "
-    "and this gate will poll until the invoice settles."
+    "If the wallet does not return a preimage, retry with Authorization: L402 <macaroon>. "
+    "That works only when the seller's Lightning Address supports LUD-21 verify. "
+    "If the answer has reason preimage_required, do not pay the new invoice; send the preimage."
+)
+_INACTIVE_HINT = (
+    "This site is registered but is not taking payments. Nothing was charged. "
+    "If you own it, GET /v1/sites/{slug} on the Satsgate API shows what is missing."
 )
 _PENDING_HINT = (
     "The invoice is not settled yet. Retry the same Authorization header. Do not pay a new invoice."
@@ -234,6 +239,9 @@ async def _load_site(request: Request, slug: str) -> CachedSite | JSONResponse:
     if state == "missing":
         cache.drop(slug)
         return _json(404, "not_found")
+    if state == "inactive":
+        cache.drop(slug)
+        return _json(404, "site_not_active", hint=_INACTIVE_HINT)
     if state != "approved":
         cache.drop(slug)
         return _json(502, "paywall_unavailable")

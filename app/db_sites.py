@@ -1,4 +1,4 @@
-"""Sites and routes for the hosted proxy beta.
+"""Sites and routes for the hosted gate.
 
 Registration checks the origin once. A name can be pointed at a private
 address later (DNS rebinding). Origin verification resolves again, through

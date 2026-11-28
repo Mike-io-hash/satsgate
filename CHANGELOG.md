@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.5] - 2026-11-28
+
+Documentation and hosted gate onboarding improvements. Core **0.20.5** and hosted gate **0.15.3**. Packages are unchanged and nothing is published. No new table, column, or environment variable.
+
+### Changed
+- The README, the customer quickstart, the API reference, and the gate README describe the open hosted gate: a new site goes live by itself after a successful origin check and acceptance of the current terms. The self-hosted proxy needs no approval.
+- `POST /v1/sites` returns a note that matches the server: approval by itself after the origin check and the current terms, or operator approval when `SATSGATE_SITES_AUTO_APPROVE` is off.
+- Owner site views include `activation`, with `live` and the `reasons` a site is not live yet.
+- `terms_not_accepted` returns `terms_version` and `terms_url`. `/.well-known/satsgate.json` adds `terms_version` and a current `description`.
+- The hosted gate answers 404 `site_not_active` with a `hint` for a registered site that is not approved, instead of `not_found`. Pending and disabled look the same. An unknown slug still answers `not_found`. Nothing is charged.
+- The Lightning `hint` in a gate 402 says that a retry without a preimage works only when the seller's Lightning Address supports LUD-21 verify.
+
 ## [Terms] - 2026-11-27
 
 The hosted-gate terms at `https://satsgate.org/terms` take effect on 2026-11-27. The previous terms stay at `/terms/2026-11-13`. Core stays 0.20.4 and the hosted gate 0.15.2. This release does not publish packages and does not turn auto-approve on.
